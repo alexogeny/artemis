@@ -1,14 +1,6 @@
 """Artemis asynchronous multi-tenant web framework."""
 
 from .application import Artemis, ArtemisApp
-from .chatops import (
-    ChatMessage,
-    ChatOpsConfig,
-    ChatOpsError,
-    ChatOpsRoute,
-    ChatOpsService,
-    SlackWebhookConfig,
-)
 from .authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -18,6 +10,16 @@ from .authentication import (
     PasskeyManager,
     PasswordHasher,
     SamlAuthenticator,
+)
+from .chatops import (
+    ChatMessage,
+    ChatOpsConfig,
+    ChatOpsError,
+    ChatOpsInstrumentationConfig,
+    ChatOpsInstrumentor,
+    ChatOpsRoute,
+    ChatOpsService,
+    SlackWebhookConfig,
 )
 from .config import AppConfig
 from .database import Database, DatabaseConfig, PoolConfig
@@ -81,11 +83,6 @@ from .testing import TestClient
 
 __all__ = [
     "ORM",
-    "ChatMessage",
-    "ChatOpsConfig",
-    "ChatOpsError",
-    "ChatOpsRoute",
-    "ChatOpsService",
     "AdminPasskey",
     "AdminRoleAssignment",
     "AdminUser",
@@ -103,12 +100,18 @@ __all__ = [
     "CedarEntity",
     "CedarPolicy",
     "CedarReference",
+    "ChatMessage",
+    "ChatOpsConfig",
+    "ChatOpsError",
+    "ChatOpsInstrumentationConfig",
+    "ChatOpsInstrumentor",
+    "ChatOpsRoute",
+    "ChatOpsService",
     "CustomPermission",
     "Customer",
     "Database",
     "DatabaseConfig",
     "DependencyProvider",
-    "SlackWebhookConfig",
     "FederatedIdentityDirectory",
     "FederatedProvider",
     "HTTPError",
@@ -141,6 +144,7 @@ __all__ = [
     "SamlAuthenticator",
     "SessionLevel",
     "SessionToken",
+    "SlackWebhookConfig",
     "Subscription",
     "SubscriptionStatus",
     "TenantContext",
