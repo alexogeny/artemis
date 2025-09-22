@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import types
-from typing import Any
+from typing import Any, cast
 
 import pytest
 
@@ -18,6 +18,7 @@ from artemis import (
     Observability,
     ObservabilityConfig,
     Request,
+    Response,
     SlackWebhookConfig,
     TenantContext,
     TenantScope,
@@ -107,7 +108,7 @@ class StubSentryHub:
     def __init__(self) -> None:
         self.breadcrumbs: list[dict[str, Any]] = []
         self.captured: list[BaseException] = []
-        self.scopes: list[StubScope] = []
+        self.scopes: list[Any] = []
 
     def add_breadcrumb(self, **breadcrumb: Any) -> None:
         self.breadcrumbs.append(breadcrumb)
@@ -135,7 +136,7 @@ class StubStatsd:
 
 def setup_stub_opentelemetry(monkeypatch: pytest.MonkeyPatch) -> StubTracer:
     tracer = StubTracer()
-    trace_module = types.ModuleType("opentelemetry.trace")
+    trace_module = cast(Any, types.ModuleType("opentelemetry.trace"))
     trace_module.get_tracer = lambda name: tracer
     trace_module.SpanKind = types.SimpleNamespace(CLIENT="client")
 
@@ -146,7 +147,7 @@ def setup_stub_opentelemetry(monkeypatch: pytest.MonkeyPatch) -> StubTracer:
 
     trace_module.Status = Status
     trace_module.StatusCode = types.SimpleNamespace(OK="ok", ERROR="error")
-    otel_module = types.ModuleType("opentelemetry")
+    otel_module = cast(Any, types.ModuleType("opentelemetry"))
     otel_module.trace = trace_module
     monkeypatch.setitem(sys.modules, "opentelemetry", otel_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
@@ -155,10 +156,10 @@ def setup_stub_opentelemetry(monkeypatch: pytest.MonkeyPatch) -> StubTracer:
 
 def setup_stub_opentelemetry_without_status(monkeypatch: pytest.MonkeyPatch) -> StubTracer:
     tracer = StubTracer()
-    trace_module = types.ModuleType("opentelemetry.trace")
+    trace_module = cast(Any, types.ModuleType("opentelemetry.trace"))
     trace_module.get_tracer = lambda name: tracer
     trace_module.SpanKind = types.SimpleNamespace(CLIENT="client")
-    otel_module = types.ModuleType("opentelemetry")
+    otel_module = cast(Any, types.ModuleType("opentelemetry"))
     otel_module.trace = trace_module
     monkeypatch.setitem(sys.modules, "opentelemetry", otel_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
@@ -199,7 +200,7 @@ class NoRecordTracer:
 
 def setup_stub_opentelemetry_without_record(monkeypatch: pytest.MonkeyPatch) -> NoRecordTracer:
     tracer = NoRecordTracer()
-    trace_module = types.ModuleType("opentelemetry.trace")
+    trace_module = cast(Any, types.ModuleType("opentelemetry.trace"))
     trace_module.get_tracer = lambda name: tracer
     trace_module.SpanKind = types.SimpleNamespace(CLIENT="client")
 
@@ -210,7 +211,7 @@ def setup_stub_opentelemetry_without_record(monkeypatch: pytest.MonkeyPatch) -> 
 
     trace_module.Status = Status
     trace_module.StatusCode = types.SimpleNamespace(OK="ok", ERROR="error")
-    otel_module = types.ModuleType("opentelemetry")
+    otel_module = cast(Any, types.ModuleType("opentelemetry"))
     otel_module.trace = trace_module
     monkeypatch.setitem(sys.modules, "opentelemetry", otel_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
@@ -223,7 +224,7 @@ def setup_stub_sentry(monkeypatch: pytest.MonkeyPatch) -> StubSentryHub:
     class Hub:
         current = hub
 
-    sentry_module = types.ModuleType("sentry_sdk")
+    sentry_module = cast(Any, types.ModuleType("sentry_sdk"))
     sentry_module.Hub = Hub
     monkeypatch.setitem(sys.modules, "sentry_sdk", sentry_module)
     return hub
@@ -231,7 +232,7 @@ def setup_stub_sentry(monkeypatch: pytest.MonkeyPatch) -> StubSentryHub:
 
 def setup_stub_datadog(monkeypatch: pytest.MonkeyPatch) -> StubStatsd:
     statsd = StubStatsd()
-    datadog_module = types.ModuleType("datadog")
+    datadog_module = cast(Any, types.ModuleType("datadog"))
     datadog_module.statsd = statsd
     monkeypatch.setitem(sys.modules, "datadog", datadog_module)
     return statsd
@@ -855,7 +856,7 @@ def test_observability_request_success_without_status(monkeypatch: pytest.Monkey
     context = observability.on_request_start(request)
     assert context is not None
 
-    observability.on_request_success(context, types.SimpleNamespace())
+    observability.on_request_success(context, cast(Response, types.SimpleNamespace()))
 
     assert statsd.timings
 
@@ -896,7 +897,7 @@ def test_observability_request_error_without_metrics(monkeypatch: pytest.MonkeyP
 
 def test_observability_request_success_context_none() -> None:
     observability = Observability(ObservabilityConfig(datadog_enabled=False))
-    observability.on_request_success(None, types.SimpleNamespace())
+    observability.on_request_success(None, Response())
 
 
 def test_observability_request_success_without_timing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -917,7 +918,7 @@ def test_observability_request_success_without_timing(monkeypatch: pytest.Monkey
     context.metric_timing = None
 
     before_timings = len(statsd.timings)
-    observability.on_request_success(context, types.SimpleNamespace(status=204))
+    observability.on_request_success(context, Response(status=204))
 
     assert len(statsd.timings) == before_timings
 
@@ -1012,7 +1013,7 @@ def test_observability_request_success_without_status_with_span(
     context = observability.on_request_start(request)
     assert context is not None
 
-    observability.on_request_success(context, types.SimpleNamespace())
+    observability.on_request_success(context, cast(Response, types.SimpleNamespace()))
 
     assert statsd.timings
 
@@ -1034,7 +1035,7 @@ def test_observability_request_success_without_status_support(monkeypatch: pytes
     context = observability.on_request_start(request)
     assert context is not None
 
-    observability.on_request_success(context, types.SimpleNamespace(status=200))
+    observability.on_request_success(context, Response(status=200))
 
     assert statsd.timings
 
