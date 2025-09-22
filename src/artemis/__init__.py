@@ -15,6 +15,16 @@ from .config import AppConfig
 from .database import Database, DatabaseConfig, PoolConfig
 from .dependency import DependencyProvider
 from .exceptions import ArtemisError, HTTPError
+from .migrations import (
+    Migration,
+    MigrationContext,
+    MigrationError,
+    MigrationRunner,
+    MigrationScope,
+    create_table_for_model,
+    generate_schema_migrations,
+    run_sql,
+)
 from .models import (
     AdminPasskey,
     AdminRoleAssignment,
@@ -92,6 +102,11 @@ __all__ = [
     "MfaCode",
     "MfaManager",
     "MfaPurpose",
+    "Migration",
+    "MigrationContext",
+    "MigrationError",
+    "MigrationRunner",
+    "MigrationScope",
     "Model",
     "ModelManager",
     "ModelRegistry",
@@ -127,9 +142,12 @@ __all__ = [
     "bindings_from_admin",
     "bindings_from_users",
     "build_engine",
+    "create_table_for_model",
     "default_registry",
+    "generate_schema_migrations",
     "get",
     "model",
     "post",
     "route",
+    "run_sql",
 ]

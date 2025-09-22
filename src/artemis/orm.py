@@ -5,7 +5,8 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Callable, Generic, Iterable, Mapping, Sequence, TypeVar, get_type_hints
+from typing import Any, Callable, ClassVar, Generic, Iterable, Mapping, Sequence, TypeVar, get_type_hints
+from weakref import WeakSet
 
 import msgspec
 from msgspec.inspect import NODEFAULT, StructType, type_info
@@ -17,7 +18,28 @@ M = TypeVar("M", bound="Model")
 
 
 class Model(msgspec.Struct, frozen=True, omit_defaults=True, kw_only=True):
-    """Base class for all ORM models."""
+    """Base class for all ORM models.
+
+    Every subclass is automatically tracked so that features such as the
+    migration tooling can discover declared models without requiring manual
+    registration.  Registries remain useful for runtime lookups, but the
+    tracking performed here ensures that simply defining a subclass is enough
+    for schema generation.
+    """
+
+    _declared_models: ClassVar[WeakSet[type["Model"]]] = WeakSet()
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # pragma: no cover - exercised indirectly
+        super().__init_subclass__(**kwargs)
+        if cls is Model:
+            return
+        Model._declared_models.add(cls)
+
+    @classmethod
+    def declared_models(cls) -> tuple[type["Model"], ...]:
+        """Return all known ``Model`` subclasses."""
+
+        return tuple(cls._declared_models)
 
 
 class ModelScope(str, Enum):
@@ -116,6 +138,7 @@ def model(
             identity=tuple(identity),
             accessor=accessor or table,
         )
+        setattr(cls, "__model_info__", info)
         reg.register(info)
         return cls
 
