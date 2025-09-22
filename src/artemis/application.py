@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 
 import msgspec
 
+from .chatops import ChatOpsService
 from .config import AppConfig
 from .database import Database
 from .dependency import DependencyProvider
@@ -36,6 +37,7 @@ class ArtemisApp:
         tenant_resolver: TenantResolver | None = None,
         database: Database | None = None,
         orm: ORM | None = None,
+        chatops: ChatOpsService | None = None,
     ) -> None:
         self.config = config or AppConfig()
         self.router = Router()
@@ -50,6 +52,7 @@ class ArtemisApp:
         )
         self.database = database or (Database(self.config.database) if self.config.database else None)
         self.orm = orm or (ORM(self.database) if self.database else None)
+        self.chatops = chatops or ChatOpsService(self.config.chatops)
         self._middlewares: list[MiddlewareCallable] = []
         self._startup_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._shutdown_hooks: list[Callable[[], Awaitable[None] | None]] = []
@@ -61,6 +64,7 @@ class ArtemisApp:
             self.on_shutdown(self.database.shutdown)
         if self.orm:
             self.dependencies.provide(ORM, lambda: self.orm)
+        self.dependencies.provide(ChatOpsService, lambda: self.chatops)
 
     # ------------------------------------------------------------------ routing
     def route(

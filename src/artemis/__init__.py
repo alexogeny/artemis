@@ -1,6 +1,14 @@
 """Artemis asynchronous multi-tenant web framework."""
 
 from .application import Artemis, ArtemisApp
+from .chatops import (
+    ChatMessage,
+    ChatOpsConfig,
+    ChatOpsError,
+    ChatOpsRoute,
+    ChatOpsService,
+    SlackWebhookConfig,
+)
 from .authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -73,6 +81,11 @@ from .testing import TestClient
 
 __all__ = [
     "ORM",
+    "ChatMessage",
+    "ChatOpsConfig",
+    "ChatOpsError",
+    "ChatOpsRoute",
+    "ChatOpsService",
     "AdminPasskey",
     "AdminRoleAssignment",
     "AdminUser",
@@ -95,6 +108,7 @@ __all__ = [
     "Database",
     "DatabaseConfig",
     "DependencyProvider",
+    "SlackWebhookConfig",
     "FederatedIdentityDirectory",
     "FederatedProvider",
     "HTTPError",
