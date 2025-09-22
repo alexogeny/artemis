@@ -8,10 +8,12 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
 import msgspec
 
 from .config import AppConfig
+from .database import Database
 from .dependency import DependencyProvider
 from .exceptions import HTTPError
 from .execution import TaskExecutor
 from .middleware import MiddlewareCallable, apply_middleware
+from .orm import ORM
 from .requests import Request
 from .responses import JSONResponse, PlainTextResponse, Response, exception_to_response
 from .routing import Router
@@ -31,6 +33,8 @@ class ArtemisApp:
         dependency_provider: DependencyProvider | None = None,
         executor: TaskExecutor | None = None,
         tenant_resolver: TenantResolver | None = None,
+        database: Database | None = None,
+        orm: ORM | None = None,
     ) -> None:
         self.config = config or AppConfig()
         self.router = Router()
@@ -43,10 +47,19 @@ class ArtemisApp:
             marketing_tenant=self.config.marketing_tenant,
             allowed_tenants=self.config.allowed_tenants or None,
         )
+        self.database = database or (Database(self.config.database) if self.config.database else None)
+        self.orm = orm or (ORM(self.database) if self.database else None)
         self._middlewares: list[MiddlewareCallable] = []
         self._startup_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._shutdown_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._named_routes: dict[str, str] = {}
+
+        if self.database:
+            self.dependencies.provide(Database, lambda: self.database)
+            self.on_startup(self.database.startup)
+            self.on_shutdown(self.database.shutdown)
+        if self.orm:
+            self.dependencies.provide(ORM, lambda: self.orm)
 
     # ------------------------------------------------------------------ routing
     def route(

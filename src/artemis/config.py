@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from msgspec import Struct
 
+from .database import DatabaseConfig
 from .execution import ExecutionConfig
 
 
@@ -16,6 +17,7 @@ class AppConfig(Struct, frozen=True):
     marketing_tenant: str = "public"
     allowed_tenants: tuple[str, ...] = ()
     execution: ExecutionConfig = ExecutionConfig()
+    database: DatabaseConfig | None = None
 
     def tenant_host(self, tenant: str) -> str:
         """Return the hostname for a given tenant."""

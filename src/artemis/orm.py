@@ -1,0 +1,462 @@
+"""Declarative ORM for Artemis models."""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass
+from enum import Enum
+from typing import Any, Callable, Generic, Iterable, Mapping, Sequence, TypeVar, get_type_hints
+
+import msgspec
+from msgspec.inspect import NODEFAULT, StructType, type_info
+
+from .database import Database, _quote_identifier
+from .tenancy import TenantContext
+
+M = TypeVar("M", bound="Model")
+
+
+class Model(msgspec.Struct, frozen=True, omit_defaults=True, kw_only=True):
+    """Base class for all ORM models."""
+
+
+class ModelScope(str, Enum):
+    """Supported model scopes."""
+
+    ADMIN = "admin"
+    TENANT = "tenant"
+
+
+@dataclass(slots=True)
+class FieldInfo:
+    """Metadata describing a model field."""
+
+    name: str
+    column: str
+    python_type: type[Any]
+    has_default: bool
+    default: Any
+    default_factory: Callable[[], Any] | None
+
+
+@dataclass(slots=True)
+class ModelInfo(Generic[M]):
+    """Metadata describing a registered model."""
+
+    model: type[M]
+    table: str
+    scope: str
+    schema: str | None
+    identity: tuple[str, ...]
+    fields: tuple[FieldInfo, ...]
+    accessor: str
+    field_map: Mapping[str, FieldInfo]
+
+
+class ModelRegistry:
+    """Registry mapping models to metadata for runtime lookups."""
+
+    def __init__(self) -> None:
+        self._models: dict[type[Model], ModelInfo[Any]] = {}
+        self._accessors: dict[tuple[str, str], ModelInfo[Any]] = {}
+
+    def register(self, info: ModelInfo[Any]) -> None:
+        if info.model in self._models:
+            raise ValueError(f"Model {info.model.__name__} already registered")
+        accessor_key = (info.scope, info.accessor)
+        if accessor_key in self._accessors:
+            raise ValueError(f"Accessor '{info.accessor}' already registered for scope {info.scope}")
+        self._models[info.model] = info
+        self._accessors[accessor_key] = info
+
+    def info_for(self, model: type[M]) -> ModelInfo[M]:
+        try:
+            info = self._models[model]
+        except KeyError as exc:  # pragma: no cover - defensive branch
+            raise LookupError(f"Model {model.__name__} is not registered") from exc
+        return info  # type: ignore[return-value]
+
+    def get_by_accessor(self, scope: str, accessor: str) -> ModelInfo[Any]:
+        try:
+            return self._accessors[(scope, accessor)]
+        except KeyError as exc:
+            raise LookupError(f"Model accessor '{accessor}' not registered for scope {scope}") from exc
+
+    def models(self) -> Iterable[ModelInfo[Any]]:
+        return self._models.values()
+
+
+_default_registry = ModelRegistry()
+
+
+def default_registry() -> ModelRegistry:
+    """Return the shared global registry."""
+
+    return _default_registry
+
+
+def model(
+    *,
+    scope: ModelScope,
+    table: str,
+    schema: str | None = None,
+    identity: Sequence[str] = ("id",),
+    accessor: str | None = None,
+    registry: ModelRegistry | None = None,
+) -> Callable[[type[M]], type[M]]:
+    """Class decorator used to register ORM models."""
+
+    def decorator(cls: type[M]) -> type[M]:
+        reg = registry or _default_registry
+        info = _build_model_info(
+            cls,
+            scope=scope.value,
+            table=table,
+            schema=schema,
+            identity=tuple(identity),
+            accessor=accessor or table,
+        )
+        reg.register(info)
+        return cls
+
+    return decorator
+
+
+class ORM:
+    """Runtime object responsible for executing SQL for models."""
+
+    def __init__(self, database: Database, registry: ModelRegistry | None = None) -> None:
+        self.database = database
+        self.registry = registry or _default_registry
+        self.admin = _Namespace(self, ModelScope.ADMIN.value)
+        self.tenants = _Namespace(self, ModelScope.TENANT.value)
+
+    async def insert(self, model: type[M], data: M | Mapping[str, Any], *, tenant: TenantContext | None = None) -> M:
+        info = self.registry.info_for(model)
+        instance = self._coerce_instance(info, data)
+        return await self._insert(info, instance, tenant)
+
+    async def select(
+        self,
+        model: type[M],
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+        order_by: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[M]:
+        info = self.registry.info_for(model)
+        rows = await self._select(info, tenant=tenant, filters=filters, order_by=order_by, limit=limit)
+        return [msgspec.convert(row, type=info.model) for row in rows]
+
+    async def update(
+        self,
+        model: type[M],
+        values: Mapping[str, Any],
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> list[M]:
+        info = self.registry.info_for(model)
+        rows = await self._update(info, values, tenant=tenant, filters=filters)
+        return [msgspec.convert(row, type=info.model) for row in rows]
+
+    async def delete(
+        self,
+        model: type[M],
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> int:
+        info = self.registry.info_for(model)
+        return await self._delete(info, tenant=tenant, filters=filters)
+
+    def manager(self, model: type[M]) -> "ModelManager[M]":
+        info = self.registry.info_for(model)
+        return ModelManager(self, info)
+
+    async def _insert(self, info: ModelInfo[M], instance: M, tenant: TenantContext | None) -> M:
+        payload = msgspec.to_builtins(instance)
+        columns: list[str] = []
+        values: list[Any] = []
+        for field in info.fields:
+            if field.name not in payload:
+                continue
+            columns.append(_quote_identifier(field.column))
+            values.append(payload[field.name])
+        placeholders = ", ".join(f"${idx}" for idx in range(1, len(values) + 1))
+        returning = self._projection(info)
+        schema = self.database.schema_for_model(info, tenant)
+        table = f"{_quote_identifier(schema)}.{_quote_identifier(info.table)}"
+        sql = f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) RETURNING {returning}"
+        async with self.database.connection_for_model(info, tenant=tenant) as connection:
+            rows = await connection.fetch_all(sql, values)
+        if not rows:
+            raise RuntimeError("Insert did not return any rows")  # pragma: no cover - safety net
+        return msgspec.convert(rows[0], type=info.model)
+
+    async def _select(
+        self,
+        info: ModelInfo[M],
+        *,
+        tenant: TenantContext | None,
+        filters: Mapping[str, Any] | None,
+        order_by: Sequence[str] | None,
+        limit: int | None,
+    ) -> list[dict[str, Any]]:
+        where_clause, parameters = self._build_filters(info, filters)
+        schema = self.database.schema_for_model(info, tenant)
+        table = f"{_quote_identifier(schema)}.{_quote_identifier(info.table)}"
+        sql = f"SELECT {self._projection(info)} FROM {table}"
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        if order_by:
+            sql += f" ORDER BY {', '.join(self._order_fragment(info, part) for part in order_by)}"
+        if limit is not None:
+            parameters.append(limit)
+            sql += f" LIMIT ${len(parameters)}"
+        async with self.database.connection_for_model(info, tenant=tenant) as connection:
+            return await connection.fetch_all(sql, parameters)
+
+    async def _update(
+        self,
+        info: ModelInfo[M],
+        values: Mapping[str, Any],
+        *,
+        tenant: TenantContext | None,
+        filters: Mapping[str, Any] | None,
+    ) -> list[dict[str, Any]]:
+        if not values:
+            return await self._select(info, tenant=tenant, filters=filters, order_by=None, limit=None)
+        set_clause, parameters = self._build_set(info, values)
+        where_clause, where_parameters = self._build_filters(info, filters, start=len(parameters) + 1)
+        parameters.extend(where_parameters)
+        schema = self.database.schema_for_model(info, tenant)
+        table = f"{_quote_identifier(schema)}.{_quote_identifier(info.table)}"
+        sql = f"UPDATE {table} SET {set_clause}"
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += f" RETURNING {self._projection(info)}"
+        async with self.database.connection_for_model(info, tenant=tenant) as connection:
+            return await connection.fetch_all(sql, parameters)
+
+    async def _delete(
+        self,
+        info: ModelInfo[M],
+        *,
+        tenant: TenantContext | None,
+        filters: Mapping[str, Any] | None,
+    ) -> int:
+        where_clause, parameters = self._build_filters(info, filters)
+        schema = self.database.schema_for_model(info, tenant)
+        table = f"{_quote_identifier(schema)}.{_quote_identifier(info.table)}"
+        sql = f"DELETE FROM {table}"
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+        sql += " RETURNING 1"
+        async with self.database.connection_for_model(info, tenant=tenant) as connection:
+            rows = await connection.fetch_all(sql, parameters)
+        return len(rows)
+
+    def _coerce_instance(self, info: ModelInfo[M], data: M | Mapping[str, Any]) -> M:
+        if isinstance(data, info.model):
+            return data
+        return msgspec.convert(data, type=info.model)
+
+    def _projection(self, info: ModelInfo[Any]) -> str:
+        parts: list[str] = []
+        for field in info.fields:
+            column = _quote_identifier(field.column)
+            if field.column != field.name:
+                alias = _quote_identifier(field.name)
+                parts.append(f"{column} AS {alias}")
+            else:
+                parts.append(column)
+        return ", ".join(parts)
+
+    def _order_fragment(self, info: ModelInfo[Any], expression: str) -> str:
+        direction = "ASC"
+        field_name = expression
+        if expression.lower().endswith(" desc"):
+            direction = "DESC"
+            field_name = expression[: -len(" desc")]
+        elif expression.lower().endswith(" asc"):
+            field_name = expression[: -len(" asc")]
+        field = self._resolve_field(info, field_name.strip())
+        return f"{_quote_identifier(field.column)} {direction}"
+
+    def _build_filters(
+        self,
+        info: ModelInfo[Any],
+        filters: Mapping[str, Any] | None,
+        *,
+        start: int = 1,
+    ) -> tuple[str, list[Any]]:
+        if not filters:
+            return "", []
+        parts: list[str] = []
+        parameters: list[Any] = []
+        index = start
+        for name, value in filters.items():
+            field = self._resolve_field(info, name)
+            parts.append(f"{_quote_identifier(field.column)} = ${index}")
+            parameters.append(value)
+            index += 1
+        return " AND ".join(parts), parameters
+
+    def _build_set(
+        self,
+        info: ModelInfo[Any],
+        values: Mapping[str, Any],
+    ) -> tuple[str, list[Any]]:
+        parts: list[str] = []
+        parameters: list[Any] = []
+        for idx, (name, value) in enumerate(values.items(), start=1):
+            field = self._resolve_field(info, name)
+            parts.append(f"{_quote_identifier(field.column)} = ${idx}")
+            parameters.append(value)
+        return ", ".join(parts), parameters
+
+    def _resolve_field(self, info: ModelInfo[Any], name: str) -> FieldInfo:
+        try:
+            return info.field_map[name]
+        except KeyError as exc:
+            raise LookupError(f"Unknown field '{name}' for model {info.model.__name__}") from exc
+
+
+class ModelManager(Generic[M]):
+    """Per-model convenience wrapper exposed on :class:`ORM`."""
+
+    def __init__(self, orm: ORM, info: ModelInfo[M]) -> None:
+        self._orm = orm
+        self._info = info
+
+    async def create(self, data: M | Mapping[str, Any], *, tenant: TenantContext | None = None) -> M:
+        return await self._orm._insert(self._info, self._orm._coerce_instance(self._info, data), tenant)
+
+    async def get(
+        self,
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> M | None:
+        rows = await self._orm._select(self._info, tenant=tenant, filters=filters, order_by=None, limit=1)
+        if not rows:
+            return None
+        return msgspec.convert(rows[0], type=self._info.model)
+
+    async def list(
+        self,
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+        order_by: Sequence[str] | None = None,
+        limit: int | None = None,
+    ) -> list[M]:
+        rows = await self._orm._select(
+            self._info,
+            tenant=tenant,
+            filters=filters,
+            order_by=order_by,
+            limit=limit,
+        )
+        return [msgspec.convert(row, type=self._info.model) for row in rows]
+
+    async def update(
+        self,
+        values: Mapping[str, Any],
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> list[M]:
+        rows = await self._orm._update(self._info, values, tenant=tenant, filters=filters)
+        return [msgspec.convert(row, type=self._info.model) for row in rows]
+
+    async def delete(
+        self,
+        *,
+        tenant: TenantContext | None = None,
+        filters: Mapping[str, Any] | None = None,
+    ) -> int:
+        return await self._orm._delete(self._info, tenant=tenant, filters=filters)
+
+
+class _Namespace:
+    def __init__(self, orm: ORM, scope: str) -> None:
+        self._orm = orm
+        self._scope = scope
+        self._cache: dict[str, ModelManager[Any]] = {}
+
+    def __getattr__(self, item: str) -> ModelManager[Any]:
+        if item.startswith("__"):
+            raise AttributeError(item)
+        try:
+            return self._cache[item]
+        except KeyError:
+            info = self._orm.registry.get_by_accessor(self._scope, item)
+            manager = ModelManager(self._orm, info)
+            self._cache[item] = manager
+            return manager
+
+
+def _build_model_info(
+    model: type[M],
+    *,
+    scope: str,
+    table: str,
+    schema: str | None,
+    identity: tuple[str, ...],
+    accessor: str,
+) -> ModelInfo[M]:
+    metadata = type_info(model)
+    if not isinstance(metadata, StructType):  # pragma: no cover - msgspec ensures this
+        raise TypeError(f"Model {model!r} is not a msgspec.Struct")
+    annotations = get_type_hints(model, include_extras=True)
+    fields: list[FieldInfo] = []
+    field_map: dict[str, FieldInfo] = {}
+    for field in metadata.fields:
+        python_type = annotations.get(field.name, Any)
+        default = field.default if field.default is not NODEFAULT else msgspec.UNSET
+        default_factory = field.default_factory if field.default_factory is not NODEFAULT else None
+        info = FieldInfo(
+            name=field.name,
+            column=field.encode_name,
+            python_type=python_type,
+            has_default=field.required is False,
+            default=default,
+            default_factory=default_factory,
+        )
+        fields.append(info)
+        field_map[field.name] = info
+    return ModelInfo(
+        model=model,
+        table=table,
+        scope=scope,
+        schema=schema,
+        identity=identity,
+        fields=tuple(fields),
+        accessor=_normalize_accessor(accessor),
+        field_map=field_map,
+    )
+
+
+_accessor_pattern = re.compile(r"[^a-z0-9_]+")
+
+
+def _normalize_accessor(name: str) -> str:
+    lowered = name.lower()
+    normalized = _accessor_pattern.sub("_", lowered)
+    return normalized.strip("_") or lowered
+
+
+__all__ = [
+    "ORM",
+    "FieldInfo",
+    "Model",
+    "ModelInfo",
+    "ModelManager",
+    "ModelRegistry",
+    "ModelScope",
+    "default_registry",
+    "model",
+]
