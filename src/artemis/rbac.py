@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import uuid
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -78,7 +77,7 @@ class CedarPolicy:
 class RoleBinding:
     principal_type: str
     principal_id: str
-    role_id: uuid.UUID
+    role_id: str
 
 
 class CedarEngine:
@@ -111,14 +110,14 @@ class CedarEngine:
 
 def bindings_from_admin(assignments: Iterable[AdminRoleAssignment]) -> list[RoleBinding]:
     return [
-        RoleBinding("AdminUser", str(item.admin_user_id), item.role_id)
+        RoleBinding("AdminUser", item.admin_user_id, item.role_id)
         for item in assignments
     ]
 
 
 def bindings_from_users(assignments: Iterable[UserRole]) -> list[RoleBinding]:
     return [
-        RoleBinding("User", str(item.user_id), item.role_id)
+        RoleBinding("User", item.user_id, item.role_id)
         for item in assignments
     ]
 

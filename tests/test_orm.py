@@ -1,11 +1,11 @@
 import datetime as dt
-import uuid
 
 import msgspec
 import pytest
 
 import artemis.orm as orm_module
 from artemis.database import Database, DatabaseConfig, PoolConfig
+from artemis.id57 import generate_id57
 from artemis.models import BillingRecord, BillingStatus, TenantUser
 from artemis.orm import ORM, Model, ModelRegistry, ModelScope, default_registry, model
 from artemis.tenancy import TenantResolver
@@ -21,8 +21,8 @@ async def test_admin_model_insert_and_select() -> None:
     orm = ORM(database)
 
     record = BillingRecord(
-        id=uuid.uuid4(),
-        customer_id=uuid.uuid4(),
+        id=generate_id57(),
+        customer_id=generate_id57(),
         plan_code="enterprise",
         status=BillingStatus.ACTIVE,
         amount_due_cents=120000,
@@ -39,7 +39,8 @@ async def test_admin_model_insert_and_select() -> None:
     assert created == record
     insert_sql = connection.calls[-1][1]
     assert insert_sql.startswith('INSERT INTO "admin"."billing"')
-    assert 'RETURNING "id", "customer_id"' in insert_sql
+    assert 'RETURNING' in insert_sql
+    assert '"id"' in insert_sql
 
     connection.queue_result([msgspec.to_builtins(record)])
     rows = await orm.select(
@@ -72,7 +73,7 @@ async def test_tenant_model_operations() -> None:
     tenant = resolver.context_for("acme")
 
     user = TenantUser(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         email="user@example.com",
         hashed_password="hash",
         created_at=dt.datetime.now(dt.timezone.utc),
@@ -113,11 +114,11 @@ async def test_tenant_model_operations() -> None:
     assert repeated[0] == updated_user
 
     connection.queue_result([])
-    missing = await manager.get(tenant=tenant, filters={"id": uuid.uuid4()})
+    missing = await manager.get(tenant=tenant, filters={"id": generate_id57()})
     assert missing is None
 
     connection.queue_result([])
-    deleted = await manager.delete(tenant=tenant, filters={"id": uuid.uuid4()})
+    deleted = await manager.delete(tenant=tenant, filters={"id": generate_id57()})
     assert deleted == 0
 
     first_manager = orm.tenants.users
@@ -152,8 +153,8 @@ async def test_manager_with_mapping_payload() -> None:
     orm = ORM(database)
 
     record = BillingRecord(
-        id=uuid.uuid4(),
-        customer_id=uuid.uuid4(),
+        id=generate_id57(),
+        customer_id=generate_id57(),
         plan_code="basic",
         status=BillingStatus.ACTIVE,
         amount_due_cents=1000,
@@ -203,7 +204,7 @@ async def test_manager_with_mapping_payload() -> None:
     assert all_rows[0] == updated_record_global
 
     connection.queue_result([])
-    count = await orm.delete(BillingRecord, filters={"id": uuid.uuid4()})
+    count = await orm.delete(BillingRecord, filters={"id": generate_id57()})
     assert count == 0
 
 

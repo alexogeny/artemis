@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import inspect
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping
+from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 
 import msgspec
 
@@ -14,9 +14,10 @@ from .exceptions import HTTPError
 from .execution import TaskExecutor
 from .middleware import MiddlewareCallable, apply_middleware
 from .orm import ORM
+from .rbac import CedarEngine, CedarEntity
 from .requests import Request
 from .responses import JSONResponse, PlainTextResponse, Response, exception_to_response
-from .routing import Router
+from .routing import RouteGuard, Router
 from .tenancy import TenantContext, TenantResolver
 from .typing_utils import convert_primitive
 
@@ -68,9 +69,11 @@ class ArtemisApp:
         *,
         methods: Iterable[str],
         name: str | None = None,
+        authorize: RouteGuard | Sequence[RouteGuard] | None = None,
     ) -> Callable[[Callable[..., Awaitable[Any] | Any]], Callable[..., Awaitable[Any] | Any]]:
         def decorator(func: Callable[..., Awaitable[Any] | Any]) -> Callable[..., Awaitable[Any] | Any]:
-            self.router.add_route(path, methods=tuple(methods), endpoint=func, name=name)
+            guards = self._normalize_guards(authorize)
+            self.router.add_route(path, methods=tuple(methods), endpoint=func, name=name, guards=guards)
             if name is not None:
                 self._named_routes[name] = path
             return func
@@ -82,19 +85,24 @@ class ArtemisApp:
         path: str,
         *,
         name: str | None = None,
+        authorize: RouteGuard | Sequence[RouteGuard] | None = None,
     ) -> Callable[[Callable[..., Awaitable[Any] | Any]], Callable[..., Awaitable[Any] | Any]]:
-        return self.route(path, methods=("GET",), name=name)
+        return self.route(path, methods=("GET",), name=name, authorize=authorize)
 
     def post(
         self,
         path: str,
         *,
         name: str | None = None,
+        authorize: RouteGuard | Sequence[RouteGuard] | None = None,
     ) -> Callable[[Callable[..., Awaitable[Any] | Any]], Callable[..., Awaitable[Any] | Any]]:
-        return self.route(path, methods=("POST",), name=name)
+        return self.route(path, methods=("POST",), name=name, authorize=authorize)
 
     def include(self, *handlers: Callable[..., Awaitable[Any] | Any]) -> None:
         self.router.include(handlers)
+
+    def guard(self, *guards: RouteGuard) -> None:
+        self.router.guard(*guards)
 
     def url_path_for(self, name: str, /, **params: Any) -> str:
         template = self._named_routes.get(name)
@@ -165,6 +173,7 @@ class ArtemisApp:
             return exception_to_response(exc)
 
     async def _execute_route(self, route, request: Request, scope) -> Response:
+        await self._authorize_route(route, request, scope)
         call_args: Dict[str, Any] = {}
         body_payload: Any | None = None
         for name, parameter in route.signature.parameters.items():
@@ -197,6 +206,47 @@ class ArtemisApp:
         if inspect.isawaitable(result):
             result = await result
         return _coerce_response(result)
+
+    async def _authorize_route(self, route, request: Request, scope) -> None:
+        if not route.guards:
+            return
+        principal = request.principal
+        if principal is None:
+            raise HTTPError(403, {"detail": "authentication_required"})
+        try:
+            engine = await scope.get(CedarEngine)
+        except LookupError as exc:  # pragma: no cover - dependency misconfiguration
+            raise HTTPError(500, {"detail": "authorization engine missing"}) from exc
+        for guard in route.guards:
+            if guard.principal_type not in ("*", principal.type):
+                raise HTTPError(403, {"detail": "principal_not_allowed", "required": guard.principal_type})
+            resource_id = guard.resolve_resource(request)
+            resource = CedarEntity(guard.resource_type, resource_id) if resource_id else None
+            context = guard.context(request)
+            allowed = engine.check(
+                principal=principal,
+                action=guard.action,
+                resource=resource,
+                context=context,
+            )
+            if not allowed:
+                raise HTTPError(
+                    403,
+                    {
+                        "action": guard.action,
+                        "resource_type": guard.resource_type,
+                        "resource_id": resource_id,
+                        "detail": "forbidden",
+                    },
+                )
+
+    @staticmethod
+    def _normalize_guards(authorize: RouteGuard | Sequence[RouteGuard] | None) -> tuple[RouteGuard, ...]:
+        if authorize is None:
+            return ()
+        if isinstance(authorize, RouteGuard):
+            return (authorize,)
+        return tuple(authorize)
 
     # ------------------------------------------------------------------ interface adapters
     async def __call__(

@@ -1,7 +1,7 @@
 import datetime as dt
-import uuid
 
 import artemis.rbac as rbac_module
+from artemis.id57 import generate_id57
 from artemis.models import (
     AdminRoleAssignment,
     Permission,
@@ -37,8 +37,8 @@ def test_cedar_reference_matching() -> None:
 
 def test_admin_rbac_policies_allow_and_deny() -> None:
     now = _now()
-    role_id = uuid.uuid4()
-    admin_user = uuid.uuid4()
+    role_id = generate_id57()
+    admin_user = generate_id57()
     role = Role(
         id=role_id,
         name="admin-billing",
@@ -49,7 +49,7 @@ def test_admin_rbac_policies_allow_and_deny() -> None:
         updated_at=now,
     )
     allow_permission = Permission(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         role_id=role_id,
         action="billing:read",
         resource_type="billing",
@@ -59,7 +59,7 @@ def test_admin_rbac_policies_allow_and_deny() -> None:
         updated_at=now,
     )
     deny_permission = Permission(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         role_id=role_id,
         action="billing:read",
         resource_type="billing",
@@ -69,7 +69,7 @@ def test_admin_rbac_policies_allow_and_deny() -> None:
         updated_at=now,
     )
     assignment = AdminRoleAssignment(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         admin_user_id=admin_user,
         role_id=role_id,
         assigned_at=now,
@@ -133,8 +133,8 @@ def test_admin_rbac_policies_allow_and_deny() -> None:
 def test_tenant_user_bindings_scope_resources() -> None:
     now = _now()
     tenant = "acme"
-    role_id = uuid.uuid4()
-    user_id = uuid.uuid4()
+    role_id = generate_id57()
+    user_id = generate_id57()
     role = Role(
         id=role_id,
         name="order-writer",
@@ -145,7 +145,7 @@ def test_tenant_user_bindings_scope_resources() -> None:
         updated_at=now,
     )
     permission = Permission(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         role_id=role_id,
         action="orders:write, orders:approve",
         resource_type="orders",
@@ -155,7 +155,7 @@ def test_tenant_user_bindings_scope_resources() -> None:
         updated_at=now,
     )
     binding = UserRole(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         user_id=user_id,
         role_id=role_id,
         assigned_at=now,
@@ -181,7 +181,7 @@ def test_tenant_user_bindings_scope_resources() -> None:
 def test_build_engine_skips_unknown_roles() -> None:
     now = _now()
     role = Role(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         name="unused",
         scope=RoleScope.ADMIN,
         tenant=None,
@@ -190,8 +190,8 @@ def test_build_engine_skips_unknown_roles() -> None:
         updated_at=now,
     )
     permission = Permission(
-        id=uuid.uuid4(),
-        role_id=uuid.uuid4(),
+        id=generate_id57(),
+        role_id=generate_id57(),
         action="noop",
         resource_type="billing",
         effect=PermissionEffect.ALLOW,
@@ -200,9 +200,9 @@ def test_build_engine_skips_unknown_roles() -> None:
         updated_at=now,
     )
     binding = AdminRoleAssignment(
-        id=uuid.uuid4(),
-        admin_user_id=uuid.uuid4(),
-        role_id=uuid.uuid4(),
+        id=generate_id57(),
+        admin_user_id=generate_id57(),
+        role_id=generate_id57(),
         assigned_at=now,
     )
     engine = build_engine(
@@ -231,8 +231,8 @@ def test_cedar_policy_matching_branches() -> None:
 
 def test_condition_requires_matching_principal_attributes() -> None:
     now = _now()
-    role_id = uuid.uuid4()
-    admin_user = uuid.uuid4()
+    role_id = generate_id57()
+    admin_user = generate_id57()
     role = Role(
         id=role_id,
         name="attribute-check",
@@ -243,7 +243,7 @@ def test_condition_requires_matching_principal_attributes() -> None:
         updated_at=now,
     )
     permission = Permission(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         role_id=role_id,
         action="reports:view",
         resource_type="reports",
@@ -253,7 +253,7 @@ def test_condition_requires_matching_principal_attributes() -> None:
         updated_at=now,
     )
     binding = AdminRoleAssignment(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         admin_user_id=admin_user,
         role_id=role_id,
         assigned_at=now,
@@ -272,7 +272,7 @@ def test_condition_requires_matching_principal_attributes() -> None:
 
 def test_permission_resource_for_tenant_target() -> None:
     now = _now()
-    role_id = uuid.uuid4()
+    role_id = generate_id57()
     tenant_role = Role(
         id=role_id,
         name="tenant-specific",
@@ -283,7 +283,7 @@ def test_permission_resource_for_tenant_target() -> None:
         updated_at=now,
     )
     permission = Permission(
-        id=uuid.uuid4(),
+        id=generate_id57(),
         role_id=role_id,
         action="docs:edit",
         resource_type="docs",
@@ -292,7 +292,7 @@ def test_permission_resource_for_tenant_target() -> None:
         created_at=now,
         updated_at=now,
     )
-    binding = UserRole(id=uuid.uuid4(), user_id=uuid.uuid4(), role_id=role_id, assigned_at=now)
+    binding = UserRole(id=generate_id57(), user_id=generate_id57(), role_id=role_id, assigned_at=now)
     engine = build_engine(
         roles=[tenant_role],
         permissions=[permission],

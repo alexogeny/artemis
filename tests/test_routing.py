@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from artemis.routing import Router, get, post
+from artemis.routing import RouteGuard, Router, get, post, route
 
 
 @pytest.mark.asyncio
@@ -30,6 +30,29 @@ async def test_router_include_decorated_handler() -> None:
     match = router.find("GET", "/ping")
     assert match.route.spec.endpoint is ping
     assert match.route.spec.name == "ping"
+
+
+def test_route_decorator_accepts_guard_sequences() -> None:
+    guard_a = RouteGuard(action="items:read", resource_type="item")
+    guard_b = RouteGuard(action="items:write", resource_type="item")
+
+    @route("/items", methods=("GET", "POST"), authorize=[guard_a, guard_b])
+    async def handler() -> None:
+        return None
+
+    spec = getattr(handler, "__artemis_route__")
+    assert spec.guards == (guard_a, guard_b)
+
+
+def test_route_decorator_single_guard() -> None:
+    guard = RouteGuard(action="items:read", resource_type="item")
+
+    @route("/items", methods=("GET",), authorize=guard)
+    async def handler() -> None:
+        return None
+
+    spec = getattr(handler, "__artemis_route__")
+    assert spec.guards == (guard,)
 
 
 @pytest.mark.asyncio
@@ -60,6 +83,18 @@ async def test_router_handles_missing_groups(monkeypatch) -> None:
     route.pattern = DummyPattern()  # type: ignore[assignment]
     match = router.find("GET", "/items/42")
     assert match.params == {}
+
+
+def test_router_applies_global_guards() -> None:
+    router = Router()
+    guard = RouteGuard(action="read", resource_type="item")
+    router.guard(guard)
+
+    async def handler() -> None:
+        return None
+
+    route = router.add_route("/items", methods=["GET"], endpoint=handler)
+    assert guard in route.guards
 
 
 @pytest.mark.asyncio

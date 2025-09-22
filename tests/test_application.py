@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator
+from typing import Any, AsyncIterator, Awaitable, Callable
 
 import msgspec
 import pytest
@@ -10,9 +10,10 @@ from artemis.application import Artemis, ArtemisApp
 from artemis.config import AppConfig
 from artemis.dependency import DependencyProvider
 from artemis.exceptions import HTTPError
+from artemis.rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
 from artemis.requests import Request
 from artemis.responses import JSONResponse, Response
-from artemis.routing import get
+from artemis.routing import RouteGuard, get
 from artemis.serialization import json_decode, json_encode
 from artemis.tenancy import TenantContext
 from artemis.testing import TestClient
@@ -198,6 +199,145 @@ def test_include_requires_metadata() -> None:
 
     with pytest.raises(ValueError):
         app.include(handler)
+
+
+@pytest.mark.asyncio
+async def test_route_guard_authorizes_with_cedar_engine() -> None:
+    provider = DependencyProvider()
+    policy = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=CedarReference("User", "allowed"),
+        actions=("items:read",),
+        resource=CedarReference("item", "*"),
+    )
+    engine = CedarEngine([policy])
+    provider.provide(CedarEngine, lambda: engine)
+
+    app = ArtemisApp(
+        AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")),
+        dependency_provider=provider,
+    )
+
+    async def identity_middleware(
+        request: Request, handler: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        user = request.header("x-user", "anonymous") or "anonymous"
+        request.with_principal(CedarEntity(type="User", id=user))
+        return await handler(request)
+
+    app.add_middleware(identity_middleware)
+
+    guard = RouteGuard(
+        action="items:read",
+        resource_type="item",
+        resource_id=lambda request: request.path_params["item_id"],
+        context_factory=lambda request: {"tenant": request.tenant.tenant},
+    )
+
+    @app.get("/secure/{item_id}", authorize=guard)
+    async def secure(item_id: str) -> dict[str, str]:
+        return {"item": item_id}
+
+    async with TestClient(app) as client:
+        success = await client.get("/secure/42", tenant="acme", headers={"x-user": "allowed"})
+        assert success.status == 200
+        assert json_decode(success.body) == {"item": "42"}
+        forbidden = await client.get("/secure/42", tenant="acme")
+        assert forbidden.status == 403
+
+
+@pytest.mark.asyncio
+async def test_guard_requires_principal() -> None:
+    provider = DependencyProvider()
+    engine = CedarEngine([])
+    provider.provide(CedarEngine, lambda: engine)
+    app = ArtemisApp(
+        AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)),
+        dependency_provider=provider,
+    )
+
+    guard = RouteGuard(action="items:read", resource_type="item")
+
+    @app.get("/auth/required", authorize=[guard])
+    async def secured() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async with TestClient(app) as client:
+        response = await client.get("/auth/required", tenant="acme")
+        assert response.status == 403
+        payload = json_decode(response.body)
+        assert payload["error"]["detail"]["detail"] == "authentication_required"
+
+
+@pytest.mark.asyncio
+async def test_guard_rejects_principal_type_mismatch() -> None:
+    provider = DependencyProvider()
+    policy = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=CedarReference("AdminUser", "admin"),
+        actions=("items:read",),
+        resource=CedarReference("item", "*"),
+    )
+    engine = CedarEngine([policy])
+    provider.provide(CedarEngine, lambda: engine)
+    app = ArtemisApp(
+        AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)),
+        dependency_provider=provider,
+    )
+
+    async def identity(request: Request, handler: Callable[[Request], Awaitable[Response]]) -> Response:
+        request.with_principal(CedarEntity(type="User", id="user"))
+        return await handler(request)
+
+    app.add_middleware(identity)
+
+    guard = RouteGuard(action="items:read", resource_type="item", principal_type="AdminUser")
+
+    @app.get("/admin-only", authorize=guard)
+    async def admin_only() -> dict[str, str]:
+        return {"status": "ok"}
+
+    async with TestClient(app) as client:
+        response = await client.get("/admin-only", tenant="acme")
+        assert response.status == 403
+        payload = json_decode(response.body)
+        assert payload["error"]["detail"]["detail"] == "principal_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_app_guard_sets_global_guards() -> None:
+    provider = DependencyProvider()
+    policy = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=CedarReference("User", "allowed"),
+        actions=("inventory:view",),
+        resource=CedarReference("inventory", "*"),
+    )
+    engine = CedarEngine([policy])
+    provider.provide(CedarEngine, lambda: engine)
+    app = ArtemisApp(
+        AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)),
+        dependency_provider=provider,
+    )
+
+    async def identity(request: Request, handler: Callable[[Request], Awaitable[Response]]) -> Response:
+        user = request.header("x-user", "denied") or "denied"
+        request.with_principal(CedarEntity(type="User", id=user))
+        return await handler(request)
+
+    app.add_middleware(identity)
+
+    app.guard(RouteGuard(action="inventory:view", resource_type="inventory"))
+
+    @app.get("/inventory")
+    async def inventory() -> dict[str, str]:
+        return {"items": []}
+
+    async with TestClient(app) as client:
+        forbidden = await client.get("/inventory", tenant="acme")
+        assert forbidden.status == 403
+        allowed = await client.get("/inventory", tenant="acme", headers={"x-user": "allowed"})
+        assert allowed.status == 200
 
 
 @pytest.mark.asyncio

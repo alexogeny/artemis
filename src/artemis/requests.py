@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Mapping, MutableMapping, TypeVar, get_type_hints
+from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, TypeVar, get_type_hints
 from urllib.parse import parse_qsl
 
 import msgspec
@@ -10,6 +10,9 @@ import msgspec
 from .serialization import json_decode
 from .tenancy import TenantContext
 from .typing_utils import convert_primitive
+
+if TYPE_CHECKING:
+    from .rbac import CedarEntity
 
 T = TypeVar("T")
 
@@ -25,6 +28,7 @@ class Request:
         "method",
         "path",
         "path_params",
+        "principal",
         "query_params",
         "tenant",
     )
@@ -39,6 +43,7 @@ class Request:
         path_params: Mapping[str, str] | None = None,
         query_string: str | None = None,
         body: bytes | None = None,
+        principal: "CedarEntity | None" = None,
     ) -> None:
         self.method = method.upper()
         self.path = path
@@ -49,6 +54,7 @@ class Request:
         self._body = body or b""
         self._json_cache: Any = msgspec.UNSET
         self.query_params = self._parse_query(self._raw_query)
+        self.principal = principal
 
     @staticmethod
     def _parse_query(raw: str) -> MutableMapping[str, list[str]]:
@@ -89,3 +95,7 @@ class Request:
 
     def body(self) -> bytes:
         return self._body
+
+    def with_principal(self, principal: "CedarEntity | None") -> "Request":
+        self.principal = principal
+        return self
