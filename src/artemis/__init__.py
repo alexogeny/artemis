@@ -15,8 +15,6 @@ from .chatops import (
     ChatMessage,
     ChatOpsConfig,
     ChatOpsError,
-    ChatOpsInstrumentationConfig,
-    ChatOpsInstrumentor,
     ChatOpsRoute,
     ChatOpsService,
     SlackWebhookConfig,
@@ -63,6 +61,12 @@ from .models import (
     TenantUser,
     UserRole,
 )
+from .observability import (
+    ChatOpsObservabilityConfig,
+    Observability,
+    ObservabilityConfig,
+    RequestObservabilityConfig,
+)
 from .orm import ORM, Model, ModelManager, ModelRegistry, ModelScope, default_registry, model
 from .rbac import (
     CedarEffect,
@@ -103,8 +107,7 @@ __all__ = [
     "ChatMessage",
     "ChatOpsConfig",
     "ChatOpsError",
-    "ChatOpsInstrumentationConfig",
-    "ChatOpsInstrumentor",
+    "ChatOpsObservabilityConfig",
     "ChatOpsRoute",
     "ChatOpsService",
     "CustomPermission",
@@ -128,6 +131,8 @@ __all__ = [
     "ModelManager",
     "ModelRegistry",
     "ModelScope",
+    "Observability",
+    "ObservabilityConfig",
     "OidcAuthenticator",
     "Passkey",
     "PasskeyManager",
@@ -137,6 +142,7 @@ __all__ = [
     "PlainTextResponse",
     "PoolConfig",
     "Request",
+    "RequestObservabilityConfig",
     "Response",
     "Role",
     "RoleBinding",

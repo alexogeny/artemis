@@ -14,6 +14,7 @@ from .dependency import DependencyProvider
 from .exceptions import HTTPError
 from .execution import TaskExecutor
 from .middleware import MiddlewareCallable, apply_middleware
+from .observability import Observability
 from .orm import ORM
 from .rbac import CedarEngine, CedarEntity
 from .requests import Request
@@ -38,6 +39,7 @@ class ArtemisApp:
         database: Database | None = None,
         orm: ORM | None = None,
         chatops: ChatOpsService | None = None,
+        observability: Observability | None = None,
     ) -> None:
         self.config = config or AppConfig()
         self.router = Router()
@@ -52,7 +54,10 @@ class ArtemisApp:
         )
         self.database = database or (Database(self.config.database) if self.config.database else None)
         self.orm = orm or (ORM(self.database) if self.database else None)
-        self.chatops = chatops or ChatOpsService(self.config.chatops)
+        self.observability = observability or Observability(self.config.observability)
+        self.chatops = chatops or ChatOpsService(
+            self.config.chatops, observability=self.observability
+        )
         self._middlewares: list[MiddlewareCallable] = []
         self._startup_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._shutdown_hooks: list[Callable[[], Awaitable[None] | None]] = []
@@ -64,6 +69,7 @@ class ArtemisApp:
             self.on_shutdown(self.database.shutdown)
         if self.orm:
             self.dependencies.provide(ORM, lambda: self.orm)
+        self.dependencies.provide(Observability, lambda: self.observability)
         self.dependencies.provide(ChatOpsService, lambda: self.chatops)
 
     # ------------------------------------------------------------------ routing
@@ -171,10 +177,21 @@ class ArtemisApp:
             return await self._execute_route(match.route, req, scope)
 
         handler = apply_middleware(self._middlewares, endpoint_handler)
+        observation = self.observability.on_request_start(request)
         try:
-            return await handler(request)
+            response = await handler(request)
         except HTTPError as exc:
-            return exception_to_response(exc)
+            response = exception_to_response(exc)
+            self.observability.on_request_success(observation, response)
+            return response
+        except Exception as exc:
+            status = getattr(exc, "status", None)
+            status_code = status if isinstance(status, int) else 500
+            self.observability.on_request_error(observation, exc, status_code=status_code)
+            raise
+        else:
+            self.observability.on_request_success(observation, response)
+            return response
 
     async def _execute_route(self, route, request: Request, scope) -> Response:
         await self._authorize_route(route, request, scope)
