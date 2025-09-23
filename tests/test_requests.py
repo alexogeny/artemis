@@ -180,6 +180,31 @@ async def test_request_loader_waiters_receive_cached_body() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_waiter_skips_loader_after_cache_fill() -> None:
+    calls = 0
+
+    async def loader() -> bytes:
+        nonlocal calls
+        calls += 1
+        return b"never-called"
+
+    request = build_request(body_loader=loader)
+
+    await request._body_lock.acquire()
+    try:
+        waiter = asyncio.create_task(request.body())
+        await asyncio.sleep(0)
+        request._body = b"prefilled"
+        request._body_loader = None
+    finally:
+        request._body_lock.release()
+
+    body = await waiter
+    assert body == b"prefilled"
+    assert calls == 0
+
+
+@pytest.mark.asyncio
 async def test_request_loader_handles_none_and_bytearray() -> None:
     async def none_loader() -> bytes | None:
         return None
