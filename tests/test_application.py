@@ -1,15 +1,18 @@
 from __future__ import annotations
 
-from typing import Any, AsyncIterator, Awaitable, Callable
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping
 
 import msgspec
 import pytest
 import pytest_asyncio
 
 from artemis.application import Artemis, ArtemisApp
+from artemis.audit import AuditTrail, current_actor
 from artemis.config import AppConfig
+from artemis.database import Database, DatabaseConfig, PoolConfig
 from artemis.dependency import DependencyProvider
 from artemis.exceptions import HTTPError
+from artemis.orm import ORM
 from artemis.rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
 from artemis.requests import Request
 from artemis.responses import JSONResponse, Response
@@ -17,6 +20,7 @@ from artemis.routing import RouteGuard, get
 from artemis.serialization import json_decode, json_encode
 from artemis.tenancy import TenantContext
 from artemis.testing import TestClient
+from tests.support import FakeConnection, FakePool
 
 
 class CreateItem(msgspec.Struct):
@@ -218,9 +222,7 @@ async def test_route_guard_authorizes_with_cedar_engine() -> None:
         dependency_provider=provider,
     )
 
-    async def identity_middleware(
-        request: Request, handler: Callable[[Request], Awaitable[Response]]
-    ) -> Response:
+    async def identity_middleware(request: Request, handler: Callable[[Request], Awaitable[Response]]) -> Response:
         user = request.header("x-user", "anonymous") or "anonymous"
         request.with_principal(CedarEntity(type="User", id=user))
         return await handler(request)
@@ -414,3 +416,75 @@ async def test_execute_route_coroutine_direct() -> None:
     match = app.router.find("GET", "/async-call")
     response = await app._execute_route(match.route, request, scope)
     assert response.body == b"async"
+
+
+def _app_with_database() -> tuple[ArtemisApp, Database, ORM]:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    config = DatabaseConfig(pool=PoolConfig(dsn="postgres://demo"), tenant_schema_template="tenant_{tenant}")
+    database = Database(config, pool=pool)
+    orm = ORM(database)
+    app = ArtemisApp(AppConfig(database=config, allowed_tenants=("acme",)), database=database, orm=orm)
+    return app, database, orm
+
+
+def test_application_reuses_existing_audit_trail() -> None:
+    _app, database, orm = _app_with_database()
+    audit = AuditTrail(database, registry=orm.registry)
+    orm.attach_audit_trail(audit)
+
+    reused = ArtemisApp(AppConfig(database=database.config, allowed_tenants=("acme",)), database=database, orm=orm)
+    assert reused.audit_trail is audit
+
+
+def test_application_initializes_audit_trail_when_missing() -> None:
+    app, _, orm = _app_with_database()
+    assert app.audit_trail is not None
+    assert getattr(orm, "_audit_trail") is app.audit_trail
+
+
+def test_application_without_database_has_no_audit_trail() -> None:
+    app = ArtemisApp(AppConfig())
+    assert app.audit_trail is None
+
+
+def test_application_handles_missing_orm(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    config = DatabaseConfig(pool=PoolConfig(dsn="postgres://demo"), tenant_schema_template="tenant_{tenant}")
+    database = Database(config, pool=pool)
+
+    monkeypatch.setattr("artemis.application.ORM", lambda _: None)
+    app = ArtemisApp(AppConfig(database=config, allowed_tenants=("acme",)), database=database)
+    assert app.orm is None
+    assert app.audit_trail is not None
+
+
+@pytest.mark.asyncio
+async def test_dispatch_binds_audit_actor_from_principal(monkeypatch: pytest.MonkeyPatch) -> None:
+    app, _, _ = _app_with_database()
+
+    class AutoPrincipalRequest(Request):
+        def __init__(self, *args: Any, headers: Mapping[str, str] | None = None, **kwargs: Any) -> None:
+            super().__init__(*args, headers=headers, **kwargs)
+            header_user = (headers or {}).get("x-user")
+            if header_user:
+                self.with_principal(CedarEntity(type="User", id=header_user))
+
+    monkeypatch.setattr("artemis.application.Request", AutoPrincipalRequest)
+
+    @app.get("/actor")
+    async def actor_endpoint() -> dict[str, str | None]:
+        actor = current_actor()
+        return {"actor": actor.id if actor else None}
+
+    anonymous = await app.dispatch("GET", "/actor", host="acme.demo.example.com")
+    assert json_decode(anonymous.body) == {"actor": None}
+
+    admin = await app.dispatch(
+        "GET",
+        "/actor",
+        host="acme.demo.example.com",
+        headers={"x-user": "admin"},
+    )
+    assert json_decode(admin.body) == {"actor": "admin"}

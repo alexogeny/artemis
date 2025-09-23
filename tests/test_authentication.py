@@ -220,14 +220,12 @@ def test_federated_identity_directory() -> None:
         updated_at=now,
     )
     directory = FederatedIdentityDirectory([identity])
-    assert directory.lookup(
-        provider_type=FederatedProvider.OIDC, provider_id="google", subject="user@example.com"
-    ) is identity
     assert (
-        directory.lookup(
-            provider_type=FederatedProvider.SAML, provider_id="google", subject="user@example.com"
-        )
-        is None
+        directory.lookup(provider_type=FederatedProvider.OIDC, provider_id="google", subject="user@example.com")
+        is identity
+    )
+    assert (
+        directory.lookup(provider_type=FederatedProvider.SAML, provider_id="google", subject="user@example.com") is None
     )
 
 
@@ -497,15 +495,11 @@ def test_oidc_authenticator_error_paths() -> None:
     payload = _b64url(
         json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["admins"]}).encode()
     )
-    bad_signature = _b64url(
-        hmac.new(b"wrong", f"{header}.{payload}".encode(), hashlib.sha256).digest()
-    )
+    bad_signature = _b64url(hmac.new(b"wrong", f"{header}.{payload}".encode(), hashlib.sha256).digest())
     authenticator = OidcAuthenticator(provider)
     with pytest.raises(AuthenticationError):
         authenticator.validate(f"{header}.{payload}.{bad_signature}")
-    wrong_issuer_payload = _b64url(
-        json.dumps({"iss": "https://other", "aud": "client", "nonce": "nonce"}).encode()
-    )
+    wrong_issuer_payload = _b64url(json.dumps({"iss": "https://other", "aud": "client", "nonce": "nonce"}).encode())
     sig = _b64url(
         hmac.new(
             provider.client_secret.encode(),
@@ -515,9 +509,7 @@ def test_oidc_authenticator_error_paths() -> None:
     )
     with pytest.raises(AuthenticationError):
         authenticator.validate(f"{header}.{wrong_issuer_payload}.{sig}")
-    wrong_audience_payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "other", "nonce": "nonce"}).encode()
-    )
+    wrong_audience_payload = _b64url(json.dumps({"iss": provider.issuer, "aud": "other", "nonce": "nonce"}).encode())
     sig = _b64url(
         hmac.new(
             provider.client_secret.encode(),
@@ -604,4 +596,3 @@ def test__argon2_hash_returns_non_bytes(monkeypatch: pytest.MonkeyPatch) -> None
         1,
     )
     assert result == "textual-hash"
-

@@ -107,19 +107,12 @@ class CedarEngine:
         return self._policies
 
 
-
 def bindings_from_admin(assignments: Iterable[AdminRoleAssignment]) -> list[RoleBinding]:
-    return [
-        RoleBinding("AdminUser", item.admin_user_id, item.role_id)
-        for item in assignments
-    ]
+    return [RoleBinding("AdminUser", item.admin_user_id, item.role_id) for item in assignments]
 
 
 def bindings_from_users(assignments: Iterable[UserRole]) -> list[RoleBinding]:
-    return [
-        RoleBinding("User", item.user_id, item.role_id)
-        for item in assignments
-    ]
+    return [RoleBinding("User", item.user_id, item.role_id) for item in assignments]
 
 
 def build_engine(

@@ -414,9 +414,7 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
             default_channel="#ops",
         ),
     )
-    observability = Observability(
-        ObservabilityConfig(datadog_tags=(("env", "test"),))
-    )
+    observability = Observability(ObservabilityConfig(datadog_tags=(("env", "test"),)))
     service = ChatOpsService(config, transport=transport, observability=observability)
 
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
@@ -480,9 +478,7 @@ async def test_chatops_instrumentation_error(monkeypatch: pytest.MonkeyPatch) ->
         ),
     )
     observability = Observability()
-    service = ChatOpsService(
-        config, transport=failing_transport, observability=observability
-    )
+    service = ChatOpsService(config, transport=failing_transport, observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -523,9 +519,7 @@ async def test_chatops_instrumentation_disabled(monkeypatch: pytest.MonkeyPatch)
             datadog_enabled=False,
         )
     )
-    service = ChatOpsService(
-        config, transport=failing_transport, observability=observability
-    )
+    service = ChatOpsService(config, transport=failing_transport, observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     assert not service._observability.enabled
@@ -533,9 +527,7 @@ async def test_chatops_instrumentation_disabled(monkeypatch: pytest.MonkeyPatch)
     with pytest.raises(ChatOpsError):
         await service.send(tenant, ChatMessage(text="fail"))
 
-    idle_service = ChatOpsService(
-        config, transport=RecordingTransport(), observability=observability
-    )
+    idle_service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     await idle_service.send(tenant, ChatMessage(text="ok"))
 
 
@@ -553,17 +545,13 @@ async def test_chatops_instrumentation_datadog_only(monkeypatch: pytest.MonkeyPa
             datadog_enabled=True,
         )
     )
-    service = ChatOpsService(
-        config, transport=RecordingTransport(), observability=observability
-    )
+    service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     await service.send(tenant, ChatMessage(text="no span"))
 
     assert service._observability.enabled
-    assert [metric for metric, _, _ in statsd.increments] == [
-        observability.config.chatops.datadog_metric_sent
-    ]
+    assert [metric for metric, _, _ in statsd.increments] == [observability.config.chatops.datadog_metric_sent]
     tags = statsd.increments[0][2]
     assert "tenant:acme" in tags
     assert "channel" not in {tag.split(":", 1)[0] for tag in tags}
@@ -601,9 +589,7 @@ async def test_chatops_instrumentation_sentry_options(monkeypatch: pytest.Monkey
         )
     )
     transport = RecordingTransport()
-    service = ChatOpsService(
-        config, transport=transport, observability=observability
-    )
+    service = ChatOpsService(config, transport=transport, observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     await service.send(tenant, ChatMessage(text="silent"))
@@ -618,9 +604,7 @@ async def test_chatops_instrumentation_sentry_options(monkeypatch: pytest.Monkey
     ) -> None:
         raise RuntimeError("fail")
 
-    service_error = ChatOpsService(
-        config, transport=failing_transport, observability=observability
-    )
+    service_error = ChatOpsService(config, transport=failing_transport, observability=observability)
     with pytest.raises(RuntimeError):
         await service_error.send(tenant, ChatMessage(text="boom"))
 
@@ -638,9 +622,7 @@ async def test_chatops_instrumentation_sentry_breadcrumbs_without_channel(
         default=SlackWebhookConfig(webhook_url="https:///token"),
     )
     observability = Observability(ObservabilityConfig(datadog_enabled=False))
-    service = ChatOpsService(
-        config, transport=RecordingTransport(), observability=observability
-    )
+    service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     await service.send(tenant, ChatMessage(text="breadcrumb"))
@@ -662,9 +644,7 @@ async def test_chatops_instrumentation_tracer_without_status(monkeypatch: pytest
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
     observability = Observability(ObservabilityConfig(datadog_enabled=False))
-    service = ChatOpsService(
-        config, transport=RecordingTransport(), observability=observability
-    )
+    service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     await service.send(tenant, ChatMessage(text="statusless"))
@@ -678,9 +658,7 @@ async def test_chatops_instrumentation_tracer_without_status(monkeypatch: pytest
     ) -> None:
         raise RuntimeError("fail")
 
-    service_error = ChatOpsService(
-        config, transport=failing_transport, observability=observability
-    )
+    service_error = ChatOpsService(config, transport=failing_transport, observability=observability)
     with pytest.raises(RuntimeError):
         await service_error.send(tenant, ChatMessage(text="boom"))
 
@@ -699,9 +677,7 @@ async def test_chatops_instrumentation_span_without_record_exception(
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
     observability = Observability(ObservabilityConfig(datadog_enabled=False))
-    service = ChatOpsService(
-        config, transport=RecordingTransport(), observability=observability
-    )
+    service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
     await service.send(tenant, ChatMessage(text="no-record"))
@@ -713,9 +689,7 @@ async def test_chatops_instrumentation_span_without_record_exception(
     ) -> None:
         raise RuntimeError("fail")
 
-    service_error = ChatOpsService(
-        config, transport=failing_transport, observability=observability
-    )
+    service_error = ChatOpsService(config, transport=failing_transport, observability=observability)
     with pytest.raises(RuntimeError):
         await service_error.send(tenant, ChatMessage(text="boom"))
 
@@ -747,9 +721,7 @@ async def test_request_observability_success(monkeypatch: pytest.MonkeyPatch) ->
     hub = setup_stub_sentry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
 
-    observability = Observability(
-        ObservabilityConfig(datadog_tags=(("env", "test"),))
-    )
+    observability = Observability(ObservabilityConfig(datadog_tags=(("env", "test"),)))
     config = AppConfig(
         site="demo",
         domain="example.com",
@@ -834,10 +806,7 @@ async def test_observability_chatops_success_without_metrics(
 
     observability.on_chatops_send_success(context)
 
-    assert all(
-        metric[0] != observability.config.chatops.datadog_metric_sent
-        for metric in statsd.increments
-    )
+    assert all(metric[0] != observability.config.chatops.datadog_metric_sent for metric in statsd.increments)
 
 
 def test_observability_request_success_without_status(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -930,7 +899,7 @@ def test_observability_request_error_without_status(monkeypatch: pytest.MonkeyPa
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="POST",
-        path="/error",  
+        path="/error",
         headers={},
         tenant=tenant,
         path_params={},
@@ -1003,7 +972,7 @@ def test_observability_request_success_without_status_with_span(
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
-        path="/span", 
+        path="/span",
         headers={},
         tenant=tenant,
         path_params={},

@@ -1,6 +1,7 @@
 """Artemis asynchronous multi-tenant web framework."""
 
 from .application import Artemis, ArtemisApp
+from .audit import AuditActor, AuditTrail, audit_context
 from .authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -34,6 +35,7 @@ from .migrations import (
     run_sql,
 )
 from .models import (
+    AdminAuditLogEntry,
     AdminPasskey,
     AdminRoleAssignment,
     AdminUser,
@@ -67,7 +69,16 @@ from .observability import (
     ObservabilityConfig,
     RequestObservabilityConfig,
 )
-from .orm import ORM, Model, ModelManager, ModelRegistry, ModelScope, default_registry, model
+from .orm import (
+    ORM,
+    DatabaseModel,
+    Model,
+    ModelManager,
+    ModelRegistry,
+    ModelScope,
+    default_registry,
+    model,
+)
 from .rbac import (
     CedarEffect,
     CedarEngine,
@@ -87,6 +98,7 @@ from .testing import TestClient
 
 __all__ = [
     "ORM",
+    "AdminAuditLogEntry",
     "AdminPasskey",
     "AdminRoleAssignment",
     "AdminUser",
@@ -95,6 +107,8 @@ __all__ = [
     "Artemis",
     "ArtemisApp",
     "ArtemisError",
+    "AuditActor",
+    "AuditTrail",
     "AuthenticationError",
     "AuthenticationService",
     "BillingRecord",
@@ -114,6 +128,7 @@ __all__ = [
     "Customer",
     "Database",
     "DatabaseConfig",
+    "DatabaseModel",
     "DependencyProvider",
     "FederatedIdentityDirectory",
     "FederatedProvider",
@@ -153,6 +168,7 @@ __all__ = [
     "SlackWebhookConfig",
     "Subscription",
     "SubscriptionStatus",
+    "TenantAuditLogEntry",
     "TenantContext",
     "TenantFederatedUser",
     "TenantOidcProvider",
@@ -163,6 +179,7 @@ __all__ = [
     "TenantUser",
     "TestClient",
     "UserRole",
+    "audit_context",
     "bindings_from_admin",
     "bindings_from_users",
     "build_engine",

@@ -136,9 +136,7 @@ class ChatOpsService:
     async def send(self, tenant: TenantContext, message: ChatMessage) -> None:
         config = self._require_config(tenant)
         client = self._client_for(config)
-        context = await _maybe_await(
-            self._observability.on_chatops_send_start(tenant, message, config)
-        )
+        context = await _maybe_await(self._observability.on_chatops_send_start(tenant, message, config))
         try:
             await client.send(message)
         except Exception as exc:

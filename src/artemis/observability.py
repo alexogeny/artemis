@@ -111,16 +111,12 @@ class Observability:
         self._status_error = None
         self._sentry_hub = None
         self._statsd = None
-        self._base_datadog_tags = tuple(
-            f"{key}:{value}" for key, value in self.config.datadog_tags
-        )
+        self._base_datadog_tags = tuple(f"{key}:{value}" for key, value in self.config.datadog_tags)
         if self.config.enabled:
             self._prepare_opentelemetry()
             self._prepare_sentry()
             self._prepare_datadog()
-        self._enabled = self.config.enabled and any(
-            (self._tracer, self._sentry_hub, self._statsd)
-        )
+        self._enabled = self.config.enabled and any((self._tracer, self._sentry_hub, self._statsd))
 
     @property
     def enabled(self) -> bool:
@@ -214,10 +210,7 @@ class Observability:
             for key, value in attributes.items():
                 span.set_attribute(key, value)
         if self._sentry_hub is not None:
-            if (
-                breadcrumb_message is not None
-                and self.config.sentry_record_breadcrumbs
-            ):
+            if breadcrumb_message is not None and self.config.sentry_record_breadcrumbs:
                 self._sentry_hub.add_breadcrumb(
                     category=breadcrumb_category or self.config.sentry_breadcrumb_category,
                     level=breadcrumb_level or self.config.sentry_breadcrumb_level,
@@ -343,9 +336,7 @@ class Observability:
                 context.span.set_status(status)
         context.close()
 
-    def on_chatops_send_error(
-        self, context: _ObservationContext | None, error: BaseException
-    ) -> None:
+    def on_chatops_send_error(self, context: _ObservationContext | None, error: BaseException) -> None:
         if context is None:
             self._capture_exception(error)
             return
@@ -397,9 +388,7 @@ class Observability:
             capture_exception=True,
         )
 
-    def on_request_success(
-        self, context: _ObservationContext | None, response: "Response"
-    ) -> None:
+    def on_request_success(self, context: _ObservationContext | None, response: "Response") -> None:
         if context is None:
             return
         status = getattr(response, "status", None)

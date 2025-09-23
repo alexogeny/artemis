@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import re
 from dataclasses import dataclass
 from enum import Enum
@@ -11,7 +12,9 @@ from weakref import WeakSet
 import msgspec
 from msgspec.inspect import NODEFAULT, StructType, type_info
 
+from .audit import DELETE, INSERT, UPDATE, AuditTrail, current_actor
 from .database import Database, _quote_identifier
+from .id57 import generate_id57
 from .tenancy import TenantContext
 
 M = TypeVar("M", bound="Model")
@@ -33,6 +36,8 @@ class Model(msgspec.Struct, frozen=True, omit_defaults=True, kw_only=True):
         super().__init_subclass__(**kwargs)
         if cls is Model:
             return
+        if getattr(cls, "__abstract__", False):
+            return
         Model._declared_models.add(cls)
 
     @classmethod
@@ -40,6 +45,29 @@ class Model(msgspec.Struct, frozen=True, omit_defaults=True, kw_only=True):
         """Return all known ``Model`` subclasses."""
 
         return tuple(cls._declared_models)
+
+
+def _utcnow() -> dt.datetime:
+    return dt.datetime.now(dt.timezone.utc)
+
+
+class DatabaseModel(Model, kw_only=True):
+    """Base model including identifier and audit metadata."""
+
+    __abstract__ = True
+
+    id: str = msgspec.field(default_factory=generate_id57)
+    created_at: dt.datetime = msgspec.field(default_factory=_utcnow)
+    created_by: str | None = msgspec.field(default=None)
+    updated_at: dt.datetime = msgspec.field(default_factory=_utcnow)
+    updated_by: str | None = msgspec.field(default=None)
+    deleted_at: dt.datetime | None = msgspec.field(default=None)
+    deleted_by: str | None = msgspec.field(default=None)
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:  # pragma: no cover - exercised indirectly
+        if cls is not DatabaseModel and "__abstract__" not in cls.__dict__:
+            cls.__abstract__ = False
+        super().__init_subclass__(**kwargs)
 
 
 class ModelScope(str, Enum):
@@ -148,11 +176,23 @@ def model(
 class ORM:
     """Runtime object responsible for executing SQL for models."""
 
-    def __init__(self, database: Database, registry: ModelRegistry | None = None) -> None:
+    def __init__(
+        self,
+        database: Database,
+        registry: ModelRegistry | None = None,
+        *,
+        audit_trail: AuditTrail | None = None,
+    ) -> None:
         self.database = database
         self.registry = registry or _default_registry
+        self._audit_trail = audit_trail
         self.admin = _Namespace(self, ModelScope.ADMIN.value)
         self.tenants = _Namespace(self, ModelScope.TENANT.value)
+
+    def attach_audit_trail(self, audit_trail: AuditTrail) -> None:
+        """Attach an :class:`~artemis.audit.AuditTrail` after initialization."""
+
+        self._audit_trail = audit_trail
 
     async def insert(self, model: type[M], data: M | Mapping[str, Any], *, tenant: TenantContext | None = None) -> M:
         info = self.registry.info_for(model)
@@ -200,6 +240,7 @@ class ORM:
 
     async def _insert(self, info: ModelInfo[M], instance: M, tenant: TenantContext | None) -> M:
         payload = msgspec.to_builtins(instance)
+        _apply_insert_metadata(info, payload)
         columns: list[str] = []
         values: list[Any] = []
         for field in info.fields:
@@ -216,6 +257,14 @@ class ORM:
             rows = await connection.fetch_all(sql, values)
         if not rows:
             raise RuntimeError("Insert did not return any rows")  # pragma: no cover - safety net
+        if self._audit_trail is not None:
+            await self._audit_trail.record_model_change(
+                info=info,
+                action=INSERT,
+                tenant=tenant,
+                data=rows[0],
+                changes=payload,
+            )
         return msgspec.convert(rows[0], type=info.model)
 
     async def _select(
@@ -251,7 +300,9 @@ class ORM:
     ) -> list[dict[str, Any]]:
         if not values:
             return await self._select(info, tenant=tenant, filters=filters, order_by=None, limit=None)
-        set_clause, parameters = self._build_set(info, values)
+        update_values = dict(values)
+        _apply_update_metadata(info, update_values)
+        set_clause, parameters = self._build_set(info, update_values)
         where_clause, where_parameters = self._build_filters(info, filters, start=len(parameters) + 1)
         parameters.extend(where_parameters)
         schema = self.database.schema_for_model(info, tenant)
@@ -261,7 +312,17 @@ class ORM:
             sql += f" WHERE {where_clause}"
         sql += f" RETURNING {self._projection(info)}"
         async with self.database.connection_for_model(info, tenant=tenant) as connection:
-            return await connection.fetch_all(sql, parameters)
+            rows = await connection.fetch_all(sql, parameters)
+        if self._audit_trail is not None:
+            for row in rows:
+                await self._audit_trail.record_model_change(
+                    info=info,
+                    action=UPDATE,
+                    tenant=tenant,
+                    data=row,
+                    changes=update_values,
+                )
+        return rows
 
     async def _delete(
         self,
@@ -276,9 +337,18 @@ class ORM:
         sql = f"DELETE FROM {table}"
         if where_clause:
             sql += f" WHERE {where_clause}"
-        sql += " RETURNING 1"
+        sql += f" RETURNING {self._projection(info)}"
         async with self.database.connection_for_model(info, tenant=tenant) as connection:
             rows = await connection.fetch_all(sql, parameters)
+        if self._audit_trail is not None:
+            for row in rows:
+                await self._audit_trail.record_model_change(
+                    info=info,
+                    action=DELETE,
+                    tenant=tenant,
+                    data=row,
+                    changes={},
+                )
         return len(rows)
 
     def _coerce_instance(self, info: ModelInfo[M], data: M | Mapping[str, Any]) -> M:
@@ -472,8 +542,32 @@ def _normalize_accessor(name: str) -> str:
     return normalized.strip("_") or lowered
 
 
+def _apply_insert_metadata(info: ModelInfo[Any], payload: dict[str, Any]) -> None:
+    actor = current_actor()
+    now = dt.datetime.now(dt.timezone.utc)
+    if "created_at" in info.field_map and payload.get("created_at") is None:
+        payload["created_at"] = now
+    if "updated_at" in info.field_map and payload.get("updated_at") is None:
+        payload["updated_at"] = payload.get("created_at", now)
+    if actor is not None:
+        if "created_by" in info.field_map and payload.get("created_by") is None:
+            payload["created_by"] = actor.id
+        if "updated_by" in info.field_map and payload.get("updated_by") is None:
+            payload["updated_by"] = actor.id
+
+
+def _apply_update_metadata(info: ModelInfo[Any], values: dict[str, Any]) -> None:
+    actor = current_actor()
+    now = dt.datetime.now(dt.timezone.utc)
+    if "updated_at" in info.field_map:
+        values["updated_at"] = now
+    if actor is not None and "updated_by" in info.field_map:
+        values["updated_by"] = actor.id
+
+
 __all__ = [
     "ORM",
+    "DatabaseModel",
     "FieldInfo",
     "Model",
     "ModelInfo",

@@ -7,6 +7,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 
 import msgspec
 
+from .audit import AuditActor, AuditTrail, audit_context
 from .chatops import ChatOpsService
 from .config import AppConfig
 from .database import Database
@@ -55,9 +56,20 @@ class ArtemisApp:
         self.database = database or (Database(self.config.database) if self.config.database else None)
         self.orm = orm or (ORM(self.database) if self.database else None)
         self.observability = observability or Observability(self.config.observability)
-        self.chatops = chatops or ChatOpsService(
-            self.config.chatops, observability=self.observability
-        )
+        self.chatops = chatops or ChatOpsService(self.config.chatops, observability=self.observability)
+        if self.database:
+            existing_audit = self.orm and getattr(self.orm, "_audit_trail", None)
+            if existing_audit is not None:
+                self.audit_trail = existing_audit
+            else:
+                self.audit_trail = AuditTrail(
+                    self.database,
+                    registry=self.orm.registry if self.orm else None,
+                )
+                if self.orm:
+                    self.orm.attach_audit_trail(self.audit_trail)
+        else:
+            self.audit_trail = None
         self._middlewares: list[MiddlewareCallable] = []
         self._startup_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._shutdown_hooks: list[Callable[[], Awaitable[None] | None]] = []
@@ -69,6 +81,8 @@ class ArtemisApp:
             self.on_shutdown(self.database.shutdown)
         if self.orm:
             self.dependencies.provide(ORM, lambda: self.orm)
+        if self.audit_trail:
+            self.dependencies.provide(AuditTrail, lambda: self.audit_trail)
         self.dependencies.provide(Observability, lambda: self.observability)
         self.dependencies.provide(ChatOpsService, lambda: self.chatops)
 
@@ -177,21 +191,37 @@ class ArtemisApp:
             return await self._execute_route(match.route, req, scope)
 
         handler = apply_middleware(self._middlewares, endpoint_handler)
-        observation = self.observability.on_request_start(request)
-        try:
-            response = await handler(request)
-        except HTTPError as exc:
-            response = exception_to_response(exc)
-            self.observability.on_request_success(observation, response)
-            return response
-        except Exception as exc:
-            status = getattr(exc, "status", None)
-            status_code = status if isinstance(status, int) else 500
-            self.observability.on_request_error(observation, exc, status_code=status_code)
-            raise
-        else:
-            self.observability.on_request_success(observation, response)
-            return response
+
+        async def _execute_with_observability() -> Response:
+            observation = self.observability.on_request_start(request)
+            try:
+                response = await handler(request)
+            except HTTPError as exc:
+                response = exception_to_response(exc)
+                self.observability.on_request_success(observation, response)
+                return response
+            except Exception as exc:
+                status = getattr(exc, "status", None)
+                status_code = status if isinstance(status, int) else 500
+                self.observability.on_request_error(observation, exc, status_code=status_code)
+                raise
+            else:
+                self.observability.on_request_success(observation, response)
+                return response
+
+        def _actor_from_principal(principal: CedarEntity | None) -> AuditActor | None:
+            if principal is None:
+                return None
+            return AuditActor(
+                id=principal.id,
+                type=principal.type,
+                attributes=dict(principal.attributes or {}),
+            )
+
+        if self.audit_trail:
+            async with audit_context(tenant=request.tenant, actor=_actor_from_principal(request.principal)):
+                return await _execute_with_observability()
+        return await _execute_with_observability()
 
     async def _execute_route(self, route, request: Request, scope) -> Response:
         await self._authorize_route(route, request, scope)
@@ -278,10 +308,7 @@ class ArtemisApp:
     ) -> None:
         if scope.get("type") != "http":
             raise RuntimeError("ArtemisApp only supports HTTP scopes")
-        headers = {
-            key.decode().lower(): value.decode()
-            for key, value in scope.get("headers", [])
-        }
+        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
         host = headers.get("host")
         if host is None:
             raise RuntimeError("Host header required for multi-tenant resolution")
@@ -301,15 +328,19 @@ class ArtemisApp:
             headers=headers,
             body=body,
         )
-        await send({
-            "type": "http.response.start",
-            "status": response.status,
-            "headers": [(k.encode("latin-1"), v.encode("latin-1")) for k, v in response.headers],
-        })
-        await send({
-            "type": "http.response.body",
-            "body": response.body,
-        })
+        await send(
+            {
+                "type": "http.response.start",
+                "status": response.status,
+                "headers": [(k.encode("latin-1"), v.encode("latin-1")) for k, v in response.headers],
+            }
+        )
+        await send(
+            {
+                "type": "http.response.body",
+                "body": response.body,
+            }
+        )
 
 
 class Artemis(ArtemisApp):

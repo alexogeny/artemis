@@ -85,8 +85,5 @@ def generate_id57(
     if not components:
         raise ValueError("id57 requires at least one component")
     for index, component in enumerate(components):
-        segments.append(
-            component.render(timestamp=ts, uuid_factory=uuid_factory, index=index)
-        )
+        segments.append(component.render(timestamp=ts, uuid_factory=uuid_factory, index=index))
     return "".join(segments)
-

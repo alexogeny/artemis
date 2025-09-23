@@ -13,6 +13,7 @@ def test_create_server_returns_granian() -> None:
     server = create_server(app, config)
     assert isinstance(server, Granian)
 
+
 def test_run_invokes_serve(monkeypatch) -> None:
     app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     served = {"called": False}
