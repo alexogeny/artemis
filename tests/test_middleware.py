@@ -79,7 +79,7 @@ async def test_apply_middleware_reports_success_to_observability() -> None:
     )
     request = Request(
         method="GET",
-        path="/", 
+        path="/",
         headers={},
         tenant=TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT),
         path_params={},
@@ -107,7 +107,7 @@ async def test_apply_middleware_reports_error_to_observability() -> None:
     handler = apply_middleware([failing], endpoint, observability=cast(Observability, observability))
     request = Request(
         method="GET",
-        path="/", 
+        path="/",
         headers={},
         tenant=TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT),
         path_params={},
@@ -133,6 +133,42 @@ async def test_apply_middleware_without_observability() -> None:
         return Response(status=200)
 
     handler = apply_middleware([middleware], endpoint)
+    request = Request(
+        method="GET",
+        path="/",
+        headers={},
+        tenant=TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT),
+        path_params={},
+        query_string="",
+        body=b"",
+    )
+    response = await handler(request)
+    assert response.status == 200
+    assert calls == ["middleware", "endpoint"]
+
+
+@pytest.mark.asyncio
+async def test_apply_middleware_with_empty_sequence_returns_endpoint() -> None:
+    async def endpoint(request: Request) -> Response:
+        return Response(status=204)
+
+    handler = apply_middleware([], endpoint)
+    assert handler is endpoint
+
+
+@pytest.mark.asyncio
+async def test_apply_middleware_accepts_tuple() -> None:
+    calls: list[str] = []
+
+    async def middleware(request: Request, handler):
+        calls.append("middleware")
+        return await handler(request)
+
+    async def endpoint(request: Request) -> Response:
+        calls.append("endpoint")
+        return Response(status=200)
+
+    handler = apply_middleware((middleware,), endpoint)
     request = Request(
         method="GET",
         path="/",

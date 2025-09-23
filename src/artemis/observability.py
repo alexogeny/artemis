@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import secrets
+import random
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -81,7 +81,7 @@ class _ObservationContext:
         self,
         *,
         start: float,
-        stack: ExitStack,
+        stack: ExitStack | None,
         span: Any | None,
         datadog_tags: tuple[str, ...],
         metric_success: str | None,
@@ -118,6 +118,8 @@ class _ObservationContext:
         self.log_fields = dict(log_fields or {})
 
     def close(self, error: BaseException | None = None) -> None:
+        if self.stack is None:
+            return
         if error is None:
             self.stack.__exit__(None, None, None)
         else:
@@ -129,6 +131,19 @@ class _TraceParent:
     trace_id: str
     parent_span_id: str
     trace_flags: str
+
+
+def _default_id_generator() -> Callable[[int], str]:
+    rng = random.Random(time.time_ns())
+
+    def generate(size: int) -> str:
+        bits = max(size * 8, 1)
+        value = 0
+        while value == 0:
+            value = rng.getrandbits(bits)
+        return f"{value:0{size * 2}x}"
+
+    return generate
 
 
 class Observability:
@@ -153,7 +168,7 @@ class Observability:
         self._statsd = None
         self._otel_extract: Callable[[Mapping[str, str]], Any] | None = None
         self._logger = logging.getLogger("artemis.observability")
-        self._id_generator = id_generator or secrets.token_hex
+        self._id_generator = id_generator or _default_id_generator()
         self._base_datadog_tags = tuple(f"{key}:{value}" for key, value in self.config.datadog_tags)
         if self.config.enabled:
             self._prepare_opentelemetry()
@@ -327,7 +342,14 @@ class Observability:
     ) -> _ObservationContext | None:
         if not self._enabled:
             return None
-        stack = ExitStack()
+        stack: ExitStack | None = None
+
+        def ensure_stack() -> ExitStack:
+            nonlocal stack
+            if stack is None:
+                stack = ExitStack()
+            return stack
+
         span = None
         span_id: str | None = None
         trace_id_value = trace_id
@@ -341,7 +363,7 @@ class Observability:
                     otel_context = None
                 if otel_context is not None:
                     span_kwargs["context"] = otel_context
-            span = stack.enter_context(self._tracer.start_as_current_span(span_name, **span_kwargs))
+            span = ensure_stack().enter_context(self._tracer.start_as_current_span(span_name, **span_kwargs))
             for key, value in attributes.items():
                 span.set_attribute(key, value)
             if hasattr(span, "get_span_context"):
@@ -368,7 +390,7 @@ class Observability:
                     message=breadcrumb_message,
                     data=dict(breadcrumb_data or {}),
                 )
-            scope = stack.enter_context(self._sentry_hub.push_scope())
+            scope = ensure_stack().enter_context(self._sentry_hub.push_scope())
             if sentry_tags and hasattr(scope, "set_tag"):
                 for key, value in sentry_tags.items():
                     scope.set_tag(key, value)

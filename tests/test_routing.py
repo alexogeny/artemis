@@ -5,6 +5,7 @@ from typing import Any, Callable, cast
 
 import pytest
 
+import artemis.routing as routing
 from artemis.routing import RouteGuard, RouteMatch, Router, get, post, route
 
 
@@ -98,6 +99,41 @@ async def test_router_find_not_found() -> None:
 
 
 @pytest.mark.asyncio
+async def test_router_deduplicates_dynamic_candidates() -> None:
+    router = Router()
+
+    async def handler(item_id: str) -> str:
+        return item_id
+
+    router.add_route("/items/{item_id}", methods=["GET", "*"], endpoint=handler)
+
+    match = router.find("GET", "/items/123")
+    assert match.params["item_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_router_dynamic_not_matching_pattern_raises() -> None:
+    router = Router()
+
+    async def handler(item_id: str) -> str:
+        return item_id
+
+    router.add_route("/items/{item_id}", methods=["GET"], endpoint=handler)
+
+    with pytest.raises(LookupError):
+        router.find("GET", "/items/123/details")
+
+
+def test_prefix_helpers_cover_edge_cases() -> None:
+    assert routing._dynamic_prefix_key("/static") == "/static"
+    assert routing._dynamic_prefix_key("/{tenant}") is None
+    assert routing._dynamic_prefix_key("/files/{path:path}") == "files"
+    assert routing._dynamic_prefix_key("/foo{bar}") is None
+    assert routing._request_prefix_key("/") is None
+    assert routing._request_prefix_key("/docs/api") == "docs"
+
+
+@pytest.mark.asyncio
 async def test_router_supports_wildcard_method() -> None:
     router = Router()
 
@@ -187,7 +223,7 @@ def test_router_find_only_consults_routes_for_method() -> None:
     get_routes = sum(1 for registered_route, _ in counting_patterns if "GET" in registered_route.spec.methods)
 
     assert post_calls == 0
-    assert get_calls == get_routes
+    assert get_calls <= get_routes
 
 
 @pytest.mark.asyncio

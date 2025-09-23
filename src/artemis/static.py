@@ -99,6 +99,13 @@ class _FileMetadata:
         return stat_module.S_ISREG(self.st_mode)
 
 
+@dataclass(slots=True)
+class _AssetCacheEntry:
+    metadata: _FileMetadata
+    raw: bytes | None
+    encodings: dict[str, bytes]
+
+
 class StaticFiles:
     """Serve files from a directory tree using :class:`TaskExecutor`."""
 
@@ -125,6 +132,7 @@ class StaticFiles:
         self._content_types = {suffix.lower(): value for suffix, value in (content_types or {}).items()}
         self._compressors = _COMPRESSORS
         self._compressor_map = {name: func for name, func in self._compressors}
+        self._asset_cache: dict[str, _AssetCacheEntry] = {}
 
     async def serve(
         self,
@@ -147,21 +155,24 @@ class StaticFiles:
             compressible=compressible,
         )
         compressor = self._compressor_map.get(negotiated) if negotiated else None
-        raw_body: bytes | None = None
-        if method == "GET" or compressor is not None:
-            raw_body = await self._read_file(target)
+        cache_entry = self._cached_asset(target, metadata)
+        metadata = cache_entry.metadata
         body: bytes
         content_length: int
         content_encoding: tuple[str, str] | None = None
-        if compressor is not None and raw_body is not None:
-            compressed = await self._executor.run(compressor, raw_body)
+        if compressor is not None:
+            compressed = await self._ensure_compressed(cache_entry, target, negotiated, compressor)
             body = compressed if method == "GET" else b""
             content_length = len(compressed)
             if negotiated is None:  # pragma: no cover - defensive check
                 raise RuntimeError("Compression selected without negotiated encoding")
             content_encoding = ("content-encoding", negotiated)
         else:
-            body = raw_body if raw_body is not None and method == "GET" else b""
+            if method == "GET":
+                raw_body = await self._ensure_raw(cache_entry, target)
+                body = raw_body
+            else:
+                body = b""
             content_length = metadata.st_size
         header_pairs = [
             ("content-type", content_type),
@@ -174,6 +185,34 @@ class StaticFiles:
         if self._cache_control:
             header_pairs.append(("cache-control", self._cache_control))
         return Response(status=int(Status.OK), headers=tuple(header_pairs), body=body)
+
+    def _cached_asset(self, path: Path, metadata: _FileMetadata) -> _AssetCacheEntry:
+        key = os.fspath(path)
+        entry = self._asset_cache.get(key)
+        if entry is None or entry.metadata != metadata:
+            entry = _AssetCacheEntry(metadata=metadata, raw=None, encodings={})
+            self._asset_cache[key] = entry
+        return entry
+
+    async def _ensure_raw(self, entry: _AssetCacheEntry, path: Path) -> bytes:
+        if entry.raw is None:
+            entry.raw = await self._read_file(path)
+        return entry.raw
+
+    async def _ensure_compressed(
+        self,
+        entry: _AssetCacheEntry,
+        path: Path,
+        encoding: str,
+        compressor: CompressFunc,
+    ) -> bytes:
+        cached = entry.encodings.get(encoding)
+        if cached is not None:
+            return cached
+        raw = await self._ensure_raw(entry, path)
+        compressed = await self._executor.run(compressor, raw)
+        entry.encodings[encoding] = compressed
+        return compressed
 
     def _negotiate_encoding(self, header: str | None, *, compressible: bool) -> str | None:
         if not header or not self._compressors or not compressible:

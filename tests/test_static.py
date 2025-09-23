@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gzip
 import os
+from pathlib import Path
 
 import brotli
 import pytest
@@ -12,7 +13,7 @@ from artemis.config import AppConfig
 from artemis.exceptions import HTTPError
 from artemis.execution import ExecutionConfig, ExecutionMode, TaskExecutor
 from artemis.serialization import json_decode
-from artemis.static import StaticFiles
+from artemis.static import StaticFiles, _gzip_compress
 from artemis.testing import TestClient
 
 
@@ -164,6 +165,77 @@ async def test_mount_static_applies_compression(tmp_path) -> None:
         assert decompressor.decompress(zstd_response.body) == expected
 
 
+@pytest.mark.asyncio
+async def test_staticfiles_caches_assets(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    bundle = assets / "bundle.js"
+    bundle.write_bytes(b"x" * 1024)
+
+    executor = TaskExecutor()
+    server = StaticFiles(directory=assets, executor=executor)
+
+    read_calls = 0
+    compression_calls = 0
+
+    original_read = server._read_file
+
+    async def counting_read(path: Path) -> bytes:
+        nonlocal read_calls
+        read_calls += 1
+        return await original_read(path)
+
+    monkeypatch.setattr(server, "_read_file", counting_read)
+
+    original_run = server._executor.run
+
+    async def counting_run(func, *args, **kwargs):
+        nonlocal compression_calls
+        result = await original_run(func, *args, **kwargs)
+        if func is _gzip_compress:
+            compression_calls += 1
+        return result
+
+    monkeypatch.setattr(server._executor, "run", counting_run)
+
+    try:
+        first = await server.serve(
+            "bundle.js",
+            method="HEAD",
+            headers={"accept-encoding": "gzip"},
+        )
+        assert dict(first.headers)["content-encoding"] == "gzip"
+        assert first.body == b""
+        assert read_calls == 1
+        assert compression_calls == 1
+
+        second = await server.serve(
+            "bundle.js",
+            method="HEAD",
+            headers={"accept-encoding": "gzip"},
+        )
+        assert dict(second.headers)["content-encoding"] == "gzip"
+        assert second.body == b""
+        assert read_calls == 1
+        assert compression_calls == 1
+
+        compressed = await server.serve(
+            "bundle.js",
+            method="GET",
+            headers={"accept-encoding": "gzip"},
+        )
+        assert dict(compressed.headers)["content-encoding"] == "gzip"
+        assert read_calls == 1
+        assert compression_calls == 1
+
+        plain = await server.serve("bundle.js", method="GET")
+        assert plain.body == b"x" * 1024
+        assert read_calls == 1
+        assert compression_calls == 1
+    finally:
+        await executor.shutdown()
+
+
 def test_mount_static_requires_existing_directory(tmp_path) -> None:
     app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     with pytest.raises(ValueError):
@@ -308,6 +380,7 @@ async def test_static_encoding_negotiation_branches(tmp_path) -> None:
     executor = TaskExecutor()
     server = StaticFiles(directory=assets, executor=executor)
     try:
+
         def _identity(data: bytes) -> bytes:
             return data
 

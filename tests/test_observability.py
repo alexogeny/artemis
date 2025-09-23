@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import secrets
 import types
 from typing import Any, Iterable, cast
 
@@ -197,6 +198,38 @@ def test_observability_request_error_without_metrics(monkeypatch: pytest.MonkeyP
 def test_observability_request_success_context_none() -> None:
     observability = Observability(ObservabilityConfig(datadog_enabled=False))
     observability.on_request_success(None, Response())
+
+
+def test_observability_uses_custom_id_generator() -> None:
+    observability = Observability(
+        ObservabilityConfig(
+            opentelemetry_enabled=False,
+            sentry_enabled=False,
+            datadog_enabled=False,
+        )
+    )
+    assert observability._id_generator is not secrets.token_hex
+    token = observability._id_generator(8)
+    assert isinstance(token, str)
+    assert len(token) == 16
+
+
+def test_observability_context_without_stack_when_inactive() -> None:
+    config = ObservabilityConfig(opentelemetry_enabled=False, sentry_enabled=False, datadog_enabled=False)
+    observability = Observability(config)
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+    request = Request(
+        method="GET",
+        path="/health",
+        headers={},
+        tenant=tenant,
+        path_params={},
+        query_string="",
+        body=b"",
+    )
+    context = observability.on_request_start(request)
+    assert context is not None
+    assert context.stack is None
 
 
 def test_observability_request_success_without_timing(monkeypatch: pytest.MonkeyPatch) -> None:

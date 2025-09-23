@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Callable, Iterable, Mapping, Sequence
@@ -85,6 +86,7 @@ class CedarEngine:
 
     def __init__(self, policies: Sequence[CedarPolicy]) -> None:
         self._policies = tuple(policies)
+        self._index = self._build_index(self._policies)
 
     def check(
         self,
@@ -95,7 +97,7 @@ class CedarEngine:
         context: Mapping[str, Any] | None = None,
     ) -> bool:
         allowed = False
-        for policy in self._policies:
+        for policy in self._candidates(principal, action):
             if not policy.matches(principal, action, resource, context):
                 continue
             if policy.effect is CedarEffect.DENY:
@@ -105,6 +107,60 @@ class CedarEngine:
 
     def policies(self) -> Sequence[CedarPolicy]:
         return self._policies
+
+    def _build_index(
+        self, policies: Sequence[CedarPolicy]
+    ) -> Mapping[str | None, Mapping[str | None, Mapping[str | None, tuple[CedarPolicy, ...]]]]:
+        index: dict[str | None, dict[str | None, dict[str | None, list[CedarPolicy]]]] = {}
+        for policy in policies:
+            type_key = policy.principal.entity_type
+            if type_key == "*":
+                type_key = None
+            identifier = policy.principal.identifier
+            if identifier in (None, "*"):
+                id_key: str | None = None
+            else:
+                id_key = identifier
+            action_keys = _policy_action_keys(policy.actions)
+            type_bucket = index.setdefault(type_key, {})
+            id_bucket = type_bucket.setdefault(id_key, {})
+            for action_key in action_keys:
+                id_bucket.setdefault(action_key, []).append(policy)
+        return {
+            type_key: {
+                id_key: {action: tuple(policies) for action, policies in action_map.items()}
+                for id_key, action_map in id_bucket.items()
+            }
+            for type_key, id_bucket in index.items()
+        }
+
+    def _candidates(self, principal: CedarEntity, action: str) -> Sequence[CedarPolicy]:
+        candidates: list[CedarPolicy] = []
+        for type_key in (principal.type, None):
+            type_bucket = self._index.get(type_key)
+            if not type_bucket:
+                continue
+            for id_key in (principal.id, None):
+                action_bucket = type_bucket.get(id_key)
+                if not action_bucket:
+                    continue
+                policies = action_bucket.get(action)
+                if policies:
+                    candidates.extend(policies)
+                wildcard = action_bucket.get(None)
+                if wildcard:
+                    candidates.extend(wildcard)
+        if not candidates:
+            return ()
+        seen: set[int] = set()
+        unique: list[CedarPolicy] = []
+        for policy in candidates:
+            identifier = id(policy)
+            if identifier in seen:
+                continue
+            seen.add(identifier)
+            unique.append(policy)
+        return unique
 
 
 def bindings_from_admin(assignments: Iterable[AdminRoleAssignment]) -> list[RoleBinding]:
@@ -122,13 +178,15 @@ def build_engine(
     bindings: Iterable[RoleBinding],
 ) -> CedarEngine:
     role_index = {role.id: role for role in roles}
+    permissions_by_role: dict[str, list[Permission]] = defaultdict(list)
+    for permission in permissions:
+        permissions_by_role[permission.role_id].append(permission)
     policies: list[CedarPolicy] = []
     for binding in bindings:
         role = role_index.get(binding.role_id)
         if role is None:
             continue
-        relevant_permissions = [perm for perm in permissions if perm.role_id == role.id]
-        for permission in relevant_permissions:
+        for permission in permissions_by_role.get(role.id, []):
             policies.append(
                 CedarPolicy(
                     effect=_to_effect(permission.effect),
@@ -144,6 +202,17 @@ def build_engine(
 def _normalize_actions(action: str) -> tuple[str, ...]:
     actions = [part.strip() for part in action.split(",") if part.strip()]
     return tuple(actions or [action])
+
+
+def _policy_action_keys(actions: Sequence[str]) -> tuple[str | None, ...]:
+    if not actions:
+        return (None,)
+    keys: list[str | None] = []
+    for action in actions:
+        normalized: str | None = action if action != "*" else None
+        if normalized not in keys:
+            keys.append(normalized)
+    return tuple(keys or (None,))
 
 
 def _permission_resource(permission: Permission, role: Role) -> CedarReference:

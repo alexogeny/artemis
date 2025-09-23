@@ -48,6 +48,35 @@ async def test_request_query_parsing() -> None:
     assert params.active is True
 
 
+def test_request_defers_query_parsing() -> None:
+    request = build_request(query_string="limit=5")
+    assert request._query_params is None
+    params = request.query_params
+    assert request._query_params is params
+    assert params["limit"] == ["5"]
+
+
+def test_request_query_type_hints_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    import artemis.requests as requests_module
+
+    requests_module._model_type_hints.cache_clear()
+    call_count = 0
+    original_get_type_hints = requests_module.get_type_hints
+
+    def counting(model):
+        nonlocal call_count
+        call_count += 1
+        return original_get_type_hints(model)
+
+    monkeypatch.setattr(requests_module, "get_type_hints", counting)
+
+    request = build_request(query_string="limit=5&active=true")
+    request.query(QueryModel)
+    request.query(QueryModel)
+    assert call_count == 1
+    requests_module._model_type_hints.cache_clear()
+
+
 @pytest.mark.asyncio
 async def test_empty_json_body_returns_none() -> None:
     request = build_request()

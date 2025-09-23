@@ -6,6 +6,8 @@ import pytest
 
 from artemis.application import ArtemisApp
 from artemis.config import AppConfig
+from artemis.requests import Request
+from artemis.responses import Response
 
 
 @pytest.mark.asyncio
@@ -77,3 +79,44 @@ async def test_asgi_rejects_non_http_scope() -> None:
     scope = {"type": "websocket", "headers": []}
     with pytest.raises(RuntimeError):
         await app(scope, receive, send)
+
+
+@pytest.mark.asyncio
+async def test_asgi_collects_body_chunks() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.post("/upload")
+    async def upload(request: Request) -> Response:
+        return Response(body=request.body())
+
+    messages: list[dict[str, object]] = []
+    chunks = [
+        {"type": "http.request", "body": b"", "more_body": True},
+        {"type": "http.request", "body": b"chunk-1", "more_body": True},
+        {"type": "http.request", "body": b"", "more_body": True},
+        {"type": "http.request", "body": b"chunk-2", "more_body": False},
+    ]
+
+    async def receive() -> Mapping[str, object]:
+        if chunks:
+            return chunks.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    await app(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/upload",
+            "query_string": b"",
+            "headers": [(b"host", b"acme.demo.example.com")],
+        },
+        receive,
+        send,
+    )
+    await app.shutdown()
+
+    assert messages[-1]["body"] == b"chunk-1chunk-2"
