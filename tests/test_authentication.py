@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+from typing import Any
 
 import pytest
 
@@ -37,6 +38,37 @@ from artemis.models import (
 
 def _b64url(data: bytes) -> str:
     return base64.urlsafe_b64encode(data).decode().rstrip("=")
+
+
+def _signed_token(provider: TenantOidcProvider, claims: dict[str, Any]) -> str:
+    header = _b64url(json.dumps({"alg": "HS256"}).encode())
+    payload = _b64url(json.dumps(claims).encode())
+    signature = _b64url(
+        hmac.new(
+            provider.client_secret.encode(),
+            f"{header}.{payload}".encode(),
+            hashlib.sha256,
+        ).digest()
+    )
+    return f"{header}.{payload}.{signature}"
+
+
+def _provider(now: dt.datetime, **overrides: Any) -> TenantOidcProvider:
+    return TenantOidcProvider(
+        id=generate_id57(),
+        issuer="https://issuer.example.com",
+        client_id="client",
+        client_secret="oidc-secret",
+        jwks_uri="https://issuer.example.com/jwks",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint="https://issuer.example.com/userinfo",
+        created_at=now,
+        updated_at=now,
+        allowed_audiences=["client"],
+        allowed_groups=["admins"],
+        **overrides,
+    )
 
 
 @pytest.mark.asyncio
@@ -130,50 +162,161 @@ def test_passkey_manager_round_trip() -> None:
 
 def test_oidc_authenticator_validates_token() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantOidcProvider(
-        id=generate_id57(),
-        issuer="https://issuer.example.com",
-        client_id="client",
-        client_secret="oidc-secret",
-        jwks_uri="https://issuer.example.com/jwks",
-        authorization_endpoint="https://issuer.example.com/auth",
-        token_endpoint="https://issuer.example.com/token",
-        userinfo_endpoint="https://issuer.example.com/userinfo",
-        created_at=now,
-        updated_at=now,
-        allowed_audiences=["client"],
-        allowed_groups=["admins"],
-    )
-    header = _b64url(json.dumps({"alg": "HS256"}).encode())
-    payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["admins"]}).encode()
-    )
-    signature = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{payload}".encode(),
-            hashlib.sha256,
-        ).digest()
-    )
-    token = f"{header}.{payload}.{signature}"
+    provider = _provider(now)
+    base_claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "exp": int((now + dt.timedelta(minutes=5)).timestamp()),
+        "nbf": int((now - dt.timedelta(minutes=1)).timestamp()),
+        "iat": int((now - dt.timedelta(minutes=1)).timestamp()),
+    }
+    token = _signed_token(provider, base_claims)
     authenticator = OidcAuthenticator(provider)
     claims = authenticator.validate(token, expected_nonce="nonce")
     assert claims["aud"] == "client"
     with pytest.raises(AuthenticationError):
         authenticator.validate(token, expected_nonce="other")
-    other_payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["users"]}).encode()
-    )
-    other_signature = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{other_payload}".encode(),
-            hashlib.sha256,
-        ).digest()
-    )
-    other_token = f"{header}.{other_payload}.{other_signature}"
+    other_token = _signed_token(provider, dict(base_claims, groups=["users"]))
     with pytest.raises(AuthenticationError):
         authenticator.validate(other_token)
+
+
+def test_oidc_authenticator_rejects_expired_token() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": int((now - dt.timedelta(minutes=2)).timestamp()),
+        "nbf": int((now - dt.timedelta(minutes=5)).timestamp()),
+        "iat": int((now - dt.timedelta(minutes=5)).timestamp()),
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    with pytest.raises(AuthenticationError):
+        authenticator.validate(token)
+
+
+def test_oidc_authenticator_rejects_token_not_yet_valid() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": int((now + dt.timedelta(minutes=5)).timestamp()),
+        "nbf": int((now + dt.timedelta(minutes=2)).timestamp()),
+        "iat": int(now.timestamp()),
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    with pytest.raises(AuthenticationError):
+        authenticator.validate(token)
+
+
+def test_oidc_authenticator_applies_clock_skew_tolerance() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now, clock_skew_seconds=30)
+    authenticator = OidcAuthenticator(provider)
+    tolerant_claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": int((now - dt.timedelta(seconds=10)).timestamp()),
+        "nbf": int((now + dt.timedelta(seconds=10)).timestamp()),
+        "iat": int((now + dt.timedelta(seconds=10)).timestamp()),
+    }
+    tolerant_token = _signed_token(provider, tolerant_claims)
+    authenticator.validate(tolerant_token)
+    future_iat_claims = dict(tolerant_claims)
+    future_iat_claims["iat"] = int((now + dt.timedelta(seconds=90)).timestamp())
+    future_iat_token = _signed_token(provider, future_iat_claims)
+    with pytest.raises(AuthenticationError):
+        authenticator.validate(future_iat_token)
+
+
+def test_oidc_authenticator_requires_exp_claim() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token)
+    assert exc.value.args[0] == "missing_exp"
+
+
+def test_oidc_authenticator_allows_missing_optional_time_claims() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": int((now + dt.timedelta(minutes=5)).timestamp()),
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    result = authenticator.validate(token)
+    assert result["aud"] == "client"
+
+
+def test_oidc_authenticator_rejects_non_numeric_time_claims() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": "not-a-number",
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token)
+    assert exc.value.args[0] == "invalid_exp"
+
+
+def test_oidc_authenticator_rejects_unrepresentable_time_claim() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": int((now + dt.timedelta(minutes=5)).timestamp()),
+        "nbf": int((now - dt.timedelta(minutes=1)).timestamp()),
+        "iat": 10**15,
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token)
+    assert exc.value.args[0] == "invalid_iat"
+
+
+def test_oidc_authenticator_rejects_non_scalar_time_claim_types() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _provider(now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": "client",
+        "groups": ["admins"],
+        "exp": int((now + dt.timedelta(minutes=5)).timestamp()),
+        "nbf": {"bad": "value"},
+    }
+    token = _signed_token(provider, claims)
+    authenticator = OidcAuthenticator(provider)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token)
+    assert exc.value.args[0] == "invalid_nbf"
 
 
 def test_saml_authenticator_validates_and_maps_attributes() -> None:

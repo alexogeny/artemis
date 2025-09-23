@@ -272,6 +272,15 @@ class FederatedProvider(str, Enum):
 
 @model(scope=ModelScope.TENANT, table="oidc_providers")
 class TenantOidcProvider(DatabaseModel):
+    """Tenant-scoped OpenID Connect provider configuration.
+
+    Access tokens issued by the provider must include an ``exp`` claim and are
+    validated against ``nbf`` and ``iat`` when present. The
+    ``clock_skew_seconds`` field controls how much leeway is granted when
+    evaluating these time-based claims, allowing administrators to tolerate
+    minor clock drift between Artemis and the upstream identity provider.
+    """
+
     issuer: str
     client_id: str
     client_secret: str
@@ -282,6 +291,7 @@ class TenantOidcProvider(DatabaseModel):
     enabled: bool = True
     allowed_audiences: list[str] = msgspec.field(default_factory=list)
     allowed_groups: list[str] = msgspec.field(default_factory=list)
+    clock_skew_seconds: int = 60
 
 
 @model(scope=ModelScope.TENANT, table="saml_providers")

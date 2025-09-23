@@ -337,6 +337,25 @@ class OidcAuthenticator:
         groups = claims.get("groups", [])
         if self.provider.allowed_groups and not set(groups).intersection(self.provider.allowed_groups):
             raise AuthenticationError("unauthorized_group")
+        now = dt.datetime.now(dt.timezone.utc)
+        skew_seconds = getattr(self.provider, "clock_skew_seconds", 0)
+        skew = dt.timedelta(seconds=max(0, skew_seconds))
+        exp_claim = claims.get("exp")
+        if exp_claim is None:
+            raise AuthenticationError("missing_exp")
+        exp = _parse_numeric_date(exp_claim, "exp")
+        if now - skew >= exp:
+            raise AuthenticationError("token_expired")
+        nbf_claim = claims.get("nbf")
+        if nbf_claim is not None:
+            nbf = _parse_numeric_date(nbf_claim, "nbf")
+            if now + skew < nbf:
+                raise AuthenticationError("token_not_yet_valid")
+        iat_claim = claims.get("iat")
+        if iat_claim is not None:
+            iat = _parse_numeric_date(iat_claim, "iat")
+            if iat - now > skew:
+                raise AuthenticationError("token_issued_in_future")
         return claims
 
 
@@ -399,6 +418,24 @@ def _b64url_encode(data: bytes) -> str:
 def _b64url_decode(data: str) -> bytes:
     padding = "=" * ((4 - len(data) % 4) % 4)
     return base64.urlsafe_b64decode(data + padding)
+
+
+def _parse_numeric_date(value: Any, claim: str) -> dt.datetime:
+    """Convert numeric date claims into timezone-aware datetimes."""
+
+    try:
+        if isinstance(value, (int, float)):
+            timestamp = float(value)
+        elif isinstance(value, str):
+            timestamp = float(value)
+        else:
+            raise TypeError(value)
+    except (TypeError, ValueError) as exc:
+        raise AuthenticationError(f"invalid_{claim}") from exc
+    try:
+        return dt.datetime.fromtimestamp(timestamp, dt.timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise AuthenticationError(f"invalid_{claim}") from exc
 
 
 def _derive_salt(secret_key: str, salt: str) -> bytes:
