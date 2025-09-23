@@ -7,6 +7,7 @@ from typing import Any, Iterable
 import msgspec
 
 from .exceptions import HTTPError
+from .http import Status
 from .serialization import json_encode
 
 Headers = tuple[tuple[str, str], ...]
@@ -15,7 +16,7 @@ Headers = tuple[tuple[str, str], ...]
 class Response(msgspec.Struct, frozen=True):
     """Immutable response payload."""
 
-    status: int = 200
+    status: int = int(Status.OK)
     headers: Headers = ()
     body: bytes = b""
 
@@ -28,7 +29,7 @@ class Response(msgspec.Struct, frozen=True):
 def PlainTextResponse(
     text: str,
     *,
-    status: int = 200,
+    status: int = int(Status.OK),
     headers: Iterable[tuple[str, str]] | None = None,
 ) -> Response:
     """Create a plain text response."""
@@ -41,7 +42,7 @@ def PlainTextResponse(
 def JSONResponse(
     data: Any,
     *,
-    status: int = 200,
+    status: int = int(Status.OK),
     headers: Iterable[tuple[str, str]] | None = None,
 ) -> Response:
     """Create a JSON response encoded via :mod:`msgspec`."""

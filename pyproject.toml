@@ -13,6 +13,8 @@ dependencies = [
     "rure>=0.2.0",
     "psqlpy>=0.11.0",
     "argon2-cffi>=23.1.0",
+    "brotli>=1.1.0",
+    "zstandard>=0.22.0",
 ]
 
 [project.scripts]

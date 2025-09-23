@@ -105,3 +105,24 @@ async def test_post_decorator_metadata() -> None:
 
     spec = getattr(submit, "__artemis_route__")
     assert spec.methods == ("POST",)
+
+
+def test_router_supports_path_converter() -> None:
+    router = Router()
+
+    async def handler(filepath: str) -> str:
+        return filepath
+
+    router.add_route("/static/{filepath:path}", methods=["GET"], endpoint=handler)
+    match = router.find("GET", "/static/css/app.css")
+    assert match.params["filepath"] == "css/app.css"
+
+
+def test_router_rejects_unknown_converter() -> None:
+    router = Router()
+
+    async def handler() -> None:
+        return None
+
+    with pytest.raises(ValueError):
+        router.add_route("/items/{item:uuid}", methods=["GET"], endpoint=handler)
