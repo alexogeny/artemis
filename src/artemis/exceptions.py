@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .http import Status, ensure_status, reason_phrase
 from .serialization import json_encode
 
 
@@ -14,10 +15,12 @@ class ArtemisError(Exception):
 class HTTPError(ArtemisError):
     """Structured HTTP error that is msgspec serializable."""
 
-    def __init__(self, status: int, detail: Any) -> None:
-        super().__init__(status, detail)
-        self.status = status
+    def __init__(self, status: int | Status, detail: Any) -> None:
+        status_code = ensure_status(status)
+        super().__init__(status_code, detail)
+        self.status = status_code
         self.detail = detail
+        self.reason = reason_phrase(status_code)
 
     def to_response_body(self) -> bytes:
-        return json_encode({"error": {"status": self.status, "detail": self.detail}})
+        return json_encode({"error": {"status": self.status, "reason": self.reason, "detail": self.detail}})

@@ -33,7 +33,7 @@ def test_exception_to_response_serializes() -> None:
     error = HTTPError(400, "bad request")
     response = exception_to_response(error)
     data = json_decode(response.body)
-    assert data == {"error": {"status": 400, "detail": "bad request"}}
+    assert data == {"error": {"status": 400, "reason": "Bad Request", "detail": "bad request"}}
 
 
 def test_json_response_redacts_admin_user_sensitive_fields() -> None:

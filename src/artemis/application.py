@@ -15,6 +15,7 @@ from .database import Database
 from .dependency import DependencyProvider
 from .exceptions import HTTPError
 from .execution import TaskExecutor
+from .http import Status
 from .middleware import MiddlewareCallable, apply_middleware
 from .observability import Observability
 from .orm import ORM
@@ -156,10 +157,10 @@ class ArtemisApp:
         )
 
         async def _serve_root(request: Request) -> Response:
-            return await server.serve("", method=request.method)
+            return await server.serve("", method=request.method, headers=request.headers)
 
         async def _serve_path(filepath: str, request: Request) -> Response:
-            return await server.serve(filepath, method=request.method)
+            return await server.serve(filepath, method=request.method, headers=request.headers)
 
         self.router.add_route(mount_path, methods=("GET", "HEAD"), endpoint=_serve_root, name=name)
         self.router.add_route(f"{mount_path}/{{filepath:path}}", methods=("GET", "HEAD"), endpoint=_serve_path)
@@ -250,7 +251,12 @@ class ArtemisApp:
                 return response
             except Exception as exc:
                 status = getattr(exc, "status", None)
-                status_code = status if isinstance(status, int) else 500
+                if isinstance(status, Status):
+                    status_code = int(status)
+                elif isinstance(status, int):
+                    status_code = status
+                else:
+                    status_code = int(Status.INTERNAL_SERVER_ERROR)
                 self.observability.on_request_error(observation, exc, status_code=status_code)
                 raise
             else:
@@ -300,7 +306,10 @@ class ArtemisApp:
                         body_payload = await request.json()
                     call_args[name] = msgspec.convert(body_payload or {}, type=annotation)
                 else:
-                    raise HTTPError(500, {"dependency": repr(annotation), "detail": str(exc)})
+                    raise HTTPError(
+                        Status.INTERNAL_SERVER_ERROR,
+                        {"dependency": repr(annotation), "detail": str(exc)},
+                    )
         result = route.spec.endpoint(**call_args)
         if inspect.isawaitable(result):
             result = await result
@@ -311,14 +320,17 @@ class ArtemisApp:
             return
         principal = request.principal
         if principal is None:
-            raise HTTPError(403, {"detail": "authentication_required"})
+            raise HTTPError(Status.FORBIDDEN, {"detail": "authentication_required"})
         try:
             engine = await scope.get(CedarEngine)
         except LookupError as exc:  # pragma: no cover - dependency misconfiguration
-            raise HTTPError(500, {"detail": "authorization engine missing"}) from exc
+            raise HTTPError(Status.INTERNAL_SERVER_ERROR, {"detail": "authorization engine missing"}) from exc
         for guard in route.guards:
             if guard.principal_type not in ("*", principal.type):
-                raise HTTPError(403, {"detail": "principal_not_allowed", "required": guard.principal_type})
+                raise HTTPError(
+                    Status.FORBIDDEN,
+                    {"detail": "principal_not_allowed", "required": guard.principal_type},
+                )
             resource_id = guard.resolve_resource(request)
             resource = CedarEntity(guard.resource_type, resource_id) if resource_id else None
             context = guard.context(request)
@@ -330,7 +342,7 @@ class ArtemisApp:
             )
             if not allowed:
                 raise HTTPError(
-                    403,
+                    Status.FORBIDDEN,
                     {
                         "action": guard.action,
                         "resource_type": guard.resource_type,
@@ -409,7 +421,7 @@ def _coerce_response(result: Any) -> Response:
     if isinstance(result, Response):
         return result
     if result is None:
-        return Response(status=204, body=b"")
+        return Response(status=int(Status.NO_CONTENT), body=b"")
     if isinstance(result, str):
         return PlainTextResponse(result)
     return JSONResponse(result)

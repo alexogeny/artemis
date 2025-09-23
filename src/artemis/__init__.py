@@ -24,6 +24,17 @@ from .config import AppConfig
 from .database import Database, DatabaseConfig, PoolConfig
 from .dependency import DependencyProvider
 from .exceptions import ArtemisError, HTTPError
+from .http import (
+    Status,
+    ensure_status,
+    is_client_error,
+    is_error,
+    is_informational,
+    is_redirect,
+    is_server_error,
+    is_success,
+    reason_phrase,
+)
 from .migrations import (
     Migration,
     MigrationContext,
@@ -169,6 +180,7 @@ __all__ = [
     "SessionToken",
     "SlackWebhookConfig",
     "StaticFiles",
+    "Status",
     "Subscription",
     "SubscriptionStatus",
     "TenantAuditLogEntry",
@@ -189,10 +201,18 @@ __all__ = [
     "build_engine",
     "create_table_for_model",
     "default_registry",
+    "ensure_status",
     "generate_schema_migrations",
     "get",
+    "is_client_error",
+    "is_error",
+    "is_informational",
+    "is_redirect",
+    "is_server_error",
+    "is_success",
     "model",
     "post",
+    "reason_phrase",
     "route",
     "run_sql",
 ]

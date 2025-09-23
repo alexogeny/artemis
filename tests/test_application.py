@@ -12,6 +12,7 @@ from artemis.config import AppConfig
 from artemis.database import Database, DatabaseConfig, PoolConfig
 from artemis.dependency import DependencyProvider
 from artemis.exceptions import HTTPError
+from artemis.http import Status
 from artemis.orm import ORM
 from artemis.rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
 from artemis.requests import Request
@@ -134,7 +135,9 @@ async def test_admin_route_requires_admin_scope(app: ArtemisApp) -> None:
         forbidden = await client.get("/admin/tenants", tenant="acme")
         assert forbidden.status == 403
         payload = json_decode(forbidden.body)
-        assert payload == {"error": {"status": 403, "detail": "admin scope required"}}
+        assert payload == {
+            "error": {"status": 403, "reason": "Forbidden", "detail": "admin scope required"}
+        }
 
 
 @pytest.mark.asyncio
@@ -268,6 +271,7 @@ async def test_guard_requires_principal() -> None:
         response = await client.get("/auth/required", tenant="acme")
         assert response.status == 403
         payload = json_decode(response.body)
+        assert payload["error"]["reason"] == "Forbidden"
         assert payload["error"]["detail"]["detail"] == "authentication_required"
 
 
@@ -303,7 +307,30 @@ async def test_guard_rejects_principal_type_mismatch() -> None:
         response = await client.get("/admin-only", tenant="acme")
         assert response.status == 403
         payload = json_decode(response.body)
+        assert payload["error"]["reason"] == "Forbidden"
         assert payload["error"]["detail"]["detail"] == "principal_not_allowed"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_handles_status_enum_exception(app: ArtemisApp) -> None:
+    class StatusError(Exception):
+        def __init__(self, status: Status | int) -> None:
+            super().__init__("boom")
+            self.status = status
+
+    @app.get("/status-error")
+    async def raises_status_error() -> None:
+        raise StatusError(Status.BAD_REQUEST)
+
+    @app.get("/status-int-error")
+    async def raises_int_error() -> None:
+        raise StatusError(400)
+
+    async with TestClient(app) as client:
+        with pytest.raises(StatusError):
+            await client.get("/status-error", tenant="acme")
+        with pytest.raises(StatusError):
+            await client.get("/status-int-error", tenant="acme")
 
 
 @pytest.mark.asyncio
