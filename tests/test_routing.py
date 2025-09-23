@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from time import perf_counter
+from typing import Any, Callable, cast
+
 import pytest
 
-from artemis.routing import RouteGuard, Router, get, post, route
+from artemis.routing import RouteGuard, RouteMatch, Router, get, post, route
 
 
 @pytest.mark.asyncio
@@ -16,6 +19,33 @@ async def test_router_matches_path_parameters() -> None:
     match = router.find("GET", "/items/123")
     assert match.route is route
     assert match.params["item_id"] == "123"
+
+
+@pytest.mark.asyncio
+async def test_router_scopes_routes_by_method() -> None:
+    router = Router()
+
+    async def handler() -> str:
+        return "ok"
+
+    router.add_route("/items", methods=["GET"], endpoint=handler)
+
+    with pytest.raises(LookupError):
+        router.find("POST", "/items")
+
+
+@pytest.mark.asyncio
+async def test_router_registers_multiple_methods() -> None:
+    router = Router()
+
+    async def handler() -> str:
+        return "ok"
+
+    route = router.add_route("/items", methods=["GET", "post"], endpoint=handler)
+
+    assert route.spec.methods == ("GET", "POST")
+    assert router.find("GET", "/items").route is route
+    assert router.find("POST", "/items").route is route
 
 
 @pytest.mark.asyncio
@@ -58,8 +88,26 @@ def test_route_decorator_single_guard() -> None:
 @pytest.mark.asyncio
 async def test_router_find_not_found() -> None:
     router = Router()
+
+    async def handler() -> None:
+        return None
+
+    router.add_route("/items", methods=["GET"], endpoint=handler)
     with pytest.raises(LookupError):
         router.find("GET", "/missing")
+
+
+@pytest.mark.asyncio
+async def test_router_supports_wildcard_method() -> None:
+    router = Router()
+
+    async def handler() -> str:
+        return "ok"
+
+    route = router.add_route("/any", methods=["*"], endpoint=handler)
+
+    match = router.find("PATCH", "/any")
+    assert match.route is route
 
 
 @pytest.mark.asyncio
@@ -97,6 +145,51 @@ def test_router_applies_global_guards() -> None:
     assert guard in route.guards
 
 
+def test_router_find_only_consults_routes_for_method() -> None:
+    router = Router()
+
+    async def handler() -> None:
+        return None
+
+    for idx in range(50):
+        router.add_route(f"/posts/{idx}", methods=["POST"], endpoint=handler)
+
+    for idx in range(50):
+        router.add_route(f"/items/{idx}", methods=["GET"], endpoint=handler)
+
+    class CountingPattern:
+        def __init__(self, pattern: Any) -> None:
+            self.pattern = pattern
+            self.calls = 0
+
+        def match(self, path: str) -> Any:
+            self.calls += 1
+            return self.pattern.match(path)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self.pattern, name)
+
+    counting_patterns = []
+    for registered_route in router._routes:
+        wrapper = CountingPattern(registered_route.pattern)
+        counting_patterns.append((registered_route, wrapper))
+        registered_route.pattern = cast(Any, wrapper)
+
+    match = router.find("GET", "/items/49")
+    assert match.route.spec.path == "/items/49"
+
+    post_calls = sum(
+        wrapper.calls for registered_route, wrapper in counting_patterns if "POST" in registered_route.spec.methods
+    )
+    get_calls = sum(
+        wrapper.calls for registered_route, wrapper in counting_patterns if "GET" in registered_route.spec.methods
+    )
+    get_routes = sum(1 for registered_route, _ in counting_patterns if "GET" in registered_route.spec.methods)
+
+    assert post_calls == 0
+    assert get_calls == get_routes
+
+
 @pytest.mark.asyncio
 async def test_post_decorator_metadata() -> None:
     @post("/submit")
@@ -105,6 +198,61 @@ async def test_post_decorator_metadata() -> None:
 
     spec = getattr(submit, "__artemis_route__")
     assert spec.methods == ("POST",)
+
+
+def test_router_dispatch_microbenchmark() -> None:
+    router = Router()
+
+    async def handler() -> None:
+        return None
+
+    for idx in range(2000):
+        router.add_route(f"/background/{idx}", methods=["POST"], endpoint=handler)
+
+    target_route = router.add_route("/bench/target", methods=["GET"], endpoint=handler)
+    target_path = target_route.spec.path
+
+    assert router.find("GET", target_path).route is target_route
+
+    iterations = 3000
+
+    def _measure(func: Callable[[], None]) -> float:
+        start = perf_counter()
+        func()
+        return perf_counter() - start
+
+    def run_router() -> None:
+        for _ in range(iterations):
+            router.find("GET", target_path)
+
+    def _naive_find(method: str, path: str) -> RouteMatch:
+        method_upper = method.upper()
+        for registered_route in router._routes:
+            if method_upper not in registered_route.spec.methods:
+                continue
+            captures = registered_route.pattern.match(path)
+            if captures is None:
+                continue
+            params: dict[str, str] = {}
+            for name in registered_route.param_names:
+                group = captures.group(name)
+                if group is not None:
+                    params[name] = group
+            return RouteMatch(route=registered_route, params=params)
+        raise LookupError(f"No route matches {method_upper} {path}")
+
+    def run_naive() -> None:
+        for _ in range(iterations):
+            _naive_find("GET", target_path)
+
+    run_router()
+    run_naive()
+
+    optimized_time = _measure(run_router)
+    baseline_time = _measure(run_naive)
+
+    assert baseline_time > optimized_time
+    assert baseline_time / optimized_time > 10
 
 
 def test_router_supports_path_converter() -> None:
