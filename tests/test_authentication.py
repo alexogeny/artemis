@@ -13,6 +13,7 @@ from artemis.authentication import (
     FederatedIdentityDirectory,
     MfaManager,
     OidcAuthenticator,
+    OidcValidationDefaults,
     PasskeyManager,
     PasswordHasher,
     SamlAuthenticator,
@@ -41,6 +42,73 @@ def _b64url(data: bytes) -> str:
 
 def _saml_instant(value: dt.datetime) -> str:
     return value.astimezone(dt.timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _epoch(value: dt.datetime) -> int:
+    return int(value.astimezone(dt.timezone.utc).timestamp())
+
+
+def _build_oidc_authenticator(
+    *,
+    now: dt.datetime,
+    defaults: OidcValidationDefaults | None = None,
+) -> tuple[OidcAuthenticator, TenantOidcProvider, bytes]:
+    provider = TenantOidcProvider(
+        id=generate_id57(),
+        issuer="https://issuer.example.com",
+        client_id="client",
+        client_secret="oidc-secret",
+        jwks_uri="https://issuer.example.com/jwks",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint="https://issuer.example.com/userinfo",
+        created_at=now,
+        updated_at=now,
+        allowed_audiences=["client"],
+        allowed_groups=["admins"],
+    )
+    secret = provider.client_secret.encode()
+    jwks = {
+        "keys": [
+            {
+                "kty": "oct",
+                "kid": "primary",
+                "k": _b64url(secret),
+                "alg": "HS256",
+                "use": "sig",
+            }
+        ]
+    }
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=defaults
+        or OidcValidationDefaults(
+            clock_skew_seconds=0,
+            default_token_ttl_seconds=600,
+            max_token_age_seconds=600,
+        ),
+        jwks_fetcher=lambda _: jwks,
+    )
+    return authenticator, provider, secret
+
+
+def _issue_oidc_token(
+    claims: dict[str, object],
+    secret: bytes,
+    *,
+    kid: str | None = "primary",
+    alg: str = "HS256",
+    signature_bytes: bytes | None = None,
+) -> str:
+    header_fields: dict[str, object] = {"alg": alg, "typ": "JWT"}
+    if kid is not None:
+        header_fields["kid"] = kid
+    header = _b64url(json.dumps(header_fields).encode())
+    payload = _b64url(json.dumps(claims).encode())
+    if signature_bytes is None:
+        signature_bytes = hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    signature = _b64url(signature_bytes)
+    return f"{header}.{payload}.{signature}"
 
 
 @pytest.mark.asyncio
@@ -133,51 +201,98 @@ def test_passkey_manager_round_trip() -> None:
 
 
 def test_oidc_authenticator_validates_token() -> None:
-    now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantOidcProvider(
-        id=generate_id57(),
-        issuer="https://issuer.example.com",
-        client_id="client",
-        client_secret="oidc-secret",
-        jwks_uri="https://issuer.example.com/jwks",
-        authorization_endpoint="https://issuer.example.com/auth",
-        token_endpoint="https://issuer.example.com/token",
-        userinfo_endpoint="https://issuer.example.com/userinfo",
-        created_at=now,
-        updated_at=now,
-        allowed_audiences=["client"],
-        allowed_groups=["admins"],
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    issued_at = now - dt.timedelta(seconds=30)
+    expires_at = now + dt.timedelta(minutes=5)
+    claims = {
+        "iss": provider.issuer,
+        "aud": [provider.client_id, "unused"],
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(issued_at),
+        "nbf": _epoch(issued_at),
+        "exp": _epoch(expires_at),
+    }
+    token = _issue_oidc_token(claims, secret)
+    validated = authenticator.validate(token, expected_nonce="nonce", now=now)
+    assert validated["aud"] == [provider.client_id, "unused"]
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, expected_nonce="other", now=now)
+    assert str(exc.value) == "invalid_nonce"
+
+
+def test_oidc_authenticator_hmac_fallback_uses_client_secret() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, _ = _build_oidc_authenticator(now=now)
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "rsa",
+                    "n": _b64url(b"\x01" + b"\x00" * 63),
+                    "e": _b64url((65537).to_bytes(3, "big")),
+                }
+            ]
+        },
     )
-    header = _b64url(json.dumps({"alg": "HS256"}).encode())
-    payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["admins"]}).encode()
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, provider.client_secret.encode(), kid=None)
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+
+def test_oidc_authenticator_hmac_fallback_requires_client_secret() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    provider_without_secret = TenantOidcProvider(
+        id=provider.id,
+        issuer=provider.issuer,
+        client_id=provider.client_id,
+        client_secret="",
+        jwks_uri=provider.jwks_uri,
+        authorization_endpoint=provider.authorization_endpoint,
+        token_endpoint=provider.token_endpoint,
+        userinfo_endpoint=provider.userinfo_endpoint,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+        allowed_audiences=list(provider.allowed_audiences),
+        allowed_groups=list(provider.allowed_groups),
+        enabled=provider.enabled,
     )
-    signature = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{payload}".encode(),
-            hashlib.sha256,
-        ).digest()
+    authenticator = OidcAuthenticator(
+        provider_without_secret,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {},
     )
-    token = f"{header}.{payload}.{signature}"
-    authenticator = OidcAuthenticator(provider)
-    claims = authenticator.validate(token, expected_nonce="nonce")
-    assert claims["aud"] == "client"
-    with pytest.raises(AuthenticationError):
-        authenticator.validate(token, expected_nonce="other")
-    other_payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["users"]}).encode()
-    )
-    other_signature = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{other_payload}".encode(),
-            hashlib.sha256,
-        ).digest()
-    )
-    other_token = f"{header}.{other_payload}.{other_signature}"
-    with pytest.raises(AuthenticationError):
-        authenticator.validate(other_token)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret, kid=None)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unknown_jwk"
+
+
+def test_oidc_authenticator_client_secret_key_rejects_non_hmac() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, _, _ = _build_oidc_authenticator(now=now)
+    assert authenticator._client_secret_hmac_key("RS256") is None
 
 
 def test_saml_authenticator_validates_and_maps_attributes() -> None:
@@ -480,62 +595,730 @@ def test_mfa_manager_rejects_consumed_codes() -> None:
 
 
 def test_oidc_authenticator_error_paths() -> None:
-    now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantOidcProvider(
-        id=generate_id57(),
-        issuer="https://issuer.example.com",
-        client_id="client",
-        client_secret="oidc-secret",
-        jwks_uri="https://issuer.example.com/jwks",
-        authorization_endpoint="https://issuer.example.com/auth",
-        token_endpoint="https://issuer.example.com/token",
-        userinfo_endpoint="https://issuer.example.com/userinfo",
-        created_at=now,
-        updated_at=now,
-        allowed_audiences=["client"],
-        allowed_groups=["admins"],
-    )
-    header = _b64url(json.dumps({"alg": "HS256"}).encode())
-    payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["admins"]}).encode()
-    )
-    bad_signature = _b64url(hmac.new(b"wrong", f"{header}.{payload}".encode(), hashlib.sha256).digest())
-    authenticator = OidcAuthenticator(provider)
-    with pytest.raises(AuthenticationError):
-        authenticator.validate(f"{header}.{payload}.{bad_signature}")
-    wrong_issuer_payload = _b64url(json.dumps({"iss": "https://other", "aud": "client", "nonce": "nonce"}).encode())
-    sig = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{wrong_issuer_payload}".encode(),
-            hashlib.sha256,
-        ).digest()
-    )
-    with pytest.raises(AuthenticationError):
-        authenticator.validate(f"{header}.{wrong_issuer_payload}.{sig}")
-    wrong_audience_payload = _b64url(json.dumps({"iss": provider.issuer, "aud": "other", "nonce": "nonce"}).encode())
-    sig = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{wrong_audience_payload}".encode(),
-            hashlib.sha256,
-        ).digest()
-    )
-    with pytest.raises(AuthenticationError):
-        authenticator.validate(f"{header}.{wrong_audience_payload}.{sig}")
-    good_payload = _b64url(
-        json.dumps({"iss": provider.issuer, "aud": "client", "nonce": "nonce", "groups": ["users"]}).encode()
-    )
-    sig = _b64url(
-        hmac.new(
-            provider.client_secret.encode(),
-            f"{header}.{good_payload}".encode(),
-            hashlib.sha256,
-        ).digest()
-    )
-    with pytest.raises(AuthenticationError):
-        authenticator.validate(f"{header}.{good_payload}.{sig}")
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    base_claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    invalid_signature = _issue_oidc_token(base_claims, b"other-secret")
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(invalid_signature, now=now)
+    assert str(exc.value) == "invalid_token_signature"
+    wrong_issuer_token = _issue_oidc_token({**base_claims, "iss": "https://other"}, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(wrong_issuer_token, now=now)
+    assert str(exc.value) == "invalid_issuer"
+    wrong_audience_token = _issue_oidc_token({**base_claims, "aud": "other"}, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(wrong_audience_token, now=now)
+    assert str(exc.value) == "invalid_audience"
+    unauthorized_groups_token = _issue_oidc_token({**base_claims, "groups": ["users"]}, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(unauthorized_groups_token, now=now)
+    assert str(exc.value) == "unauthorized_group"
 
+
+def test_oidc_authenticator_rejects_expired_token() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(minutes=1)),
+        "nbf": _epoch(now - dt.timedelta(minutes=1)),
+        "exp": _epoch(now - dt.timedelta(seconds=1)),
+    }
+    token = _issue_oidc_token(claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "token_expired"
+
+
+def test_oidc_authenticator_rejects_not_yet_valid_token() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now + dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "token_not_yet_valid"
+
+
+def test_oidc_authenticator_rejects_replayed_token() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    defaults = OidcValidationDefaults(
+        clock_skew_seconds=0,
+        default_token_ttl_seconds=600,
+        max_token_age_seconds=60,
+    )
+    authenticator, provider, secret = _build_oidc_authenticator(now=now, defaults=defaults)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=120)),
+        "nbf": _epoch(now - dt.timedelta(seconds=120)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "token_replay_detected"
+
+
+def test_oidc_authenticator_rejects_invalid_token_structures() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate("invalid", now=now)
+    assert str(exc.value) == "invalid_token"
+
+    payload = _b64url(json.dumps({"iss": provider.issuer}).encode())
+    signature = _b64url(b"sig")
+    token = f"-!.{payload}.{signature}"
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token"
+
+    header = _b64url(json.dumps({"alg": "HS256"}).encode())
+    payload = _b64url(b"not-json")
+    signature_invalid_json = _b64url(
+        hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    )
+    token = f"{header}.{payload}.{signature_invalid_json}"
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token"
+
+    payload = _b64url(json.dumps(["not", "mapping"]).encode())
+    signature_invalid_mapping = _b64url(
+        hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest()
+    )
+    token = f"{header}.{payload}.{signature_invalid_mapping}"
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token"
+
+
+def test_oidc_authenticator_handles_header_anomalies() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, _secret = _build_oidc_authenticator(now=now)
+    payload = _b64url(json.dumps({"iss": provider.issuer}).encode())
+
+    header = _b64url(json.dumps({"alg": 123}).encode())
+    token = f"{header}.{payload}.sig"
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unsupported_algorithm"
+
+    header = _b64url(json.dumps({"alg": "HS256", "kid": 123}).encode())
+    token = f"{header}.{payload}.sig"
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token"
+
+
+def test_oidc_authenticator_jwks_fetch_errors() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    _, provider, secret = _build_oidc_authenticator(now=now)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret)
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: [])
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": []})
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {})
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": ["value"]})
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": "invalid"})
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+
+def test_oidc_authenticator_key_resolution_errors() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    _, provider, secret = _build_oidc_authenticator(now=now)
+    base_claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+
+    jwks_ambiguous = {
+        "keys": [
+            {"kty": "oct", "kid": "a", "k": _b64url(b"one")},
+            {"kty": "oct", "kid": "b", "k": _b64url(b"two")},
+        ]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ambiguous)
+    token = _issue_oidc_token(base_claims, secret, kid=None)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "ambiguous_jwk"
+
+    jwks_single = {"keys": [{"kty": "oct", "kid": "primary", "k": _b64url(b"secret")}]}
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_single)
+    token = _issue_oidc_token(base_claims, secret, kid="missing")
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unknown_jwk"
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_single)
+    authenticator._jwks_cache = []
+    token = _issue_oidc_token(base_claims, b"secret", kid=None)
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    jwks_mismatch = {
+        "keys": [
+            {
+                "kty": "oct",
+                "kid": "primary",
+                "k": _b64url(b"secret"),
+                "alg": "RS256",
+            }
+        ]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_mismatch)
+    token = _issue_oidc_token(base_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unsupported_algorithm"
+
+    jwks_enc = {
+        "keys": [
+            {
+                "kty": "oct",
+                "kid": "primary",
+                "k": _b64url(b"secret"),
+                "use": "enc",
+            }
+        ]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_enc)
+    token = _issue_oidc_token(base_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unsupported_jwk"
+
+
+def test_oidc_authenticator_signature_edge_cases() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    _, provider, secret = _build_oidc_authenticator(now=now)
+    base_claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+
+    jwks_oct = {
+        "keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_oct)
+    token = _issue_oidc_token(base_claims, secret, alg="HS999")
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unsupported_algorithm"
+
+    token_parts = _issue_oidc_token(base_claims, secret).split(".")
+    token_parts[2] = "-!"
+    token = ".".join(token_parts)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token_signature"
+
+    jwks_no_secret = {"keys": [{"kty": "oct", "kid": "primary", "k": 123}]}
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_no_secret)
+    token = _issue_oidc_token(base_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    jwks_bad_secret = {"keys": [{"kty": "oct", "kid": "primary", "k": "-!"}]}
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_bad_secret)
+    token = _issue_oidc_token(base_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    jwks_ec = {"keys": [{"kty": "EC", "kid": "primary"}]}
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ec)
+    token = _issue_oidc_token(base_claims, secret)
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    jwks_ec_sig = {"keys": [{"kty": "EC", "kid": "primary", "alg": "ES256", "use": "sig"}]}
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ec_sig)
+    token = _issue_oidc_token(base_claims, secret, alg="ES256")
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unsupported_jwk"
+
+
+def test_oidc_authenticator_rsa_signature_paths() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    _, provider, secret = _build_oidc_authenticator(now=now)
+    base_claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+
+    modulus = b"\x01" + b"\x00" * 63
+    exponent = (65537).to_bytes(3, "big")
+    jwks_rsa = {
+        "keys": [
+            {
+                "kty": "RSA",
+                "kid": "rsa",
+                "n": _b64url(modulus),
+                "e": _b64url(exponent),
+            }
+        ]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_rsa)
+    signature = b"\x00" * len(modulus)
+    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token_signature"
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_rsa)
+    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS1024", signature_bytes=signature)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unsupported_algorithm"
+
+    jwks_bad_fields = {
+        "keys": [{"kty": "RSA", "kid": "rsa", "n": None, "e": _b64url(exponent)}]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_bad_fields)
+    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    jwks_bad_base64 = {
+        "keys": [{"kty": "RSA", "kid": "rsa", "n": "-!", "e": _b64url(exponent)}]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_bad_base64)
+    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    jwks_zero_modulus = {
+        "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(b"\x00"), "e": _b64url(exponent)}]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_zero_modulus)
+    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    small_modulus = b"\x01" * 16
+    jwks_small = {
+        "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(small_modulus), "e": _b64url(exponent)}]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_small)
+    token = _issue_oidc_token(
+        base_claims,
+        secret,
+        kid="rsa",
+        alg="RS256",
+        signature_bytes=signature[: len(small_modulus)],
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_jwks"
+
+    jwks_large = {
+        "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}]
+    }
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_large)
+    signature_high = b"\xff" * len(modulus)
+    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature_high)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token_signature"
+
+
+def test_oidc_authenticator_rsa_valid_signature_branch() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, _ = _build_oidc_authenticator(now=now)
+    modulus = b"\x01" + b"\x00" * 63
+    exponent = (1).to_bytes(1, "big")
+    rsa_key = {"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}
+    jwks = {"keys": [rsa_key]}
+    authenticator = OidcAuthenticator(provider, defaults=base_authenticator.defaults, jwks_fetcher=lambda _: jwks)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=10)),
+        "nbf": _epoch(now - dt.timedelta(seconds=10)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    header_segment = _b64url(json.dumps({"alg": "RS256", "kid": "rsa", "typ": "JWT"}).encode())
+    payload_segment = _b64url(json.dumps(claims).encode())
+    signing_input = f"{header_segment}.{payload_segment}".encode()
+    digest_prefix = authentication_module._RSA_DIGEST_INFOS["RS256"]
+    digest = hashlib.sha256(signing_input).digest()
+    padding_len = len(modulus) - len(digest_prefix) - len(digest) - 3
+    signature_bytes = b"\x00\x01" + b"\xff" * padding_len + b"\x00" + digest_prefix + digest
+    signature_segment = _b64url(signature_bytes)
+    token = f"{header_segment}.{payload_segment}.{signature_segment}"
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+
+def test_oidc_authenticator_rsa_invalid_signature_branch() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    modulus = b"\x01" + b"\x00" * 63
+    exponent = (65537).to_bytes(3, "big")
+    rsa_key = {"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}
+    jwks = {"keys": [rsa_key]}
+    authenticator = OidcAuthenticator(provider, defaults=base_authenticator.defaults, jwks_fetcher=lambda _: jwks)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    signature = b"\xff" * len(modulus)
+    token = _issue_oidc_token(claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_token_signature"
+
+
+def test_oidc_authenticator_validate_claims_with_ttl() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator.defaults = OidcValidationDefaults(
+        clock_skew_seconds=0,
+        default_token_ttl_seconds=30,
+        max_token_age_seconds=None,
+        require_iat=False,
+    )
+    valid_claims = {
+        "iss": provider.issuer,
+        "aud": [provider.client_id, "other"],
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=10)),
+        "nbf": _epoch(now - dt.timedelta(seconds=10)),
+    }
+    authenticator._validate_claims(valid_claims, expected_nonce=None, now=now)
+
+    jwks = {
+        "keys": [
+            {
+                "kty": "oct",
+                "kid": "primary",
+                "k": _b64url(secret),
+                "alg": "HS256",
+                "use": "sig",
+            }
+        ]
+    }
+    provider_without_audience = TenantOidcProvider(
+        issuer=provider.issuer,
+        client_id=provider.client_id,
+        client_secret=provider.client_secret,
+        jwks_uri=provider.jwks_uri,
+        authorization_endpoint=provider.authorization_endpoint,
+        token_endpoint=provider.token_endpoint,
+        userinfo_endpoint=provider.userinfo_endpoint,
+        allowed_audiences=[],
+        allowed_groups=provider.allowed_groups,
+    )
+    authenticator_without_audience = OidcAuthenticator(
+        provider_without_audience,
+        defaults=authenticator.defaults,
+        jwks_fetcher=lambda _: jwks,
+    )
+    authenticator_without_audience._validate_claims(valid_claims, expected_nonce=None, now=now)
+
+    expired_claims = dict(valid_claims)
+    expired_claims["iat"] = _epoch(now - dt.timedelta(seconds=90))
+    expired_claims["nbf"] = expired_claims["iat"]
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator._validate_claims(expired_claims, expected_nonce=None, now=now)
+    assert str(exc.value) == "token_expired"
+
+    missing_iat_claims = dict(valid_claims)
+    missing_iat_claims.pop("iat")
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator._validate_claims(missing_iat_claims, expected_nonce=None, now=now)
+    assert str(exc.value) == "missing_exp"
+
+    authenticator.defaults = OidcValidationDefaults(
+        clock_skew_seconds=0,
+        default_token_ttl_seconds=None,
+        max_token_age_seconds=None,
+        require_iat=False,
+    )
+    authenticator._validate_claims(valid_claims, expected_nonce=None, now=now)
+
+
+def test_oidc_authenticator_claim_validation_edge_cases() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    base_claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+
+    missing_iat = base_claims.copy()
+    missing_iat.pop("iat")
+    missing_iat.pop("nbf")
+    token = _issue_oidc_token(missing_iat, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token)
+    assert str(exc.value) == "missing_iat"
+
+    future_claims = base_claims.copy()
+    future_claims["iat"] = _epoch(now + dt.timedelta(seconds=60))
+    future_claims["nbf"] = future_claims["iat"]
+    token = _issue_oidc_token(future_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "token_issued_in_future"
+
+    invalid_audience_claims = base_claims.copy()
+    invalid_audience_claims["aud"] = [123]
+    token = _issue_oidc_token(invalid_audience_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_audience"
+
+    invalid_audience_type = base_claims.copy()
+    invalid_audience_type["aud"] = 123
+    token = _issue_oidc_token(invalid_audience_type, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_audience"
+
+    invalid_exp_claims = base_claims.copy()
+    invalid_exp_claims["exp"] = "not-a-number"
+    token = _issue_oidc_token(invalid_exp_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_exp"
+
+    invalid_iat_claims = base_claims.copy()
+    invalid_iat_claims["iat"] = []
+    token = _issue_oidc_token(invalid_iat_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_iat"
+
+    empty_iat_claims = base_claims.copy()
+    empty_iat_claims["iat"] = ""
+    token = _issue_oidc_token(empty_iat_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_iat"
+
+    huge_iat_claims = base_claims.copy()
+    huge_iat_claims["iat"] = 10**20
+    token = _issue_oidc_token(huge_iat_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "invalid_iat"
+
+    odd_groups_claims = base_claims.copy()
+    odd_groups_claims["groups"] = 42
+    token = _issue_oidc_token(odd_groups_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unauthorized_group"
+
+    string_groups_claims = base_claims.copy()
+    string_groups_claims["groups"] = "admins"
+    resolved_claims = authenticator.validate(_issue_oidc_token(string_groups_claims, secret), now=now)
+    assert resolved_claims["iss"] == provider.issuer
+
+    defaults = OidcValidationDefaults(
+        clock_skew_seconds=0,
+        default_token_ttl_seconds=60,
+        max_token_age_seconds=600,
+        require_iat=False,
+    )
+    authenticator_no_iat = OidcAuthenticator(
+        provider,
+        defaults=defaults,
+        jwks_fetcher=lambda _: {
+            "keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]
+        },
+    )
+    missing_exp_claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+    }
+    token = _issue_oidc_token(missing_exp_claims, secret)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator_no_iat.validate(token, now=now)
+    assert str(exc.value) == "missing_exp"
+
+    ttl_defaults = OidcValidationDefaults(
+        clock_skew_seconds=0,
+        default_token_ttl_seconds=60,
+        max_token_age_seconds=None,
+    )
+    authenticator_ttl, provider_ttl, secret_ttl = _build_oidc_authenticator(now=now, defaults=ttl_defaults)
+    ttl_claims = {
+        "iss": provider_ttl.issuer,
+        "aud": provider_ttl.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=10)),
+        "nbf": _epoch(now - dt.timedelta(seconds=10)),
+    }
+    ttl_token = _issue_oidc_token(ttl_claims, secret_ttl)
+    ttl_result = authenticator_ttl.validate(ttl_token, now=now)
+    assert ttl_result["iss"] == provider_ttl.issuer
+
+
+def test_oidc_authenticator_handles_naive_now() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    defaults = OidcValidationDefaults(
+        clock_skew_seconds=0,
+        default_token_ttl_seconds=None,
+        max_token_age_seconds=None,
+    )
+    authenticator, provider, secret = _build_oidc_authenticator(now=now, defaults=defaults)
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "nonce": "nonce",
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(days=3650)),
+    }
+    token = _issue_oidc_token(claims, secret)
+    assert authenticator.validate(token)
+    naive_now = dt.datetime(2024, 1, 1)
+    assert authenticator.validate(token, now=naive_now)
+
+
+def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyResponse:
+        def __init__(self, payload: bytes, status: int = 200) -> None:
+            self._payload = payload
+            self.status = status
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5: DummyResponse(json.dumps({"keys": []}).encode()),
+    )
+    document = authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert document["keys"] == []
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5: DummyResponse(json.dumps({"keys": []}).encode(), status=500),
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "jwks_fetch_failed"
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5: DummyResponse(b"not json"),
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "invalid_jwks"
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5: DummyResponse(json.dumps([1, 2, 3]).encode()),
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "invalid_jwks"
+
+    def raise_os_error(uri: str, timeout: int = 5) -> None:
+        raise OSError("boom")
+
+    monkeypatch.setattr("urllib.request.urlopen", raise_os_error)
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "jwks_fetch_failed"
 
 def test_saml_authenticator_error_paths() -> None:
     now = dt.datetime.now(dt.timezone.utc)

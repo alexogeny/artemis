@@ -4,15 +4,18 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import binascii
 import datetime as dt
+import hashlib
 import hmac
 import json
 import secrets
+from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from hashlib import sha256
-from typing import Any, Iterable, Mapping, MutableMapping
+from typing import Any
 from xml.etree import ElementTree as ET
 
-from msgspec import structs
+from msgspec import Struct, structs
 
 try:  # pragma: no cover - optional dependency
     from argonautica import Hasher as ArgonauticaHasher  # type: ignore[import-not-found]
@@ -46,6 +49,7 @@ __all__ = [
     "FederatedIdentityDirectory",
     "MfaManager",
     "OidcAuthenticator",
+    "OidcValidationDefaults",
     "PasskeyManager",
     "PasswordHasher",
     "SamlAuthenticator",
@@ -312,32 +316,344 @@ class PasskeyManager:
         return hmac.compare_digest(signature, expected)
 
 
+class OidcValidationDefaults(Struct, frozen=True):
+    """Default validation bounds for OpenID Connect tokens."""
+
+    clock_skew_seconds: int = 120
+    default_token_ttl_seconds: int | None = 300
+    max_token_age_seconds: int | None = 3600
+    require_iat: bool = True
+
+
 class OidcAuthenticator:
-    """Validate HMAC signed OIDC tokens."""
+    """Validate OIDC tokens using the provider's JWKS configuration."""
 
-    def __init__(self, provider: TenantOidcProvider) -> None:
+    def __init__(
+        self,
+        provider: TenantOidcProvider,
+        *,
+        defaults: OidcValidationDefaults | None = None,
+        jwks_fetcher: Callable[[str], Mapping[str, Any]] | None = None,
+    ) -> None:
         self.provider = provider
+        self.defaults = defaults or OidcValidationDefaults()
+        self._jwks_fetcher = jwks_fetcher or _default_jwks_fetcher
+        self._jwks_cache: list[Mapping[str, Any]] | None = None
 
-    def validate(self, token: str, *, expected_nonce: str | None = None) -> Mapping[str, Any]:
-        header, payload, signature = token.split(".")
-        signing_input = f"{header}.{payload}".encode()
-        expected_signature = _b64url_encode(
-            hmac.new(self.provider.client_secret.encode(), signing_input, sha256).digest()
-        )
-        if not hmac.compare_digest(signature, expected_signature):
-            raise AuthenticationError("invalid_token_signature")
-        claims = json.loads(_b64url_decode(payload))
-        if claims.get("iss") != self.provider.issuer:
+    def validate(
+        self,
+        token: str,
+        *,
+        expected_nonce: str | None = None,
+        now: dt.datetime | None = None,
+    ) -> Mapping[str, Any]:
+        parts = token.split(".")
+        if len(parts) != 3:
+            raise AuthenticationError("invalid_token")
+        header_segment, payload_segment, signature_segment = parts
+        signing_input = f"{header_segment}.{payload_segment}".encode()
+        header = self._decode_segment(header_segment)
+        alg = header.get("alg")
+        if not isinstance(alg, str):
+            raise AuthenticationError("unsupported_algorithm")
+        kid_value = header.get("kid")
+        if kid_value is not None and not isinstance(kid_value, str):
+            raise AuthenticationError("invalid_token")
+        key = self._resolve_jwk(alg, kid_value)
+        self._verify_signature(alg, key, signing_input, signature_segment)
+        claims = self._decode_segment(payload_segment)
+        self._validate_claims(claims, expected_nonce=expected_nonce, now=now)
+        return claims
+
+    def _decode_segment(self, segment: str) -> Mapping[str, Any]:
+        try:
+            data = _b64url_decode(segment)
+        except (binascii.Error, ValueError) as exc:
+            raise AuthenticationError("invalid_token") from exc
+        try:
+            decoded = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise AuthenticationError("invalid_token") from exc
+        if not isinstance(decoded, Mapping):
+            raise AuthenticationError("invalid_token")
+        return decoded
+
+    def _load_jwks(self) -> list[Mapping[str, Any]]:
+        if self._jwks_cache is None:
+            document = self._jwks_fetcher(self.provider.jwks_uri)
+            if not isinstance(document, Mapping):
+                raise AuthenticationError("invalid_jwks")
+            keys = document.get("keys")
+            if keys is None:
+                keys = []
+            if not isinstance(keys, list):
+                raise AuthenticationError("invalid_jwks")
+            for key in keys:
+                if not isinstance(key, Mapping):
+                    raise AuthenticationError("invalid_jwks")
+            self._jwks_cache = list(keys)
+        return self._jwks_cache
+
+    def _resolve_jwk(self, alg: str, kid: str | None) -> Mapping[str, Any]:
+        expected_kty: str | None
+        if alg in _HMAC_ALGORITHMS:
+            expected_kty = "oct"
+        elif alg in _RSA_HASH_ALGORITHMS:
+            expected_kty = "RSA"
+        else:
+            expected_kty = None
+
+        def select_key(keys: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
+            matches: list[Mapping[str, Any]] = []
+            for key in keys:
+                if expected_kty is not None and key.get("kty") != expected_kty:
+                    continue
+                if kid is not None and key.get("kid") != kid:
+                    continue
+                matches.append(key)
+            if kid is None:
+                if len(matches) == 1:
+                    return matches[0]
+                if len(matches) > 1:
+                    raise AuthenticationError("ambiguous_jwk")
+                return None
+            return matches[0] if matches else None
+
+        keys = self._load_jwks()
+        key = select_key(keys)
+        if key is None:
+            self._jwks_cache = None
+            keys = self._load_jwks()
+            key = select_key(keys)
+        if key is None:
+            has_expected_kty = expected_kty is not None and any(
+                candidate.get("kty") == expected_kty for candidate in keys
+            )
+            if expected_kty == "oct" and not has_expected_kty:
+                fallback = self._client_secret_hmac_key(alg)
+                if fallback is not None:
+                    return fallback
+            raise AuthenticationError("unknown_jwk")
+        key_alg = key.get("alg")
+        if key_alg is not None and key_alg != alg:
+            raise AuthenticationError("unsupported_algorithm")
+        use = key.get("use")
+        if use is not None and use != "sig":
+            raise AuthenticationError("unsupported_jwk")
+        return key
+
+    def _client_secret_hmac_key(self, alg: str) -> Mapping[str, Any] | None:
+        if alg not in _HMAC_ALGORITHMS:
+            return None
+        secret = self.provider.client_secret
+        if not secret:
+            return None
+        return {
+            "kty": "oct",
+            "k": _b64url_encode(secret.encode()),
+            "alg": alg,
+            "use": "sig",
+        }
+
+    def _verify_signature(
+        self,
+        alg: str,
+        key: Mapping[str, Any],
+        signing_input: bytes,
+        signature_segment: str,
+    ) -> None:
+        try:
+            signature = _b64url_decode(signature_segment)
+        except (binascii.Error, ValueError) as exc:
+            raise AuthenticationError("invalid_token_signature") from exc
+        kty = key.get("kty")
+        if kty == "oct":
+            secret_b64 = key.get("k")
+            if not isinstance(secret_b64, str):
+                raise AuthenticationError("invalid_jwks")
+            try:
+                secret = _b64url_decode(secret_b64)
+            except (binascii.Error, ValueError) as exc:
+                raise AuthenticationError("invalid_jwks") from exc
+            digest_factory = _HMAC_ALGORITHMS.get(alg)
+            if digest_factory is None:
+                raise AuthenticationError("unsupported_algorithm")
+            expected = hmac.new(secret, signing_input, digest_factory).digest()
+            if not hmac.compare_digest(signature, expected):
+                raise AuthenticationError("invalid_token_signature")
+            return
+        if kty == "RSA":
+            if not _verify_rsa_signature(alg, key, signing_input, signature):
+                raise AuthenticationError("invalid_token_signature")
+            return
+        raise AuthenticationError("unsupported_jwk")
+
+    def _validate_claims(
+        self,
+        claims: Mapping[str, Any],
+        *,
+        expected_nonce: str | None,
+        now: dt.datetime | None,
+    ) -> None:
+        issuer = claims.get("iss")
+        if issuer != self.provider.issuer:
             raise AuthenticationError("invalid_issuer")
-        audience = claims.get("aud")
-        if self.provider.allowed_audiences and audience not in self.provider.allowed_audiences:
-            raise AuthenticationError("invalid_audience")
+        audience_claim = claims.get("aud")
+        if self.provider.allowed_audiences:
+            audiences = _normalize_audience(audience_claim)
+            if not audiences.intersection(self.provider.allowed_audiences):
+                raise AuthenticationError("invalid_audience")
+        now_instant = _ensure_utc(now)
+        skew = dt.timedelta(seconds=max(self.defaults.clock_skew_seconds, 0))
+        issued_at = _parse_epoch_claim(claims.get("iat"), "iat")
+        if issued_at is None:
+            if self.defaults.require_iat:
+                raise AuthenticationError("missing_iat")
+        else:
+            if issued_at - skew > now_instant:
+                raise AuthenticationError("token_issued_in_future")
+            max_age_seconds = self.defaults.max_token_age_seconds
+            if max_age_seconds is not None:
+                max_age_delta = dt.timedelta(seconds=max(max_age_seconds, 0))
+                if issued_at + max_age_delta + skew < now_instant:
+                    raise AuthenticationError("token_replay_detected")
+        expiration = _parse_epoch_claim(claims.get("exp"), "exp")
+        if expiration is None:
+            ttl_seconds = self.defaults.default_token_ttl_seconds
+            if ttl_seconds is not None:
+                if issued_at is None:
+                    raise AuthenticationError("missing_exp")
+                expiration = issued_at + dt.timedelta(seconds=max(ttl_seconds, 0))
+        if expiration is not None and now_instant - skew >= expiration:
+            raise AuthenticationError("token_expired")
+        not_before = _parse_epoch_claim(claims.get("nbf"), "nbf")
+        if not_before is not None and now_instant + skew < not_before:
+            raise AuthenticationError("token_not_yet_valid")
         if expected_nonce is not None and claims.get("nonce") != expected_nonce:
             raise AuthenticationError("invalid_nonce")
-        groups = claims.get("groups", [])
-        if self.provider.allowed_groups and not set(groups).intersection(self.provider.allowed_groups):
+        groups_claim = claims.get("groups", [])
+        if isinstance(groups_claim, str):
+            groups = {groups_claim}
+        elif isinstance(groups_claim, list):
+            groups = {value for value in groups_claim if isinstance(value, str)}
+        else:
+            groups = set()
+        if self.provider.allowed_groups and not groups.intersection(self.provider.allowed_groups):
             raise AuthenticationError("unauthorized_group")
-        return claims
+
+
+_HMAC_ALGORITHMS = {
+    "HS256": hashlib.sha256,
+    "HS384": hashlib.sha384,
+    "HS512": hashlib.sha512,
+}
+
+_RSA_HASH_ALGORITHMS = {
+    "RS256": hashlib.sha256,
+    "RS384": hashlib.sha384,
+    "RS512": hashlib.sha512,
+}
+
+_RSA_DIGEST_INFOS = {
+    "RS256": bytes.fromhex("3031300d060960864801650304020105000420"),
+    "RS384": bytes.fromhex("3041300d060960864801650304020205000430"),
+    "RS512": bytes.fromhex("3051300d060960864801650304020305000440"),
+}
+
+
+def _verify_rsa_signature(
+    alg: str,
+    key: Mapping[str, Any],
+    signing_input: bytes,
+    signature: bytes,
+) -> bool:
+    hash_factory = _RSA_HASH_ALGORITHMS.get(alg)
+    digest_prefix = _RSA_DIGEST_INFOS.get(alg)
+    if hash_factory is None or digest_prefix is None:
+        raise AuthenticationError("unsupported_algorithm")
+    modulus_b64 = key.get("n")
+    exponent_b64 = key.get("e")
+    if not isinstance(modulus_b64, str) or not isinstance(exponent_b64, str):
+        raise AuthenticationError("invalid_jwks")
+    try:
+        modulus_bytes = _b64url_decode(modulus_b64)
+        exponent_bytes = _b64url_decode(exponent_b64)
+    except (binascii.Error, ValueError) as exc:
+        raise AuthenticationError("invalid_jwks") from exc
+    modulus = int.from_bytes(modulus_bytes, "big")
+    exponent = int.from_bytes(exponent_bytes, "big")
+    if modulus <= 0 or exponent <= 0:
+        raise AuthenticationError("invalid_jwks")
+    key_size = (modulus.bit_length() + 7) // 8
+    digest = hash_factory(signing_input).digest()
+    padding_len = key_size - len(digest_prefix) - len(digest) - 3
+    if padding_len < 0:
+        raise AuthenticationError("invalid_jwks")
+    signature_int = int.from_bytes(signature, "big")
+    if signature_int >= modulus:
+        return False
+    decrypted = pow(signature_int, exponent, modulus).to_bytes(key_size, "big")
+    expected = b"\x00\x01" + b"\xff" * padding_len + b"\x00" + digest_prefix + digest
+    return hmac.compare_digest(decrypted, expected)
+
+
+def _normalize_audience(value: Any) -> set[str]:
+    if isinstance(value, str):
+        return {value}
+    if isinstance(value, (list, tuple)):
+        entries = {item for item in value if isinstance(item, str)}
+        if not entries and value:
+            raise AuthenticationError("invalid_audience")
+        return entries
+    raise AuthenticationError("invalid_audience")
+
+
+def _parse_epoch_claim(value: Any, claim: str) -> dt.datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        timestamp = int(value)
+    elif isinstance(value, str):
+        if not value:
+            raise AuthenticationError(f"invalid_{claim}")
+        try:
+            timestamp = int(value)
+        except ValueError as exc:
+            raise AuthenticationError(f"invalid_{claim}") from exc
+    else:
+        raise AuthenticationError(f"invalid_{claim}")
+    try:
+        return dt.datetime.fromtimestamp(timestamp, tz=dt.timezone.utc)
+    except (OverflowError, OSError, ValueError) as exc:
+        raise AuthenticationError(f"invalid_{claim}") from exc
+
+
+def _ensure_utc(moment: dt.datetime | None) -> dt.datetime:
+    if moment is None:
+        return dt.datetime.now(dt.timezone.utc)
+    if moment.tzinfo is None:
+        return moment.replace(tzinfo=dt.timezone.utc)
+    return moment.astimezone(dt.timezone.utc)
+
+
+def _default_jwks_fetcher(uri: str) -> Mapping[str, Any]:
+    from urllib.request import urlopen
+
+    try:
+        with urlopen(uri, timeout=5) as response:  # type: ignore[call-arg]
+            status = getattr(response, "status", 200)
+            if status != 200:
+                raise AuthenticationError("jwks_fetch_failed")
+            payload = response.read()
+    except OSError as exc:  # pragma: no cover - network failure
+        raise AuthenticationError("jwks_fetch_failed") from exc
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        raise AuthenticationError("invalid_jwks") from exc
+    if not isinstance(document, Mapping):
+        raise AuthenticationError("invalid_jwks")
+    return document
 
 
 class SamlAuthenticator:
