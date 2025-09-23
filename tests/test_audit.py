@@ -5,12 +5,15 @@ import datetime as dt
 import msgspec
 import pytest
 
-from artemis.audit import INSERT, UPDATE, AuditActor, AuditTrail, audit_context
+from artemis.audit import DELETE, INSERT, UPDATE, AuditActor, AuditTrail, audit_context
 from artemis.database import Database, DatabaseConfig, PoolConfig
 from artemis.models import (
     AdminAuditLogEntry,
+    AdminUser,
     BillingRecord,
     BillingStatus,
+    SessionLevel,
+    SessionToken,
     TenantAuditLogEntry,
     TenantUser,
 )
@@ -52,6 +55,7 @@ async def test_audit_trail_records_tenant_mutation() -> None:
     assert inserted["created_by"] == actor.id
     assert inserted["metadata"]["tenant"] == "acme"
     assert inserted["changes"]["email"] == "user@example.com"
+    assert "hashed_password" not in inserted["changes"]
     assert inserted["created_at"] == now
     assert inserted["updated_at"] == now
 
@@ -164,7 +168,7 @@ async def test_audit_metadata_includes_before_snapshot() -> None:
     tenant = resolver.context_for("acme")
     user = TenantUser(email="user@example.com", hashed_password="secret")
     row = msgspec.to_builtins(user)
-    before = {"email": "old@example.com"}
+    before = {"email": "old@example.com", "hashed_password": "super-secret"}
     async with audit_context(tenant=tenant, actor=actor):
         await trail.record_model_change(
             info=default_registry().info_for(TenantUser),
@@ -178,4 +182,158 @@ async def test_audit_metadata_includes_before_snapshot() -> None:
     _, _, params, _ = connection.calls[-1]
     info = default_registry().info_for(TenantAuditLogEntry)
     inserted = {field.name: value for field, value in zip(info.fields, params)}
-    assert inserted["metadata"]["before"] == before
+    before_snapshot = inserted["metadata"]["before"]
+    assert before_snapshot["email"] == "old@example.com"
+    assert "hashed_password" not in before_snapshot
+
+
+@pytest.mark.asyncio
+async def test_audit_trail_redacts_session_token_payloads() -> None:
+    now = dt.datetime(2024, 4, 1, tzinfo=dt.timezone.utc)
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    database = Database(DatabaseConfig(pool=PoolConfig(dsn="postgres://")), pool=pool)
+    trail = AuditTrail(database, registry=default_registry(), clock=lambda: now)
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    tenant = resolver.context_for("acme")
+    info = default_registry().info_for(SessionToken)
+    audit_info = default_registry().info_for(TenantAuditLogEntry)
+
+    token = SessionToken(
+        id="tok_123",
+        user_id="user-123",
+        token="secret-token",
+        expires_at=now + dt.timedelta(hours=1),
+        level=SessionLevel.PASSWORD_ONLY,
+    )
+    row = msgspec.to_builtins(token)
+
+    async with audit_context(tenant=tenant, actor=None):
+        await trail.record_model_change(
+            info=info,
+            action=INSERT,
+            tenant=tenant,
+            data=row,
+            changes=row,
+        )
+
+    _, _, params, _ = connection.calls[-1]
+    inserted = {field.name: value for field, value in zip(audit_info.fields, params)}
+    assert inserted["changes"]["user_id"] == token.user_id
+    assert "token" not in inserted["changes"]
+
+    changes = {"token": "rotated-token", "revoked_at": now}
+    before = {"token": "secret-token", "revoked_at": None}
+    async with audit_context(tenant=tenant, actor=None):
+        await trail.record_model_change(
+            info=info,
+            action=UPDATE,
+            tenant=tenant,
+            data=row,
+            changes=changes,
+            before=before,
+        )
+
+    _, _, params, _ = connection.calls[-1]
+    inserted = {field.name: value for field, value in zip(audit_info.fields, params)}
+    expected_timestamp = msgspec.to_builtins(now)
+    assert inserted["changes"] == {"revoked_at": expected_timestamp}
+    before_snapshot = inserted["metadata"]["before"]
+    assert before_snapshot["revoked_at"] is None
+    assert "token" not in before_snapshot
+
+    delete_before = dict(row)
+    async with audit_context(tenant=tenant, actor=None):
+        await trail.record_model_change(
+            info=info,
+            action=DELETE,
+            tenant=tenant,
+            data=row,
+            changes={"token": "should-disappear"},
+            before=delete_before,
+        )
+
+    _, _, params, _ = connection.calls[-1]
+    inserted = {field.name: value for field, value in zip(audit_info.fields, params)}
+    assert inserted["changes"] == {}
+    before_snapshot = inserted["metadata"]["before"]
+    assert before_snapshot["user_id"] == token.user_id
+    assert "token" not in before_snapshot
+
+
+@pytest.mark.asyncio
+async def test_audit_trail_redacts_admin_user_secrets() -> None:
+    now = dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc)
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    database = Database(DatabaseConfig(pool=PoolConfig(dsn="postgres://")), pool=pool)
+    trail = AuditTrail(database, registry=default_registry(), clock=lambda: now)
+    info = default_registry().info_for(AdminUser)
+    audit_info = default_registry().info_for(AdminAuditLogEntry)
+
+    admin = AdminUser(
+        id="admin_123",
+        email="admin@example.com",
+        hashed_password="hashed-value",
+        password_salt="salt",
+        password_secret="secret",
+        mfa_enforced=True,
+        mfa_enrolled_at=now,
+    )
+    row = msgspec.to_builtins(admin)
+
+    await trail.record_model_change(
+        info=info,
+        action=INSERT,
+        tenant=None,
+        data=row,
+        changes=row,
+    )
+
+    _, _, params, _ = connection.calls[-1]
+    inserted = {field.name: value for field, value in zip(audit_info.fields, params)}
+    assert inserted["changes"]["email"] == "admin@example.com"
+    for secret_field in (
+        "hashed_password",
+        "password_salt",
+        "password_secret",
+        "mfa_enforced",
+        "mfa_enrolled_at",
+    ):
+        assert secret_field not in inserted["changes"]
+
+    changes = {"hashed_password": "rotated", "last_sign_in_at": now}
+    before = {"hashed_password": "hashed-value", "last_sign_in_at": None}
+    await trail.record_model_change(
+        info=info,
+        action=UPDATE,
+        tenant=None,
+        data=row,
+        changes=changes,
+        before=before,
+    )
+
+    _, _, params, _ = connection.calls[-1]
+    inserted = {field.name: value for field, value in zip(audit_info.fields, params)}
+    expected_timestamp = msgspec.to_builtins(now)
+    assert inserted["changes"] == {"last_sign_in_at": expected_timestamp}
+    before_snapshot = inserted["metadata"]["before"]
+    assert before_snapshot["last_sign_in_at"] is None
+    assert "hashed_password" not in before_snapshot
+
+    delete_before = {"email": "admin@example.com", "password_secret": "secret"}
+    await trail.record_model_change(
+        info=info,
+        action=DELETE,
+        tenant=None,
+        data=row,
+        changes={"password_secret": "should-disappear"},
+        before=delete_before,
+    )
+
+    _, _, params, _ = connection.calls[-1]
+    inserted = {field.name: value for field, value in zip(audit_info.fields, params)}
+    assert inserted["changes"] == {}
+    before_snapshot = inserted["metadata"]["before"]
+    assert before_snapshot["email"] == "admin@example.com"
+    assert "password_secret" not in before_snapshot
