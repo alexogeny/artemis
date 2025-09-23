@@ -79,6 +79,7 @@ from .orm import (
     default_registry,
     model,
 )
+from .quickstart import attach_quickstart
 from .rbac import (
     CedarEffect,
     CedarEngine,
@@ -179,6 +180,7 @@ __all__ = [
     "TenantUser",
     "TestClient",
     "UserRole",
+    "attach_quickstart",
     "audit_context",
     "bindings_from_admin",
     "bindings_from_users",

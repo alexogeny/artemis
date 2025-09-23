@@ -190,15 +190,19 @@ class ArtemisApp:
         async def endpoint_handler(req: Request) -> Response:
             return await self._execute_route(match.route, req, scope)
 
-        handler = apply_middleware(self._middlewares, endpoint_handler)
-
         async def _execute_with_observability() -> Response:
             observation = self.observability.on_request_start(request)
+            handler = apply_middleware(
+                self._middlewares,
+                endpoint_handler,
+                observability=self.observability,
+                request_context=observation,
+            )
             try:
                 response = await handler(request)
             except HTTPError as exc:
                 response = exception_to_response(exc)
-                self.observability.on_request_success(observation, response)
+                response = self.observability.on_request_success(observation, response)
                 return response
             except Exception as exc:
                 status = getattr(exc, "status", None)
@@ -206,7 +210,7 @@ class ArtemisApp:
                 self.observability.on_request_error(observation, exc, status_code=status_code)
                 raise
             else:
-                self.observability.on_request_success(observation, response)
+                response = self.observability.on_request_success(observation, response)
                 return response
 
         def _actor_from_principal(principal: CedarEntity | None) -> AuditActor | None:

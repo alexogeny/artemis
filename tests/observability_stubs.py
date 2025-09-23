@@ -8,7 +8,7 @@ import pytest
 
 
 class StubSpan:
-    def __init__(self, name: str, kind: Any) -> None:
+    def __init__(self, name: str, kind: Any, *, trace_id: int, span_id: int) -> None:
         self.name = name
         self.kind = kind
         self.attributes: dict[str, Any] = {}
@@ -16,6 +16,9 @@ class StubSpan:
         self.exceptions: list[BaseException] = []
         self.exit_exception: BaseException | None = None
         self.ended = False
+        self._trace_id = trace_id
+        self._span_id = span_id
+        self._trace_flags = 1
 
     def set_attribute(self, key: str, value: Any) -> None:
         self.attributes[key] = value
@@ -25,6 +28,13 @@ class StubSpan:
 
     def set_status(self, status: Any) -> None:
         self.status = status
+
+    def get_span_context(self) -> Any:
+        return types.SimpleNamespace(
+            trace_id=self._trace_id,
+            span_id=self._span_id,
+            trace_flags=self._trace_flags,
+        )
 
 
 class StubSpanContext:
@@ -44,9 +54,11 @@ class StubSpanContext:
 class StubTracer:
     def __init__(self) -> None:
         self.spans: list[StubSpan] = []
+        self._counter = 1
 
-    def start_as_current_span(self, name: str, kind: Any | None = None) -> StubSpanContext:
-        span = StubSpan(name, kind)
+    def start_as_current_span(self, name: str, kind: Any | None = None, **_: Any) -> StubSpanContext:
+        span = StubSpan(name, kind, trace_id=self._counter, span_id=self._counter + 100)
+        self._counter += 1
         self.spans.append(span)
         return StubSpanContext(span)
 
@@ -125,7 +137,7 @@ class NoRecordTracer:
     def __init__(self) -> None:
         self.spans: list[NoRecordSpan] = []
 
-    def start_as_current_span(self, name: str, kind: Any | None = None) -> NoRecordSpan:
+    def start_as_current_span(self, name: str, kind: Any | None = None, **_: Any) -> NoRecordSpan:
         span = NoRecordSpan(name, kind)
         self.spans.append(span)
         return span
@@ -146,8 +158,16 @@ def setup_stub_opentelemetry(monkeypatch: pytest.MonkeyPatch) -> StubTracer:
     trace_module.StatusCode = types.SimpleNamespace(OK="ok", ERROR="error")
     otel_module = cast(Any, types.ModuleType("opentelemetry"))
     otel_module.trace = trace_module
+    propagate_module = cast(Any, types.ModuleType("opentelemetry.propagate"))
+
+    def extract(carrier: Any, *_args: Any, **_kwargs: Any) -> Any:
+        return carrier
+
+    propagate_module.extract = extract
+    otel_module.propagate = propagate_module
     monkeypatch.setitem(sys.modules, "opentelemetry", otel_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
+    monkeypatch.setitem(sys.modules, "opentelemetry.propagate", propagate_module)
     return tracer
 
 
@@ -158,8 +178,12 @@ def setup_stub_opentelemetry_without_status(monkeypatch: pytest.MonkeyPatch) -> 
     trace_module.SpanKind = types.SimpleNamespace(CLIENT="client")
     otel_module = cast(Any, types.ModuleType("opentelemetry"))
     otel_module.trace = trace_module
+    propagate_module = cast(Any, types.ModuleType("opentelemetry.propagate"))
+    propagate_module.extract = lambda carrier, *_: carrier
+    otel_module.propagate = propagate_module
     monkeypatch.setitem(sys.modules, "opentelemetry", otel_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
+    monkeypatch.setitem(sys.modules, "opentelemetry.propagate", propagate_module)
     return tracer
 
 
@@ -170,8 +194,12 @@ def setup_stub_opentelemetry_without_record(monkeypatch: pytest.MonkeyPatch) -> 
     trace_module.SpanKind = types.SimpleNamespace(CLIENT="client")
     otel_module = cast(Any, types.ModuleType("opentelemetry"))
     otel_module.trace = trace_module
+    propagate_module = cast(Any, types.ModuleType("opentelemetry.propagate"))
+    propagate_module.extract = lambda carrier, *_: carrier
+    otel_module.propagate = propagate_module
     monkeypatch.setitem(sys.modules, "opentelemetry", otel_module)
     monkeypatch.setitem(sys.modules, "opentelemetry.trace", trace_module)
+    monkeypatch.setitem(sys.modules, "opentelemetry.propagate", propagate_module)
     return tracer
 
 

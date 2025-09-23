@@ -1,0 +1,66 @@
+[
+  {
+    "name": "fetch_item",
+    "request": {
+      "host": "acme.demo.example.com",
+      "method": "GET",
+      "path": "/items/1",
+      "tenant": "acme"
+    },
+    "response": {
+      "body": {
+        "json": {
+          "id": 1,
+          "name": "Item 1"
+        }
+      },
+      "headers": [
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "traceparent",
+          "00-00000000000000000000000000000001-0000000000000002-01"
+        ]
+      ],
+      "status": 200
+    }
+  },
+  {
+    "name": "create_item",
+    "request": {
+      "headers": [
+        [
+          "content-type",
+          "application/json"
+        ]
+      ],
+      "host": "acme.demo.example.com",
+      "json": {
+        "name": "Sample"
+      },
+      "method": "POST",
+      "path": "/items",
+      "tenant": "acme"
+    },
+    "response": {
+      "body": {
+        "json": {
+          "created": "Sample"
+        }
+      },
+      "headers": [
+        [
+          "content-type",
+          "application/json"
+        ],
+        [
+          "traceparent",
+          "00-00000000000000000000000000000004-0000000000000005-01"
+        ]
+      ],
+      "status": 201
+    }
+  }
+]
