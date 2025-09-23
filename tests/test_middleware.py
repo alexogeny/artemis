@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+from typing import TYPE_CHECKING, cast
+
 import pytest
 
 from artemis.application import ArtemisApp
 from artemis.config import AppConfig
 from artemis.middleware import apply_middleware
+from artemis.observability import Observability
 from artemis.requests import Request
 from artemis.responses import Response
 from artemis.tenancy import TenantContext, TenantScope
 from artemis.testing import TestClient
+
+if TYPE_CHECKING:
+    from artemis.observability import _ObservationContext
 
 
 @pytest.mark.asyncio
@@ -65,7 +71,12 @@ async def test_apply_middleware_reports_success_to_observability() -> None:
     async def endpoint(request: Request) -> Response:
         return Response(status=204)
 
-    handler = apply_middleware([middleware], endpoint, observability=observability, request_context="ctx")
+    handler = apply_middleware(
+        [middleware],
+        endpoint,
+        observability=cast(Observability, observability),
+        request_context=cast("_ObservationContext", "ctx"),
+    )
     request = Request(
         method="GET",
         path="/", 
@@ -93,7 +104,7 @@ async def test_apply_middleware_reports_error_to_observability() -> None:
     async def endpoint(request: Request) -> Response:
         return Response()
 
-    handler = apply_middleware([failing], endpoint, observability=observability)
+    handler = apply_middleware([failing], endpoint, observability=cast(Observability, observability))
     request = Request(
         method="GET",
         path="/", 

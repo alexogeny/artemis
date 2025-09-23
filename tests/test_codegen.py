@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+from typing import Any
+
 import artemis.codegen as ts_codegen
 from artemis.codegen import generate_typescript_client
 
 
-def _build_spec() -> dict[str, object]:
+def _build_spec() -> dict[str, Any]:
     return {
         "components": {
             "schemas": {
@@ -124,7 +126,7 @@ def test_generate_typescript_client_emits_strict_types() -> None:
 
 
 def test_generate_client_without_components() -> None:
-    spec: dict[str, object] = {
+    spec: dict[str, Any] = {
         "paths": {
             "/ping": {
                 "get": {

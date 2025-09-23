@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
@@ -9,8 +10,10 @@ from artemis.golden import GoldenFile, RequestResponseRecorder
 from artemis.responses import JSONResponse, PlainTextResponse, Response
 
 
-def _read_json(path: Path) -> list[dict[str, object]]:
-    return json.loads(path.read_text())
+def _read_json(path: Path) -> list[dict[str, Any]]:
+    data = json.loads(path.read_text())
+    assert isinstance(data, list)
+    return cast(list[dict[str, Any]], data)
 
 
 def test_golden_ensure_writes_when_approved(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -103,12 +106,33 @@ def test_request_response_recorder_serializes_payloads(
 
     data = _read_json(path)
     assert data[0]["name"] == "json"
-    request_headers = data[0]["request"]["headers"]
+
+    first_request = data[0]["request"]
+    assert isinstance(first_request, dict)
+    request_headers = first_request["headers"]
+    assert isinstance(request_headers, list)
     assert request_headers[0] == ["content-type", "application/json"]
     assert request_headers[1] == ["x-test", "true"]
-    assert data[0]["request"]["query"] == {"filters": ["x", "y"], "page": 1, "tag": ["a", "b"]}
-    assert data[0]["response"]["body"]["json"] == {"ok": True}
-    assert data[1]["response"]["body"] == {"text": "pong"}
-    assert data[2]["response"]["body"] == {"text": "base64:/wA="}
-    assert "json" not in data[1]["request"]
-    assert "body" not in data[3]["response"]
+    assert first_request["query"] == {"filters": ["x", "y"], "page": 1, "tag": ["a", "b"]}
+
+    first_response = data[0]["response"]
+    assert isinstance(first_response, dict)
+    response_body = first_response["body"]
+    assert isinstance(response_body, dict)
+    assert response_body["json"] == {"ok": True}
+
+    second_response = data[1]["response"]
+    assert isinstance(second_response, dict)
+    assert second_response["body"] == {"text": "pong"}
+
+    third_response = data[2]["response"]
+    assert isinstance(third_response, dict)
+    assert third_response["body"] == {"text": "base64:/wA="}
+
+    second_request = data[1]["request"]
+    assert isinstance(second_request, dict)
+    assert "json" not in second_request
+
+    fourth_response = data[3]["response"]
+    assert isinstance(fourth_response, dict)
+    assert "body" not in fourth_response

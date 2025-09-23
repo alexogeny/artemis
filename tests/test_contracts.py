@@ -3,6 +3,7 @@ from __future__ import annotations
 import shutil
 import subprocess
 from pathlib import Path
+from typing import Protocol
 
 import msgspec
 import pytest
@@ -12,6 +13,12 @@ from artemis.codegen import generate_typescript_client
 from artemis.golden import GoldenFile, RequestResponseRecorder
 from artemis.observability import Observability, ObservabilityConfig
 from artemis.openapi import generate_openapi
+
+
+class _ResponseLike(Protocol):
+    status: int
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
 
 
 class CreateItem(msgspec.Struct):
@@ -41,7 +48,7 @@ def _build_app() -> ArtemisApp:
         return {"id": item_id, "name": f"Item {item_id}"}
 
     @app.post("/items", name="create_item")
-    async def create_item(payload: CreateItem) -> JSONResponse:
+    async def create_item(payload: CreateItem) -> _ResponseLike:
         return JSONResponse({"created": payload.name}, status=201)
 
     @app.get("/ping")
@@ -97,3 +104,5 @@ async def test_request_response_recording() -> None:
         assert response.status == 200
         await client.post("/items", tenant="acme", json={"name": "Sample"}, label="create_item")
     recorder.finalize()
+
+

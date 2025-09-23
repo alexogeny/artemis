@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import types
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 import pytest
 
@@ -366,7 +366,7 @@ def test_observability_request_success_without_status_attribute(
             return self
 
     response = HeaderOnlyResponse()
-    result = observability.on_request_success(context, response)
+    result = observability.on_request_success(context, cast(Response, response))
     assert result is response
     span = tracer.spans[-1]
     assert "http.status_code" not in span.attributes
@@ -525,10 +525,11 @@ def test_observability_request_start_handles_missing_traceparent_header() -> Non
                 return incoming
             return default
 
-    context = observability.on_request_start(StubRequest())
+    context = observability.on_request_start(cast(Request, StubRequest()))
     assert context is not None
     assert calls["count"] >= 2
     assert context.parent_span_id == "b" * 16
+    assert context.traceparent is not None
     assert context.traceparent.startswith("00-" + ("a" * 32) + "-")
 
 

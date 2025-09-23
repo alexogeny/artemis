@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import Annotated, Literal, Optional
+from typing import Annotated, Literal, Optional, Protocol
 
 import msgspec
 
@@ -9,6 +9,12 @@ import artemis.openapi as openapi_module
 from artemis import AppConfig, ArtemisApp, JSONResponse, Observability, ObservabilityConfig, PlainTextResponse, Response
 from artemis.openapi import generate_openapi
 from artemis.routing import RouteGuard
+
+
+class _ResponseLike(Protocol):
+    status: int
+    headers: tuple[tuple[str, str], ...]
+    body: bytes
 
 
 class Payload(msgspec.Struct):
@@ -63,7 +69,7 @@ def _make_app() -> ArtemisApp:
         return "maybe"
 
     @app.get("/plain")
-    async def plain() -> PlainTextResponse:
+    async def plain() -> _ResponseLike:
         return PlainTextResponse("pong")
 
     return app
@@ -119,7 +125,10 @@ def test_generate_openapi_handles_docstrings_and_skips_parameters() -> None:
 
     @app.get("/awaitable")
     async def awaited() -> Awaitable[Result]:
-        return Result(value=1)
+        async def inner() -> Result:
+            return Result(value=1)
+
+        return inner()
 
     spec = generate_openapi(app, title="Doc API", version="1.0.0")
     operation = spec["paths"]["/doc/{item_id}"]["post"]
