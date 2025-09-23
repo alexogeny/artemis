@@ -67,7 +67,7 @@ def _build_oidc_authenticator(
         allowed_audiences=["client"],
         allowed_groups=["admins"],
     )
-    secret = b"oidc-shared-secret"
+    secret = provider.client_secret.encode()
     jwks = {
         "keys": [
             {
@@ -220,6 +220,79 @@ def test_oidc_authenticator_validates_token() -> None:
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, expected_nonce="other", now=now)
     assert str(exc.value) == "invalid_nonce"
+
+
+def test_oidc_authenticator_hmac_fallback_uses_client_secret() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, _ = _build_oidc_authenticator(now=now)
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {
+            "keys": [
+                {
+                    "kty": "RSA",
+                    "kid": "rsa",
+                    "n": _b64url(b"\x01" + b"\x00" * 63),
+                    "e": _b64url((65537).to_bytes(3, "big")),
+                }
+            ]
+        },
+    )
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, provider.client_secret.encode(), kid=None)
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+
+def test_oidc_authenticator_hmac_fallback_requires_client_secret() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    provider_without_secret = TenantOidcProvider(
+        id=provider.id,
+        issuer=provider.issuer,
+        client_id=provider.client_id,
+        client_secret="",
+        jwks_uri=provider.jwks_uri,
+        authorization_endpoint=provider.authorization_endpoint,
+        token_endpoint=provider.token_endpoint,
+        userinfo_endpoint=provider.userinfo_endpoint,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+        allowed_audiences=list(provider.allowed_audiences),
+        allowed_groups=list(provider.allowed_groups),
+        enabled=provider.enabled,
+    )
+    authenticator = OidcAuthenticator(
+        provider_without_secret,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {},
+    )
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret, kid=None)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "unknown_jwk"
+
+
+def test_oidc_authenticator_client_secret_key_rejects_non_hmac() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    authenticator, _, _ = _build_oidc_authenticator(now=now)
+    assert authenticator._client_secret_hmac_key("RS256") is None
 
 
 def test_saml_authenticator_validates_and_maps_attributes() -> None:
@@ -682,11 +755,19 @@ def test_oidc_authenticator_jwks_fetch_errors() -> None:
     assert str(exc.value) == "invalid_jwks"
 
     authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": []})
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {})
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": ["value"]})
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": ["value"]})
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": "invalid"})
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
@@ -809,6 +890,12 @@ def test_oidc_authenticator_signature_edge_cases() -> None:
     jwks_ec = {"keys": [{"kty": "EC", "kid": "primary"}]}
     authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ec)
     token = _issue_oidc_token(base_claims, secret)
+    resolved = authenticator.validate(token, now=now)
+    assert resolved["iss"] == provider.issuer
+
+    jwks_ec_sig = {"keys": [{"kty": "EC", "kid": "primary", "alg": "ES256", "use": "sig"}]}
+    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ec_sig)
+    token = _issue_oidc_token(base_claims, secret, alg="ES256")
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "unsupported_jwk"

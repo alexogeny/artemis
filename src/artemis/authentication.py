@@ -384,7 +384,9 @@ class OidcAuthenticator:
             if not isinstance(document, Mapping):
                 raise AuthenticationError("invalid_jwks")
             keys = document.get("keys")
-            if not isinstance(keys, list) or not keys:
+            if keys is None:
+                keys = []
+            if not isinstance(keys, list):
                 raise AuthenticationError("invalid_jwks")
             for key in keys:
                 if not isinstance(key, Mapping):
@@ -393,8 +395,22 @@ class OidcAuthenticator:
         return self._jwks_cache
 
     def _resolve_jwk(self, alg: str, kid: str | None) -> Mapping[str, Any]:
+        expected_kty: str | None
+        if alg in _HMAC_ALGORITHMS:
+            expected_kty = "oct"
+        elif alg in _RSA_HASH_ALGORITHMS:
+            expected_kty = "RSA"
+        else:
+            expected_kty = None
+
         def select_key(keys: list[Mapping[str, Any]]) -> Mapping[str, Any] | None:
-            matches = [key for key in keys if kid is None or key.get("kid") == kid]
+            matches: list[Mapping[str, Any]] = []
+            for key in keys:
+                if expected_kty is not None and key.get("kty") != expected_kty:
+                    continue
+                if kid is not None and key.get("kid") != kid:
+                    continue
+                matches.append(key)
             if kid is None:
                 if len(matches) == 1:
                     return matches[0]
@@ -410,6 +426,13 @@ class OidcAuthenticator:
             keys = self._load_jwks()
             key = select_key(keys)
         if key is None:
+            has_expected_kty = expected_kty is not None and any(
+                candidate.get("kty") == expected_kty for candidate in keys
+            )
+            if expected_kty == "oct" and not has_expected_kty:
+                fallback = self._client_secret_hmac_key(alg)
+                if fallback is not None:
+                    return fallback
             raise AuthenticationError("unknown_jwk")
         key_alg = key.get("alg")
         if key_alg is not None and key_alg != alg:
@@ -418,6 +441,19 @@ class OidcAuthenticator:
         if use is not None and use != "sig":
             raise AuthenticationError("unsupported_jwk")
         return key
+
+    def _client_secret_hmac_key(self, alg: str) -> Mapping[str, Any] | None:
+        if alg not in _HMAC_ALGORITHMS:
+            return None
+        secret = self.provider.client_secret
+        if not secret:
+            return None
+        return {
+            "kty": "oct",
+            "k": _b64url_encode(secret.encode()),
+            "alg": alg,
+            "use": "sig",
+        }
 
     def _verify_signature(
         self,
