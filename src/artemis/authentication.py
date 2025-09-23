@@ -346,7 +346,7 @@ class SamlAuthenticator:
     def __init__(self, provider: TenantSamlProvider) -> None:
         self.provider = provider
 
-    def validate(self, assertion: str) -> Mapping[str, Any]:
+    def validate(self, assertion: str, *, now: dt.datetime | None = None) -> Mapping[str, Any]:
         try:
             tree = ET.fromstring(assertion)
         except ET.ParseError as exc:  # pragma: no cover - defensive branch
@@ -361,6 +361,54 @@ class SamlAuthenticator:
         expected = _b64url_encode(hmac.new(self.provider.certificate.encode(), subject.encode(), sha256).digest())
         if not hmac.compare_digest(signature, expected):
             raise AuthenticationError("invalid_signature")
+        now = now or dt.datetime.now(dt.timezone.utc)
+        if now.tzinfo is None:
+            now = now.replace(tzinfo=dt.timezone.utc)
+        skew = dt.timedelta(seconds=max(self.provider.clock_skew_seconds, 0))
+
+        def parse_instant(value: str) -> dt.datetime:
+            try:
+                instant = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError as exc:  # pragma: no cover - defensive branch
+                raise AuthenticationError("invalid_timestamp") from exc
+            if instant.tzinfo is None:
+                instant = instant.replace(tzinfo=dt.timezone.utc)
+            return instant
+
+        conditions = tree.find(".//saml2:Conditions", namespaces=ns)
+        if conditions is not None:
+            not_before_attr = conditions.get("NotBefore")
+            if not_before_attr:
+                not_before = parse_instant(not_before_attr)
+                if now + skew < not_before:
+                    raise AuthenticationError("assertion_not_yet_valid")
+            not_on_or_after_attr = conditions.get("NotOnOrAfter")
+            if not_on_or_after_attr:
+                not_on_or_after = parse_instant(not_on_or_after_attr)
+                if now - skew >= not_on_or_after:
+                    raise AuthenticationError("assertion_expired")
+
+        for data in tree.findall(
+            ".//saml2:SubjectConfirmation/saml2:SubjectConfirmationData", namespaces=ns
+        ):
+            data_not_before = data.get("NotBefore")
+            if data_not_before:
+                not_before = parse_instant(data_not_before)
+                if now + skew < not_before:
+                    raise AuthenticationError("subject_confirmation_not_yet_valid")
+            data_not_on_or_after = data.get("NotOnOrAfter")
+            if data_not_on_or_after:
+                not_on_or_after = parse_instant(data_not_on_or_after)
+                if now - skew >= not_on_or_after:
+                    raise AuthenticationError("subject_confirmation_expired")
+
+        audiences = [
+            node.text
+            for node in tree.findall(".//saml2:AudienceRestriction/saml2:Audience", namespaces=ns)
+            if node.text
+        ]
+        if self.provider.allowed_audiences and not set(audiences).intersection(self.provider.allowed_audiences):
+            raise AuthenticationError("invalid_audience")
         attributes: MutableMapping[str, str] = {}
         for attribute in tree.findall(".//saml2:Attribute", namespaces=ns):
             name = attribute.get("Name")
