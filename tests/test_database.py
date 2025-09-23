@@ -7,13 +7,17 @@ from artemis.database import (
     Database,
     DatabaseConfig,
     DatabaseConnection,
+    DatabaseCredentials,
     DatabaseError,
     DatabaseResult,
     PoolConfig,
+    SecretRef,
+    SecretValue,
+    TLSConfig,
     _quote_identifier,
 )
 from artemis.tenancy import TenantResolver
-from tests.support import FakeConnection, FakePool
+from tests.support import FakeConnection, FakePool, StaticSecretResolver
 
 
 @pytest.mark.asyncio
@@ -66,6 +70,8 @@ async def test_database_schema_resolution_and_pool_factory() -> None:
     await database.startup()
     assert captured_options[0]["dsn"] == "postgres://demo"
     assert captured_options[0]["application_name"] == "artemis"
+    assert captured_options[0]["sslmode"] == "verify-full"
+    assert captured_options[0]["options"]["sslmode"] == "verify-full"
 
     admin_info = type("AdminInfo", (), {"scope": "admin", "schema": None, "table": "billing"})
     tenant_info = type("TenantInfo", (), {"scope": "tenant", "schema": None, "table": "users"})
@@ -166,6 +172,88 @@ async def test_database_shutdown_branches() -> None:
     assert async_pool.closed is True
 
 
+def test_pool_kwargs_resolves_secrets_and_tls() -> None:
+    resolver = StaticSecretResolver(
+        {
+            ("vault", "db-user", None): "appuser",
+            ("vault", "db-password", None): "s3cr3t",
+            ("vault", "db-ca", None): "/etc/db-ca.pem",
+            ("vault", "client-cert", None): "/etc/db-cert.pem",
+            ("vault", "client-key", None): "/etc/db-key.pem",
+            ("vault", "client-key-password", None): "passphrase",
+        }
+    )
+    pool_config = PoolConfig(
+        dsn="postgres://secure",
+        credentials=DatabaseCredentials(
+            username=SecretValue(secret=SecretRef(provider="vault", name="db-user")),
+            password=SecretValue(secret=SecretRef(provider="vault", name="db-password")),
+        ),
+        tls=TLSConfig(
+            ca_certificate=SecretValue(secret=SecretRef(provider="vault", name="db-ca")),
+            certificate_pins=("sha256:abcdef",),
+            client_certificate=SecretValue(secret=SecretRef(provider="vault", name="client-cert")),
+            client_key=SecretValue(secret=SecretRef(provider="vault", name="client-key")),
+            client_key_password=SecretValue(secret=SecretRef(provider="vault", name="client-key-password")),
+            server_name="db.internal",
+            minimum_version="TLS1.2",
+            maximum_version="TLS1.3",
+        ),
+    )
+    options = database_module._pool_kwargs(pool_config, resolver=resolver)
+    assert options["user"] == "appuser"
+    assert options["password"] == "s3cr3t"
+    assert options["sslrootcert"] == "/etc/db-ca.pem"
+    assert options["sslcert"] == "/etc/db-cert.pem"
+    assert options["sslkey"] == "/etc/db-key.pem"
+    assert options["sslpassword"] == "passphrase"
+    assert options["ssl_server_name"] == "db.internal"
+    assert options["ssl_min_protocol_version"] == "TLS1.2"
+    assert options["ssl_max_protocol_version"] == "TLS1.3"
+    assert options["ssl_cert_pins"] == ("sha256:abcdef",)
+    assert options["sslmode"] == "verify-full"
+    assert resolver.calls  # ensure secrets were fetched
+
+
+def test_secret_value_requires_resolver() -> None:
+    secret = SecretValue(secret=SecretRef(provider="vault", name="db-user"))
+    with pytest.raises(DatabaseError):
+        secret.resolve(None, field="credentials.username")
+
+
+def test_secret_value_requires_string() -> None:
+    class Resolver:
+        def resolve(self, _: SecretRef) -> object:
+            return 123
+
+    secret = SecretValue(secret=SecretRef(provider="vault", name="db-user"))
+    with pytest.raises(DatabaseError):
+        secret.resolve(Resolver(), field="credentials.username")
+
+
+def test_tls_config_disabled_mode() -> None:
+    tls = TLSConfig(mode="")
+    assert tls.resolve(None) == {}
+
+
+def test_tls_config_skips_empty_values() -> None:
+    tls = TLSConfig(client_certificate=SecretValue(literal=None))
+    assert "sslcert" not in tls.resolve(None)
+
+
+def test_secret_value_returns_literal() -> None:
+    secret = SecretValue(literal="inline")
+    assert secret.resolve(None, field="credentials.username") == "inline"
+
+
+def test_database_credentials_skip_none_values() -> None:
+    credentials = DatabaseCredentials(
+        username=SecretValue(literal=None),
+        password=SecretValue(literal=None),
+    )
+    assert credentials.resolve(None) == {}
+
+
 def test_database_private_helpers() -> None:
     config = DatabaseConfig(
         pool=PoolConfig(dsn="postgres://"),
@@ -197,6 +285,8 @@ def test_database_private_helpers() -> None:
     assert options["application_name"] == "demo"
     assert options["extra"] == "value"
     assert options["options"]["extra"] == "value"
+    assert options["sslmode"] == "verify-full"
+    assert options["options"]["sslmode"] == "verify-full"
 
     assert _quote_identifier("tenant") == '"tenant"'
     assert _quote_identifier('acme"corp') == '"acme""corp"'

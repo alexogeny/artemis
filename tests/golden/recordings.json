@@ -16,12 +16,40 @@
       },
       "headers": [
         [
+          "content-security-policy",
+          "default-src 'self'"
+        ],
+        [
           "content-type",
           "application/json"
         ],
         [
+          "cross-origin-opener-policy",
+          "same-origin"
+        ],
+        [
+          "permissions-policy",
+          "geolocation=(), microphone=(), camera=()"
+        ],
+        [
+          "referrer-policy",
+          "no-referrer"
+        ],
+        [
+          "strict-transport-security",
+          "max-age=63072000; includeSubDomains; preload"
+        ],
+        [
           "traceparent",
           "00-00000000000000000000000000000001-0000000000000002-01"
+        ],
+        [
+          "x-content-type-options",
+          "nosniff"
+        ],
+        [
+          "x-frame-options",
+          "DENY"
         ]
       ],
       "status": 200
@@ -52,12 +80,40 @@
       },
       "headers": [
         [
+          "content-security-policy",
+          "default-src 'self'"
+        ],
+        [
           "content-type",
           "application/json"
         ],
         [
+          "cross-origin-opener-policy",
+          "same-origin"
+        ],
+        [
+          "permissions-policy",
+          "geolocation=(), microphone=(), camera=()"
+        ],
+        [
+          "referrer-policy",
+          "no-referrer"
+        ],
+        [
+          "strict-transport-security",
+          "max-age=63072000; includeSubDomains; preload"
+        ],
+        [
           "traceparent",
-          "00-00000000000000000000000000000004-0000000000000005-01"
+          "00-00000000000000000000000000000005-0000000000000006-01"
+        ],
+        [
+          "x-content-type-options",
+          "nosniff"
+        ],
+        [
+          "x-frame-options",
+          "DENY"
         ]
       ],
       "status": 201

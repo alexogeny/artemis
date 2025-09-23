@@ -68,7 +68,7 @@ async def test_request_observability_success(monkeypatch: pytest.MonkeyPatch) ->
         response = await client.get("/ping", tenant="acme")
 
     assert response.status == 200
-    span = tracer.spans[-1]
+    span = next(span for span in tracer.spans if span.name == observability.config.request.span_name)
     assert span.attributes["http.method"] == "GET"
     assert span.attributes["http.result"] == "success"
     assert span.attributes["http.status_code"] == 200
@@ -104,7 +104,7 @@ async def test_request_observability_error(monkeypatch: pytest.MonkeyPatch) -> N
         with pytest.raises(RuntimeError):
             await client.get("/boom", tenant="acme")
 
-    span = tracer.spans[-1]
+    span = next(span for span in tracer.spans if span.name == observability.config.request.span_name)
     assert span.attributes["http.result"] == "error"
     assert getattr(span.status, "status_code", None) == "error"
     assert hub.captured and isinstance(hub.captured[-1], RuntimeError)

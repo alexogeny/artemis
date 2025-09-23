@@ -116,8 +116,8 @@ class AuditTrail:
             entity_type=info.table,
             entity_id=self._identity_from_row(info, data),
             actor=actor,
-            changes=changes or data,
-            metadata=self._metadata_for(before=before, context=current_context()),
+            changes=self.sanitize_model_payload(info, changes or data),
+            metadata=self._metadata_for(info=info, before=before, context=current_context()),
         )
         await self._write_entry(entry_info, payload, tenant if entry_info.scope == "tenant" else None)
 
@@ -143,7 +143,7 @@ class AuditTrail:
             entity_id=entity_id,
             actor=actor or current_actor(),
             changes=changes or {},
-            metadata=metadata,
+            metadata=self._metadata_for(info=None, before=None, context=current_context(), extra=metadata),
         )
         await self._write_entry(entry_info, payload, tenant if entry_info.scope == "tenant" else None)
 
@@ -187,6 +187,18 @@ class AuditTrail:
         model = info.model(**attributes)
         return {field.name: getattr(model, field.name) for field in info.fields}
 
+    def sanitize_model_payload(
+        self,
+        info: "ModelInfo[Any]",
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        """Remove sensitive fields from ``payload`` using model metadata."""
+
+        builtins_payload = msgspec.to_builtins(payload)
+        if not isinstance(builtins_payload, dict):
+            return {}
+        return {key: value for key, value in builtins_payload.items() if key not in info.redacted_fields}
+
     async def _write_entry(
         self,
         info: "ModelInfo[Any]",
@@ -223,12 +235,19 @@ class AuditTrail:
     def _metadata_for(
         self,
         *,
+        info: "ModelInfo[Any] | None",
         before: Mapping[str, Any] | None,
         context: AuditContext | None,
+        extra: Mapping[str, Any] | None = None,
     ) -> Mapping[str, Any]:
         metadata: dict[str, Any] = {}
+        if extra:
+            metadata.update(msgspec.to_builtins(extra))
         if before is not None:
-            metadata["before"] = msgspec.to_builtins(before)
+            snapshot = msgspec.to_builtins(before)
+            if info is not None:
+                snapshot = self.sanitize_model_payload(info, snapshot)
+            metadata["before"] = snapshot
         if context and context.tenant is not None:
             metadata.setdefault("tenant", context.tenant.tenant)
         return metadata

@@ -21,7 +21,16 @@ from .chatops import (
     SlackWebhookConfig,
 )
 from .config import AppConfig
-from .database import Database, DatabaseConfig, PoolConfig
+from .database import (
+    Database,
+    DatabaseConfig,
+    DatabaseCredentials,
+    PoolConfig,
+    SecretRef,
+    SecretResolver,
+    SecretValue,
+    TLSConfig,
+)
 from .dependency import DependencyProvider
 from .exceptions import ArtemisError, HTTPError
 from .http import (
@@ -103,7 +112,14 @@ from .rbac import (
     build_engine,
 )
 from .requests import Request
-from .responses import JSONResponse, PlainTextResponse, Response
+from .responses import (
+    DEFAULT_SECURITY_HEADERS,
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    apply_default_security_headers,
+    security_headers_middleware,
+)
 from .routing import get, post, route
 from .static import StaticFiles
 from .tenancy import TenantContext, TenantResolver, TenantScope
@@ -141,11 +157,13 @@ __all__ = [
     "Customer",
     "Database",
     "DatabaseConfig",
+    "DatabaseCredentials",
     "DatabaseModel",
     "DependencyProvider",
     "FederatedIdentityDirectory",
     "FederatedProvider",
     "HTTPError",
+    "DEFAULT_SECURITY_HEADERS",
     "JSONResponse",
     "MfaCode",
     "MfaManager",
@@ -169,9 +187,14 @@ __all__ = [
     "PermissionEffect",
     "PlainTextResponse",
     "PoolConfig",
+    "Response",
+    "SecretRef",
+    "SecretResolver",
+    "SecretValue",
+    "TLSConfig",
+    "apply_default_security_headers",
     "Request",
     "RequestObservabilityConfig",
-    "Response",
     "Role",
     "RoleBinding",
     "RoleScope",
@@ -193,6 +216,7 @@ __all__ = [
     "TenantSecret",
     "TenantUser",
     "TestClient",
+    "security_headers_middleware",
     "UserRole",
     "attach_quickstart",
     "audit_context",
