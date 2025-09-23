@@ -193,7 +193,13 @@ async def test_request_waiter_skips_loader_after_cache_fill() -> None:
     await request._body_lock.acquire()
     try:
         waiter = asyncio.create_task(request.body())
-        await asyncio.sleep(0)
+        for _ in range(100):
+            await asyncio.sleep(0)
+            waiters = request._body_lock._waiters  # pragma: no cover - exercised in tests only
+            if waiters:
+                break
+        else:  # pragma: no cover
+            pytest.fail("waiter did not block on request body lock")
         request._body = b"prefilled"
         request._body_loader = None
     finally:

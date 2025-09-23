@@ -116,7 +116,8 @@ class Request:
             if loader is None:
                 self._body = b""
             else:
-                async with self._body_lock:
+                await self._body_lock.acquire()
+                try:
                     if self._body is None:
                         raw = await loader()
                         if raw is None:
@@ -126,6 +127,8 @@ class Request:
                         else:
                             self._body = bytes(raw)
                         self._body_loader = None
+                finally:
+                    self._body_lock.release()
         body = self._body
         assert body is not None
         return body
