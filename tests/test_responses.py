@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import datetime as dt
 
+import pytest
+
 from artemis.exceptions import HTTPError
 from artemis.models import (
     AdminUser,
@@ -13,8 +15,6 @@ from artemis.models import (
     TenantSecret,
     TenantUser,
 )
-import pytest
-
 from artemis.requests import Request
 from artemis.responses import (
     DEFAULT_SECURITY_HEADERS,
