@@ -1,7 +1,19 @@
 from __future__ import annotations
 
+import datetime as dt
+
 from artemis.exceptions import HTTPError
-from artemis.responses import PlainTextResponse, Response, exception_to_response
+from artemis.models import (
+    AdminUser,
+    AppSecret,
+    MfaCode,
+    MfaPurpose,
+    SessionLevel,
+    SessionToken,
+    TenantSecret,
+    TenantUser,
+)
+from artemis.responses import JSONResponse, PlainTextResponse, Response, exception_to_response
 from artemis.serialization import json_decode
 
 
@@ -22,3 +34,58 @@ def test_exception_to_response_serializes() -> None:
     response = exception_to_response(error)
     data = json_decode(response.body)
     assert data == {"error": {"status": 400, "detail": "bad request"}}
+
+
+def test_json_response_redacts_admin_user_sensitive_fields() -> None:
+    user = AdminUser(
+        email="admin@example.com",
+        hashed_password="hash",
+        password_salt="salt",
+        password_secret="secret",
+        mfa_enforced=True,
+        mfa_enrolled_at=dt.datetime.now(dt.timezone.utc),
+    )
+    data = json_decode(JSONResponse(user).body)
+    assert data["email"] == "admin@example.com"
+    for field in {"hashed_password", "password_salt", "password_secret", "mfa_enforced", "mfa_enrolled_at"}:
+        assert field not in data
+
+
+def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
+    tenant_user = TenantUser(
+        email="user@example.com",
+        hashed_password="hash",
+        password_salt="salt",
+        password_secret="secret",
+        mfa_enforced=True,
+        mfa_enrolled_at=dt.datetime.now(dt.timezone.utc),
+    )
+    tenant_secret = TenantSecret(secret="tenant-secret")
+    app_secret = AppSecret(secret_value="value", salt="pepper")
+    mfa_code = MfaCode(
+        user_id="user",
+        code="123456",
+        purpose=MfaPurpose.SIGN_IN,
+        expires_at=dt.datetime.now(dt.timezone.utc),
+    )
+    session = SessionToken(
+        user_id="user",
+        token="token",
+        expires_at=dt.datetime.now(dt.timezone.utc),
+        level=SessionLevel.MFA,
+    )
+    payload = {
+        "user": tenant_user,
+        "tenant_secret": tenant_secret,
+        "app_secret": app_secret,
+        "mfa": mfa_code,
+        "session": session,
+    }
+    data = json_decode(JSONResponse(payload).body)
+    for field in {"hashed_password", "password_salt", "password_secret", "mfa_enforced", "mfa_enrolled_at"}:
+        assert field not in data["user"]
+    assert "secret" not in data["tenant_secret"]
+    assert "secret_value" not in data["app_secret"]
+    assert "salt" not in data["app_secret"]
+    assert "code" not in data["mfa"]
+    assert "token" not in data["session"]

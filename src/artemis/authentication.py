@@ -358,9 +358,7 @@ class SamlAuthenticator:
         signature = tree.findtext(".//saml2:SignatureValue", namespaces=ns) or tree.findtext(".//SignatureValue")
         if not signature:
             raise AuthenticationError("missing_signature")
-        expected = _b64url_encode(
-            hmac.new(self.provider.certificate.encode(), subject.encode(), sha256).digest()
-        )
+        expected = _b64url_encode(hmac.new(self.provider.certificate.encode(), subject.encode(), sha256).digest())
         if not hmac.compare_digest(signature, expected):
             raise AuthenticationError("invalid_signature")
         attributes: MutableMapping[str, str] = {}
@@ -428,4 +426,3 @@ def _argon2_hash(
     if isinstance(hashed, bytes):
         return hashed.decode()
     return hashed
-

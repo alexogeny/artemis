@@ -4,8 +4,10 @@ from __future__ import annotations
 
 from msgspec import Struct
 
+from .chatops import ChatOpsConfig
 from .database import DatabaseConfig
 from .execution import ExecutionConfig
+from .observability import ObservabilityConfig
 
 
 class AppConfig(Struct, frozen=True):
@@ -18,6 +20,8 @@ class AppConfig(Struct, frozen=True):
     allowed_tenants: tuple[str, ...] = ()
     execution: ExecutionConfig = ExecutionConfig()
     database: DatabaseConfig | None = None
+    chatops: ChatOpsConfig = ChatOpsConfig()
+    observability: ObservabilityConfig = ObservabilityConfig()
 
     def tenant_host(self, tenant: str) -> str:
         """Return the hostname for a given tenant."""

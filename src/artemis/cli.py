@@ -192,7 +192,7 @@ def _render_migration_template(
     lines: list[str] = [
         "from __future__ import annotations",
         "",
-        "\"\"\"Auto-generated migration skeleton.\"\"\"",
+        '"""Auto-generated migration skeleton."""',
         "",
         "from artemis.migrations import Migration, MigrationScope, create_table_for_model",
     ]
@@ -212,7 +212,7 @@ def _render_migration_template(
 
     if admin_models:
         lines.append("    Migration(")
-        lines.append(f"        name=\"{slug}_admin\",")
+        lines.append(f'        name="{slug}_admin",')
         lines.append("        scope=MigrationScope.ADMIN,")
         lines.append("        operations=(")
         for model in admin_models:
@@ -222,13 +222,13 @@ def _render_migration_template(
 
     if tenant_models:
         lines.append("    Migration(")
-        lines.append(f"        name=\"{slug}_tenant\",")
+        lines.append(f'        name="{slug}_tenant",')
         lines.append("        scope=MigrationScope.TENANT,")
         lines.append("        operations=(")
         for model in tenant_models:
             lines.append(f"            create_table_for_model({model.__name__}),")
         lines.append("        ),")
-        lines.append("        # target_tenants=(\"customer\",),")
+        lines.append('        # target_tenants=("customer",),')
         lines.append("    ),")
 
     if not admin_models and not tenant_models:

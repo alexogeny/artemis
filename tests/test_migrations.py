@@ -261,12 +261,14 @@ async def test_migration_schema_placeholder_requires_tenant() -> None:
     with pytest.raises(MigrationError):
         await runner.run_all()
 
+
 @pytest.mark.asyncio
 async def test_snapshot_test_data_writes_sql(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     @model(scope=ModelScope.ADMIN, table="snapshot_demo_runner")
     class SnapshotModel(Model):  # type: ignore[misc, valid-type]
         id: str
         value: str
+
     monkeypatch.setattr(Model, "declared_models", classmethod(lambda cls: (SnapshotModel,)))
 
     connection = FakeConnection()
@@ -277,7 +279,7 @@ async def test_snapshot_test_data_writes_sql(tmp_path: Path, monkeypatch: pytest
     destination = tmp_path / "snapshot.sql"
     await runner.snapshot_test_data(destination, tenants=[], include_admin=True)
     content = destination.read_text(encoding="utf-8")
-    assert "INSERT INTO \"admin\".\"snapshot_demo_runner\"" in content
+    assert 'INSERT INTO "admin"."snapshot_demo_runner"' in content
     assert "'demo'" in content
 
 
@@ -460,14 +462,16 @@ def test_cli_make_migration_generates_template(tmp_path: Path, monkeypatch: pyte
         classmethod(lambda cls: (_TestAdminModel, _TestTenantModel)),
     )
     output_dir = tmp_path / "migrations"
-    result = cli_main([
-        "make-migration",
-        "Initial Schema",
-        "--directory",
-        str(output_dir),
-        "--import",
-        "tests.test_migrations",
-    ])
+    result = cli_main(
+        [
+            "make-migration",
+            "Initial Schema",
+            "--directory",
+            str(output_dir),
+            "--import",
+            "tests.test_migrations",
+        ]
+    )
     assert result == 0
     path = output_dir / "initial_schema.py"
     content = path.read_text(encoding="utf-8")
@@ -486,6 +490,7 @@ def test_cli_snapshot_writes_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     class SnapshotModel(Model):  # type: ignore[misc, valid-type]
         id: str
         value: str
+
     monkeypatch.setattr(Model, "declared_models", classmethod(lambda cls: (SnapshotModel,)))
 
     module.get_database = lambda: database  # type: ignore[attr-defined]
@@ -495,17 +500,22 @@ def test_cli_snapshot_writes_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     sys.modules[module_name] = module
     try:
         destination = tmp_path / "data.sql"
-        assert cli_main([
-            "snapshot-test-data",
-            "--module",
-            module_name,
-            "--output",
-            str(destination),
-        ]) == 0
+        assert (
+            cli_main(
+                [
+                    "snapshot-test-data",
+                    "--module",
+                    module_name,
+                    "--output",
+                    str(destination),
+                ]
+            )
+            == 0
+        )
     finally:
         sys.modules.pop(module_name, None)
     content = destination.read_text(encoding="utf-8")
-    assert "INSERT INTO \"admin\".\"snapshot_demo_cli\"" in content
+    assert 'INSERT INTO "admin"."snapshot_demo_cli"' in content
 
 
 def test_cli_snapshot_skip_admin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -523,16 +533,18 @@ def test_cli_snapshot_skip_admin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     try:
         destination = tmp_path / "skip.sql"
         assert (
-            cli_main([
-                "snapshot-test-data",
-                "--module",
-                module_name,
-                "--output",
-                str(destination),
-                "--skip-admin",
-            ])
+            cli_main(
+                [
+                    "snapshot-test-data",
+                    "--module",
+                    module_name,
+                    "--output",
+                    str(destination),
+                    "--skip-admin",
+                ]
+            )
             == 0
-    )
+        )
     finally:
         sys.modules.pop(module_name, None)
     assert destination.exists()
@@ -601,18 +613,12 @@ async def test_migration_runner_skips_previously_applied() -> None:
     runner = MigrationRunner(database, migrations=[migration])
     applied = await runner.run_all()
     assert applied == []
-    executed = [
-        sql
-        for method, sql, *_ in connection.calls
-        if method == "execute" and "skipped" in sql
-    ]
+    executed = [sql for method, sql, *_ in connection.calls if method == "execute" and "skipped" in sql]
     assert not executed
 
 
 @pytest.mark.asyncio
-async def test_snapshot_test_data_no_statements(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+async def test_snapshot_test_data_no_statements(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(Model, "declared_models", classmethod(lambda cls: ()))
     database = _database_with_connection(FakeConnection())
     runner = MigrationRunner(database, migrations=[])
@@ -683,10 +689,7 @@ def test_schema_for_scope_variants() -> None:
 
     assert runner._schema_for_scope(MigrationScope.ADMIN, None, "custom_schema") == "custom_schema"
     assert runner._schema_for_scope(MigrationScope.ADMIN, None, None) == database.config.admin_schema
-    assert (
-        runner._schema_for_scope(MigrationScope.TENANT, tenant, "{tenant}_data")
-        == "acme_data"
-    )
+    assert runner._schema_for_scope(MigrationScope.TENANT, tenant, "{tenant}_data") == "acme_data"
     with pytest.raises(MigrationError):
         runner._schema_for_scope(MigrationScope.TENANT, None, None)
     with pytest.raises(MigrationError):
@@ -782,6 +785,8 @@ def test_projection_and_identity_order_clause_variants() -> None:
         fields=(alias_field, other_field),
         accessor="projection_table",
         field_map={"py_name": alias_field, "other": other_field},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     rendered = projection(info)
     assert '"db_name" AS "py_name"' in rendered
@@ -797,6 +802,8 @@ def test_projection_and_identity_order_clause_variants() -> None:
         fields=(alias_field,),
         accessor="projection_identity",
         field_map={"py_name": alias_field},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     assert identity_order_clause(info_identity) == '"db_name"'
 
@@ -809,6 +816,8 @@ def test_projection_and_identity_order_clause_variants() -> None:
         fields=(alias_field,),
         accessor="projection_no_identity",
         field_map={"py_name": alias_field},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     assert identity_order_clause(info_no_identity) == '"db_name"'
 
@@ -860,12 +869,14 @@ def test_cli_make_migration_existing_file(tmp_path: Path) -> None:
     existing = output_dir / "existing.py"
     existing.write_text("", encoding="utf-8")
     with pytest.raises(SystemExit):
-        cli_main([
-            "make-migration",
-            "Existing",
-            "--directory",
-            str(output_dir),
-        ])
+        cli_main(
+            [
+                "make-migration",
+                "Existing",
+                "--directory",
+                str(output_dir),
+            ]
+        )
 
 
 def test_render_migration_template_empty_models() -> None:
@@ -1001,6 +1012,8 @@ def test_models_by_scope_filters_models(monkeypatch: pytest.MonkeyPatch) -> None
             fields=(plain_field,),
             accessor="plain_table",
             field_map={"id": plain_field},
+            exposed=True,
+            redacted_fields=frozenset(),
         ),
     )
 

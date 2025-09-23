@@ -1,13 +1,25 @@
 import datetime as dt
+from typing import Any, cast
 
 import msgspec
 import pytest
 
 import artemis.orm as orm_module
+from artemis.audit import AuditActor, AuditTrail, audit_context
 from artemis.database import Database, DatabaseConfig, PoolConfig
 from artemis.id57 import generate_id57
-from artemis.models import BillingRecord, BillingStatus, TenantUser
-from artemis.orm import ORM, Model, ModelRegistry, ModelScope, default_registry, model
+from artemis.models import AppSecret, BillingRecord, BillingStatus, Passkey, TenantUser
+from artemis.orm import (
+    ORM,
+    Model,
+    ModelInfo,
+    ModelRegistry,
+    ModelScope,
+    _apply_insert_metadata,
+    _apply_update_metadata,
+    default_registry,
+    model,
+)
 from artemis.tenancy import TenantResolver
 from tests.support import FakeConnection, FakePool
 
@@ -39,7 +51,7 @@ async def test_admin_model_insert_and_select() -> None:
     assert created == record
     insert_sql = connection.calls[-1][1]
     assert insert_sql.startswith('INSERT INTO "admin"."billing"')
-    assert 'RETURNING' in insert_sql
+    assert "RETURNING" in insert_sql
     assert '"id"' in insert_sql
 
     connection.queue_result([msgspec.to_builtins(record)])
@@ -51,14 +63,14 @@ async def test_admin_model_insert_and_select() -> None:
     )
     assert rows[0].plan_code == "enterprise"
     select_sql = connection.calls[-1][1]
-    assert "ORDER BY \"plan_code\" DESC, \"created_at\" ASC" in select_sql
+    assert 'ORDER BY "plan_code" DESC, "created_at" ASC' in select_sql
     assert select_sql.endswith("LIMIT $2")
     assert connection.calls[-1][2] == ["enterprise", 1]
 
     connection.queue_result([msgspec.to_builtins(record)])
     plain_rows = await orm.select(BillingRecord, order_by=["plan_code"])
     assert plain_rows[0] == record
-    assert "ORDER BY \"plan_code\" ASC" in connection.calls[-1][1]
+    assert 'ORDER BY "plan_code" ASC' in connection.calls[-1][1]
 
 
 @pytest.mark.asyncio
@@ -142,6 +154,34 @@ def test_registry_accessor_and_namespace() -> None:
     assert orm.admin.billing is admin_manager
     with pytest.raises(LookupError):
         orm.admin.missing
+    with pytest.raises(AttributeError):
+        orm.admin.app_secrets
+    with pytest.raises(AttributeError):
+        orm.tenants.passkeys
+
+
+@pytest.mark.asyncio
+async def test_restricted_models_not_exposed() -> None:
+    database = Database(DatabaseConfig(pool=PoolConfig(dsn="postgres://")), pool=FakePool())
+    orm = ORM(database)
+    with pytest.raises(AttributeError):
+        orm.admin.app_secrets
+    with pytest.raises(AttributeError):
+        orm.tenants.passkeys
+    with pytest.raises(PermissionError):
+        await orm.select(AppSecret)
+    with pytest.raises(PermissionError):
+        await orm.insert(AppSecret, {"secret_value": "s", "salt": "t"})
+    with pytest.raises(PermissionError):
+        await orm.update(AppSecret, {"secret_value": "x"})
+    with pytest.raises(PermissionError):
+        await orm.delete(AppSecret)
+    with pytest.raises(PermissionError):
+        orm.manager(AppSecret)
+    with pytest.raises(PermissionError):
+        await orm.select(Passkey)
+    with pytest.raises(PermissionError):
+        orm.manager(Passkey)
 
 
 @pytest.mark.asyncio
@@ -249,6 +289,7 @@ def test_registry_prevents_duplicates_and_normalizes_accessor() -> None:
     assert any(info.model in {Demo, DemoAccessor} for info in registry.models())
 
     with pytest.raises(ValueError):
+
         @model(scope=ModelScope.ADMIN, table="demo_entries", registry=registry)
         class Duplicate(Model):
             id: int
@@ -257,6 +298,16 @@ def test_registry_prevents_duplicates_and_normalizes_accessor() -> None:
 def test_normalize_accessor_fallback_behavior() -> None:
     assert orm_module._normalize_accessor("Orders-Manage!!") == "orders_manage"
     assert orm_module._normalize_accessor("!!!") == "!!!"
+
+
+def test_model_redacted_field_validation() -> None:
+    registry = ModelRegistry()
+
+    with pytest.raises(ValueError):
+
+        @model(scope=ModelScope.ADMIN, table="invalid", registry=registry, redacted_fields=("missing",))
+        class InvalidModel(Model):
+            id: str
 
 
 @pytest.mark.asyncio
@@ -283,3 +334,179 @@ async def test_projection_with_column_alias_and_filterless_delete() -> None:
     connection.queue_result([])
     deleted = await orm.delete(AliasModel)
     assert deleted == 0
+
+
+class RecordingAuditTrail:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, str, str | None, dict[str, Any], dict[str, Any]]] = []
+
+    async def record_model_change(
+        self,
+        *,
+        info,
+        action,
+        tenant,
+        data,
+        changes,
+        before=None,
+    ) -> None:  # type: ignore[no-untyped-def]
+        tenant_name = tenant.tenant if tenant else None
+        action_value = getattr(action, "value", action)
+        self.events.append(
+            (
+                action_value,
+                info.table,
+                tenant_name,
+                dict(data),
+                dict(changes),
+            )
+        )
+
+
+@pytest.mark.asyncio
+async def test_orm_emits_audit_events() -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    config = DatabaseConfig(pool=PoolConfig(dsn="postgres://"), tenant_schema_template="tenant_{tenant}")
+    database = Database(config, pool=pool)
+    audit = RecordingAuditTrail()
+    orm = ORM(database, audit_trail=cast(AuditTrail, audit))
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    tenant = resolver.context_for("acme")
+
+    user = TenantUser(email="user@example.com", hashed_password="hash")
+    connection.queue_result([msgspec.to_builtins(user)])
+    actor = AuditActor(id="admin", type="AdminUser")
+    async with audit_context(tenant=tenant, actor=actor):
+        created = await orm.tenants.users.create(user, tenant=tenant)
+        assert created.email == "user@example.com"
+
+        updated_user = TenantUser(
+            id=created.id,
+            email=created.email,
+            hashed_password=created.hashed_password,
+            created_at=created.created_at,
+            created_by=created.created_by,
+            updated_at=dt.datetime.now(dt.timezone.utc),
+            updated_by=actor.id,
+            username=created.username,
+            password_salt=created.password_salt,
+            password_secret=created.password_secret,
+            is_active=False,
+            last_sign_in_at=created.last_sign_in_at,
+            mfa_enforced=created.mfa_enforced,
+            mfa_enrolled_at=created.mfa_enrolled_at,
+            federated_subjects=list(created.federated_subjects),
+        )
+        connection.queue_result([msgspec.to_builtins(updated_user)])
+        await orm.tenants.users.update({"is_active": False}, tenant=tenant, filters={"id": created.id})
+
+        connection.queue_result([msgspec.to_builtins(updated_user)])
+        await orm.tenants.users.delete(tenant=tenant, filters={"id": created.id})
+
+    actions = [event[0] for event in audit.events]
+    assert actions == ["insert", "update", "delete"]
+    insert_event = audit.events[0]
+    assert insert_event[1] == "users"
+    assert insert_event[2] == "acme"
+    assert insert_event[4]["created_by"] == actor.id
+    update_event = audit.events[1]
+    assert update_event[4]["updated_by"] == actor.id
+
+
+@pytest.mark.asyncio
+async def test_apply_insert_metadata_populates_audit_fields() -> None:
+    info = default_registry().info_for(TenantUser)
+    payload: dict[str, Any] = {
+        "created_at": None,
+        "updated_at": None,
+        "created_by": None,
+        "updated_by": None,
+    }
+    actor = AuditActor(id="admin", type="AdminUser")
+    async with audit_context(tenant=None, actor=actor):
+        _apply_insert_metadata(info, payload)
+    assert isinstance(payload["created_at"], dt.datetime)
+    assert payload["updated_at"] == payload["created_at"]
+    assert payload["created_by"] == actor.id
+    assert payload["updated_by"] == actor.id
+
+
+@pytest.mark.asyncio
+async def test_apply_update_metadata_uses_current_actor() -> None:
+    info = default_registry().info_for(TenantUser)
+    values: dict[str, Any] = {}
+    actor = AuditActor(id="editor", type="AdminUser")
+    async with audit_context(tenant=None, actor=actor):
+        _apply_update_metadata(info, values)
+    assert isinstance(values["updated_at"], dt.datetime)
+    assert values["updated_by"] == actor.id
+
+
+@pytest.mark.asyncio
+async def test_apply_insert_metadata_preserves_existing_actor_fields() -> None:
+    info = default_registry().info_for(TenantUser)
+    payload: dict[str, Any] = {
+        "created_at": None,
+        "updated_at": None,
+        "created_by": "system",
+        "updated_by": "system",
+    }
+    actor = AuditActor(id="admin", type="AdminUser")
+    async with audit_context(tenant=None, actor=actor):
+        _apply_insert_metadata(info, payload)
+    assert payload["created_by"] == "system"
+    assert payload["updated_by"] == "system"
+
+
+def test_apply_insert_metadata_without_actor_defaults() -> None:
+    info = default_registry().info_for(TenantUser)
+    payload: dict[str, Any] = {"created_at": None, "updated_at": None}
+    _apply_insert_metadata(info, payload)
+    assert "created_by" not in payload
+    assert "updated_by" not in payload
+
+
+def test_apply_update_metadata_without_actor() -> None:
+    info = default_registry().info_for(TenantUser)
+    values: dict[str, Any] = {}
+    _apply_update_metadata(info, values)
+    assert "updated_by" not in values
+
+
+def test_apply_insert_metadata_skips_when_field_missing() -> None:
+    info = ModelInfo(
+        model=TenantUser,
+        table="users",
+        scope="tenant",
+        schema=None,
+        identity=("id",),
+        fields=tuple(),
+        accessor="users",
+        field_map={},
+        exposed=True,
+        redacted_fields=frozenset(),
+    )
+    payload: dict[str, Any] = {"created_at": None, "updated_at": None}
+    _apply_insert_metadata(info, payload)
+    assert payload["created_at"] is None
+    assert payload["updated_at"] is None
+
+
+def test_apply_update_metadata_skips_when_field_missing() -> None:
+    info = ModelInfo(
+        model=TenantUser,
+        table="users",
+        scope="tenant",
+        schema=None,
+        identity=("id",),
+        fields=tuple(),
+        accessor="users",
+        field_map={},
+        exposed=True,
+        redacted_fields=frozenset(),
+    )
+    values: dict[str, Any] = {}
+    _apply_update_metadata(info, values)
+    assert values == {}

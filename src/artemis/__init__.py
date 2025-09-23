@@ -1,6 +1,7 @@
 """Artemis asynchronous multi-tenant web framework."""
 
 from .application import Artemis, ArtemisApp
+from .audit import AuditActor, AuditTrail, audit_context
 from .authentication import (
     AuthenticationError,
     AuthenticationService,
@@ -10,6 +11,14 @@ from .authentication import (
     PasskeyManager,
     PasswordHasher,
     SamlAuthenticator,
+)
+from .chatops import (
+    ChatMessage,
+    ChatOpsConfig,
+    ChatOpsError,
+    ChatOpsRoute,
+    ChatOpsService,
+    SlackWebhookConfig,
 )
 from .config import AppConfig
 from .database import Database, DatabaseConfig, PoolConfig
@@ -26,6 +35,7 @@ from .migrations import (
     run_sql,
 )
 from .models import (
+    AdminAuditLogEntry,
     AdminPasskey,
     AdminRoleAssignment,
     AdminUser,
@@ -53,7 +63,22 @@ from .models import (
     TenantUser,
     UserRole,
 )
-from .orm import ORM, Model, ModelManager, ModelRegistry, ModelScope, default_registry, model
+from .observability import (
+    ChatOpsObservabilityConfig,
+    Observability,
+    ObservabilityConfig,
+    RequestObservabilityConfig,
+)
+from .orm import (
+    ORM,
+    DatabaseModel,
+    Model,
+    ModelManager,
+    ModelRegistry,
+    ModelScope,
+    default_registry,
+    model,
+)
 from .rbac import (
     CedarEffect,
     CedarEngine,
@@ -73,6 +98,7 @@ from .testing import TestClient
 
 __all__ = [
     "ORM",
+    "AdminAuditLogEntry",
     "AdminPasskey",
     "AdminRoleAssignment",
     "AdminUser",
@@ -81,6 +107,8 @@ __all__ = [
     "Artemis",
     "ArtemisApp",
     "ArtemisError",
+    "AuditActor",
+    "AuditTrail",
     "AuthenticationError",
     "AuthenticationService",
     "BillingRecord",
@@ -90,10 +118,17 @@ __all__ = [
     "CedarEntity",
     "CedarPolicy",
     "CedarReference",
+    "ChatMessage",
+    "ChatOpsConfig",
+    "ChatOpsError",
+    "ChatOpsObservabilityConfig",
+    "ChatOpsRoute",
+    "ChatOpsService",
     "CustomPermission",
     "Customer",
     "Database",
     "DatabaseConfig",
+    "DatabaseModel",
     "DependencyProvider",
     "FederatedIdentityDirectory",
     "FederatedProvider",
@@ -111,6 +146,8 @@ __all__ = [
     "ModelManager",
     "ModelRegistry",
     "ModelScope",
+    "Observability",
+    "ObservabilityConfig",
     "OidcAuthenticator",
     "Passkey",
     "PasskeyManager",
@@ -120,6 +157,7 @@ __all__ = [
     "PlainTextResponse",
     "PoolConfig",
     "Request",
+    "RequestObservabilityConfig",
     "Response",
     "Role",
     "RoleBinding",
@@ -127,8 +165,10 @@ __all__ = [
     "SamlAuthenticator",
     "SessionLevel",
     "SessionToken",
+    "SlackWebhookConfig",
     "Subscription",
     "SubscriptionStatus",
+    "TenantAuditLogEntry",
     "TenantContext",
     "TenantFederatedUser",
     "TenantOidcProvider",
@@ -139,6 +179,7 @@ __all__ = [
     "TenantUser",
     "TestClient",
     "UserRole",
+    "audit_context",
     "bindings_from_admin",
     "bindings_from_users",
     "build_engine",

@@ -45,7 +45,7 @@ class DatabaseConfig(msgspec.Struct, frozen=True):
 
     pool: PoolConfig = PoolConfig()
     admin_schema: str = "admin"
-    tenant_schema_template: str = "{tenant}"
+    tenant_schema_template: str = "tenant_{tenant}"
     tenant_schema_overrides: dict[str, str] = msgspec.field(default_factory=dict)
     search_path: tuple[str, ...] = ("public",)
     default_role: str | None = None
@@ -259,7 +259,7 @@ def _default_pool_factory(options: Mapping[str, Any]) -> Any:  # pragma: no cove
 
 
 def _quote_identifier(identifier: str) -> str:
-    escaped = identifier.replace("\"", "\"\"")
+    escaped = identifier.replace('"', '""')
     return f'"{escaped}"'
 
 

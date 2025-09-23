@@ -7,6 +7,7 @@ from urllib.parse import parse_qsl
 
 import msgspec
 
+from .audit import AuditActor, bind_actor
 from .serialization import json_decode
 from .tenancy import TenantContext
 from .typing_utils import convert_primitive
@@ -98,4 +99,14 @@ class Request:
 
     def with_principal(self, principal: "CedarEntity | None") -> "Request":
         self.principal = principal
+        if principal is None:
+            bind_actor(None)
+        else:
+            bind_actor(
+                AuditActor(
+                    id=principal.id,
+                    type=principal.type,
+                    attributes=dict(principal.attributes or {}),
+                )
+            )
         return self

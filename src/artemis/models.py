@@ -8,8 +8,7 @@ from typing import Any
 
 import msgspec
 
-from .id57 import generate_id57
-from .orm import Model, ModelScope, model
+from .orm import DatabaseModel, ModelScope, model
 
 
 class BillingStatus(str, Enum):
@@ -19,7 +18,7 @@ class BillingStatus(str, Enum):
 
 
 @model(scope=ModelScope.ADMIN, table="billing")
-class BillingRecord(Model):
+class BillingRecord(DatabaseModel):
     customer_id: str
     plan_code: str
     status: BillingStatus
@@ -27,10 +26,7 @@ class BillingRecord(Model):
     currency: str
     cycle_start: dt.datetime
     cycle_end: dt.datetime
-    created_at: dt.datetime
-    updated_at: dt.datetime
     metadata: dict[str, Any] = msgspec.field(default_factory=dict)
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 class SubscriptionStatus(str, Enum):
@@ -41,38 +37,35 @@ class SubscriptionStatus(str, Enum):
 
 
 @model(scope=ModelScope.ADMIN, table="subscriptions")
-class Subscription(Model):
+class Subscription(DatabaseModel):
     customer_id: str
     billing_id: str
     product_code: str
     status: SubscriptionStatus
     seats: int
     current_period_end: dt.datetime
-    created_at: dt.datetime
-    updated_at: dt.datetime
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.ADMIN, table="app_secrets")
-class AppSecret(Model):
+@model(
+    scope=ModelScope.ADMIN,
+    table="app_secrets",
+    exposed=False,
+    redacted_fields=("secret_value", "salt"),
+)
+class AppSecret(DatabaseModel):
     secret_value: str
     salt: str
-    created_at: dt.datetime
     rotated_at: dt.datetime | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.ADMIN, table="customers")
-class Customer(Model):
+@model(scope=ModelScope.ADMIN, table="customers", redacted_fields=("tenant_secret",))
+class Customer(DatabaseModel):
     tenant: str
     schema_name: str
     billing_id: str
     status: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     tenant_secret: str
     contact_email: str | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 class RoleScope(str, Enum):
@@ -81,14 +74,11 @@ class RoleScope(str, Enum):
 
 
 @model(scope=ModelScope.ADMIN, table="roles")
-class Role(Model):
+class Role(DatabaseModel):
     name: str
     scope: RoleScope
-    created_at: dt.datetime
-    updated_at: dt.datetime
     tenant: str | None = None
     description: str | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 class PermissionEffect(str, Enum):
@@ -97,68 +87,91 @@ class PermissionEffect(str, Enum):
 
 
 @model(scope=ModelScope.ADMIN, table="permissions")
-class Permission(Model):
+class Permission(DatabaseModel):
     role_id: str
     action: str
     resource_type: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     effect: PermissionEffect = PermissionEffect.ALLOW
     condition: dict[str, Any] = msgspec.field(default_factory=dict)
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.ADMIN, table="admin_users")
-class AdminUser(Model):
+@model(
+    scope=ModelScope.ADMIN,
+    table="admin_users",
+    redacted_fields=(
+        "hashed_password",
+        "password_salt",
+        "password_secret",
+        "mfa_enforced",
+        "mfa_enrolled_at",
+    ),
+)
+class AdminUser(DatabaseModel):
     email: str
     hashed_password: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     password_salt: str = ""
     password_secret: str = ""
     is_active: bool = True
     last_sign_in_at: dt.datetime | None = None
     mfa_enforced: bool = False
     mfa_enrolled_at: dt.datetime | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 @model(scope=ModelScope.ADMIN, table="admin_role_assignments")
-class AdminRoleAssignment(Model):
+class AdminRoleAssignment(DatabaseModel):
     admin_user_id: str
     role_id: str
     assigned_at: dt.datetime
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.ADMIN, table="admin_passkeys")
-class AdminPasskey(Model):
+@model(
+    scope=ModelScope.ADMIN,
+    table="admin_passkeys",
+    exposed=False,
+    redacted_fields=(
+        "credential_id",
+        "public_key",
+        "attestation_format",
+        "sign_count",
+        "last_used_at",
+    ),
+)
+class AdminPasskey(DatabaseModel):
     admin_user_id: str
     credential_id: str
     public_key: str
-    created_at: dt.datetime
     attestation_format: str | None = None
     sign_count: int = 0
     last_used_at: dt.datetime | None = None
     label: str | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.TENANT, table="tenant_secrets")
-class TenantSecret(Model):
+@model(
+    scope=ModelScope.TENANT,
+    table="tenant_secrets",
+    exposed=False,
+    redacted_fields=("secret",),
+)
+class TenantSecret(DatabaseModel):
     secret: str
-    created_at: dt.datetime
     rotated_at: dt.datetime | None = None
     purpose: str = "password"
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.TENANT, table="users")
-class TenantUser(Model):
+@model(
+    scope=ModelScope.TENANT,
+    table="users",
+    redacted_fields=(
+        "hashed_password",
+        "password_salt",
+        "password_secret",
+        "mfa_enforced",
+        "mfa_enrolled_at",
+    ),
+)
+class TenantUser(DatabaseModel):
     email: str
     hashed_password: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     username: str = ""
     password_salt: str = ""
     password_secret: str = ""
@@ -167,27 +180,22 @@ class TenantUser(Model):
     mfa_enforced: bool = False
     mfa_enrolled_at: dt.datetime | None = None
     federated_subjects: list[str] = msgspec.field(default_factory=list)
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 @model(scope=ModelScope.TENANT, table="user_roles")
-class UserRole(Model):
+class UserRole(DatabaseModel):
     user_id: str
     role_id: str
     assigned_at: dt.datetime
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 @model(scope=ModelScope.TENANT, table="custom_permissions")
-class CustomPermission(Model):
+class CustomPermission(DatabaseModel):
     code: str
     action: str
     resource_type: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     effect: PermissionEffect = PermissionEffect.ALLOW
     description: str | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 class SessionLevel(str, Enum):
@@ -196,30 +204,44 @@ class SessionLevel(str, Enum):
     PASSKEY = "passkey"
 
 
-@model(scope=ModelScope.TENANT, table="session_tokens")
-class SessionToken(Model):
+@model(
+    scope=ModelScope.TENANT,
+    table="session_tokens",
+    exposed=False,
+    redacted_fields=("token",),
+)
+class SessionToken(DatabaseModel):
     user_id: str
     token: str
     expires_at: dt.datetime
-    created_at: dt.datetime
     level: SessionLevel
     revoked_at: dt.datetime | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
-@model(scope=ModelScope.TENANT, table="passkeys")
-class Passkey(Model):
+@model(
+    scope=ModelScope.TENANT,
+    table="passkeys",
+    exposed=False,
+    redacted_fields=(
+        "credential_id",
+        "public_key",
+        "user_handle",
+        "attestation_format",
+        "sign_count",
+        "last_used_at",
+        "transports",
+    ),
+)
+class Passkey(DatabaseModel):
     user_id: str
     credential_id: str
     public_key: str
     user_handle: str
-    created_at: dt.datetime
     attestation_format: str | None = None
     sign_count: int = 0
     last_used_at: dt.datetime | None = None
     transports: list[str] = msgspec.field(default_factory=list)
     label: str | None = None
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 class MfaPurpose(str, Enum):
@@ -228,16 +250,19 @@ class MfaPurpose(str, Enum):
     ENROLLMENT = "enrollment"
 
 
-@model(scope=ModelScope.TENANT, table="mfa_codes")
-class MfaCode(Model):
+@model(
+    scope=ModelScope.TENANT,
+    table="mfa_codes",
+    exposed=False,
+    redacted_fields=("code",),
+)
+class MfaCode(DatabaseModel):
     user_id: str
     code: str
     purpose: MfaPurpose
     expires_at: dt.datetime
-    created_at: dt.datetime
     consumed_at: dt.datetime | None = None
     channel: str = "totp"
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 class FederatedProvider(str, Enum):
@@ -246,7 +271,7 @@ class FederatedProvider(str, Enum):
 
 
 @model(scope=ModelScope.TENANT, table="oidc_providers")
-class TenantOidcProvider(Model):
+class TenantOidcProvider(DatabaseModel):
     issuer: str
     client_id: str
     client_secret: str
@@ -254,39 +279,53 @@ class TenantOidcProvider(Model):
     authorization_endpoint: str
     token_endpoint: str
     userinfo_endpoint: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     enabled: bool = True
     allowed_audiences: list[str] = msgspec.field(default_factory=list)
     allowed_groups: list[str] = msgspec.field(default_factory=list)
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 @model(scope=ModelScope.TENANT, table="saml_providers")
-class TenantSamlProvider(Model):
+class TenantSamlProvider(DatabaseModel):
     entity_id: str
     metadata_url: str
     certificate: str
     acs_url: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
     enabled: bool = True
     attribute_mapping: dict[str, str] = msgspec.field(default_factory=dict)
-    id: str = msgspec.field(default_factory=generate_id57)
 
 
 @model(scope=ModelScope.TENANT, table="federated_users")
-class TenantFederatedUser(Model):
+class TenantFederatedUser(DatabaseModel):
     provider_id: str
     provider_type: FederatedProvider
     subject: str
     user_id: str
-    created_at: dt.datetime
-    updated_at: dt.datetime
-    id: str = msgspec.field(default_factory=generate_id57)
+
+
+@model(scope=ModelScope.ADMIN, table="admin_audit_log")
+class AdminAuditLogEntry(DatabaseModel):
+    action: str
+    entity_type: str
+    entity_id: str | None = None
+    actor_id: str | None = None
+    actor_type: str | None = None
+    changes: dict[str, Any] = msgspec.field(default_factory=dict)
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+@model(scope=ModelScope.TENANT, table="audit_log")
+class TenantAuditLogEntry(DatabaseModel):
+    action: str
+    entity_type: str
+    entity_id: str | None = None
+    actor_id: str | None = None
+    actor_type: str | None = None
+    changes: dict[str, Any] = msgspec.field(default_factory=dict)
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
 __all__ = [
+    "AdminAuditLogEntry",
     "AdminPasskey",
     "AdminRoleAssignment",
     "AdminUser",
@@ -307,6 +346,7 @@ __all__ = [
     "SessionToken",
     "Subscription",
     "SubscriptionStatus",
+    "TenantAuditLogEntry",
     "TenantFederatedUser",
     "TenantOidcProvider",
     "TenantSamlProvider",
@@ -314,4 +354,3 @@ __all__ = [
     "TenantUser",
     "UserRole",
 ]
-

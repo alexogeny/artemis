@@ -459,10 +459,7 @@ def identity_order_clause(info: ModelInfo[Any]) -> str:
 
 def render_insert(schema: str, info: ModelInfo[Any], row: dict[str, Any]) -> str:
     qualified = _qualified_table(schema, info.table)
-    columns = [
-        _quote_identifier(field.column)
-        for field in info.fields
-    ]
+    columns = [_quote_identifier(field.column) for field in info.fields]
     values = [render_literal(row.get(field.name)) for field in info.fields]
     return f"INSERT INTO {qualified} ({', '.join(columns)}) VALUES ({', '.join(values)});"
 

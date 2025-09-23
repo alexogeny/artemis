@@ -203,6 +203,7 @@ def test_database_private_helpers() -> None:
 
     assert database_module._coerce_rows(None) == []
     assert database_module._coerce_rows({"id": 1}) == [{"id": 1}]
+
     class Nullish:
         def result(self) -> None:
             return None
