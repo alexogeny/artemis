@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from functools import lru_cache
 from typing import Any, Awaitable, Callable, Dict, TypeVar, get_type_hints
 
 from .requests import Request
@@ -60,8 +61,8 @@ class DependencyScope:
         return result
 
     async def _build_arguments(self, factory: DependencyCallable) -> Dict[str, Any]:
-        signature = inspect.signature(factory)
-        hints = get_type_hints(factory)
+        signature = _cached_signature(factory)
+        hints = _cached_type_hints(factory)
         arguments: Dict[str, Any] = {}
         for name, param in signature.parameters.items():
             annotation = hints.get(name, param.annotation)
@@ -74,3 +75,13 @@ class DependencyScope:
             else:
                 arguments[name] = await self.get(annotation)
         return arguments
+
+
+@lru_cache(maxsize=None)
+def _cached_signature(factory: DependencyCallable) -> inspect.Signature:
+    return inspect.signature(factory)
+
+
+@lru_cache(maxsize=None)
+def _cached_type_hints(factory: DependencyCallable) -> Dict[str, Any]:
+    return get_type_hints(factory)

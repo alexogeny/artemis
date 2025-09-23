@@ -77,6 +77,8 @@ class Router:
     def __init__(self) -> None:
         self._routes: list[Route] = []
         self._routes_by_method: dict[str, list[Route]] = {}
+        self._static_routes: dict[str, dict[str, Route]] = {}
+        self._dynamic_routes: dict[str, dict[str | None, list[Route]]] = {}
         self._global_guards: list[RouteGuard] = []
 
     def add_route(
@@ -110,6 +112,11 @@ class Router:
         self._routes.append(route)
         for method in normalized_methods:
             self._routes_by_method.setdefault(method, []).append(route)
+            if "{" not in path:
+                self._static_routes.setdefault(method, {})[path] = route
+            else:
+                prefix = _dynamic_prefix_key(path)
+                self._dynamic_routes.setdefault(method, {}).setdefault(prefix, []).append(route)
         return route
 
     def guard(self, *guards: RouteGuard) -> None:
@@ -117,12 +124,34 @@ class Router:
 
     def find(self, method: str, path: str) -> RouteMatch:
         method = method.upper()
-        candidates = self._routes_by_method.get(method)
-        if not candidates:
-            candidates = self._routes_by_method.get("*")
-            if not candidates:
-                raise LookupError(f"No route matches {method} {path}")
-        for route in candidates:
+        for method_key in (method, "*"):
+            static_routes = self._static_routes.get(method_key)
+            if static_routes is None:
+                continue
+            route = static_routes.get(path)
+            if route is not None:
+                return RouteMatch(route=route, params={})
+
+        dynamic_candidates: list[Route] = []
+        seen: set[int] = set()
+        prefix = _request_prefix_key(path)
+        for method_key in (method, "*"):
+            method_routes = self._dynamic_routes.get(method_key)
+            if not method_routes:
+                continue
+            for key in (prefix, None):
+                candidates = method_routes.get(key)
+                if not candidates:
+                    continue
+                for candidate in candidates:
+                    identity = id(candidate)
+                    if identity in seen:
+                        continue
+                    seen.add(identity)
+                    dynamic_candidates.append(candidate)
+        if not dynamic_candidates:
+            raise LookupError(f"No route matches {method} {path}")
+        for route in dynamic_candidates:
             captures = route.pattern.match(path)
             if captures is None:
                 continue
@@ -170,6 +199,26 @@ def get(path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]
 
 def post(path: str, *, name: str | None = None) -> Callable[[Endpoint], Endpoint]:
     return route(path, methods=["POST"], name=name)
+
+
+def _dynamic_prefix_key(path: str) -> str | None:
+    if "{" not in path:
+        return path
+    trimmed = path.lstrip("/")
+    if not trimmed or trimmed[0] == "{":
+        return None
+    segment = trimmed.split("/", 1)[0]
+    if "{" in segment:
+        return None
+    return segment or None
+
+
+def _request_prefix_key(path: str) -> str | None:
+    trimmed = path.lstrip("/")
+    if not trimmed:
+        return None
+    segment = trimmed.split("/", 1)[0]
+    return segment or None
 
 
 def _compile_path(path: str) -> tuple[RegexObject, tuple[str, ...]]:

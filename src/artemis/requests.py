@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, TypeVar, get_type_hints
 from urllib.parse import parse_qsl
 
@@ -18,19 +19,24 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 
+@lru_cache(maxsize=None)
+def _model_type_hints(model: type[Any]) -> Mapping[str, Any]:
+    return get_type_hints(model)
+
+
 class Request:
     """Immutable view of an incoming request."""
 
     __slots__ = (
         "_body",
         "_json_cache",
+        "_query_params",
         "_raw_query",
         "headers",
         "method",
         "path",
         "path_params",
         "principal",
-        "query_params",
         "tenant",
     )
 
@@ -54,7 +60,7 @@ class Request:
         self._raw_query = query_string or ""
         self._body = body or b""
         self._json_cache: Any = msgspec.UNSET
-        self.query_params = self._parse_query(self._raw_query)
+        self._query_params: MutableMapping[str, list[str]] | None = None
         self.principal = principal
 
     @staticmethod
@@ -64,13 +70,19 @@ class Request:
             parsed.setdefault(key, []).append(value)
         return parsed
 
+    @property
+    def query_params(self) -> MutableMapping[str, list[str]]:
+        if self._query_params is None:
+            self._query_params = self._parse_query(self._raw_query)
+        return self._query_params
+
     def header(self, name: str, default: str | None = None) -> str | None:
         return self.headers.get(name.lower(), default)
 
     def query(self, model: type[T]) -> T:
         """Decode query parameters into ``model`` using msgspec."""
 
-        hints = get_type_hints(model)
+        hints = _model_type_hints(model)
         converted: dict[str, Any] = {}
         for key, values in self.query_params.items():
             if not values:

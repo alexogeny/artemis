@@ -12,9 +12,11 @@ from artemis.models import (
 )
 from artemis.rbac import (
     CedarEffect,
+    CedarEngine,
     CedarEntity,
     CedarPolicy,
     CedarReference,
+    RoleBinding,
     bindings_from_admin,
     bindings_from_users,
     build_engine,
@@ -304,3 +306,106 @@ def test_permission_resource_for_tenant_target() -> None:
 
 def test_to_effect_accepts_strings() -> None:
     assert rbac_module._to_effect("ALLOW") is CedarEffect.ALLOW
+    assert rbac_module._to_effect("deny") is CedarEffect.DENY
+
+
+def test_cedar_engine_uses_index_for_matches() -> None:
+    principal = CedarEntity(type="User", id="user-1", attributes=None)
+    resource = CedarEntity(type="orders", id="acme", attributes=None)
+    policy = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=CedarReference("User", "user-1"),
+        actions=("orders:read",),
+        resource=CedarReference("orders", "acme"),
+    )
+
+    class FailingReference(CedarReference):
+        def __init__(self) -> None:
+            object.__setattr__(self, "entity_type", "Other")
+            object.__setattr__(self, "identifier", "sentinel")
+
+        def matches(
+            self,
+            entity: CedarEntity,
+        ) -> bool:
+            raise AssertionError("Sentinel policy should not be evaluated")
+
+    sentinel = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=FailingReference(),
+        actions=("noop",),
+        resource=CedarReference("orders", "*"),
+    )
+
+    engine = CedarEngine([policy, sentinel])
+    assert engine.check(principal=principal, action="orders:read", resource=resource, context=None) is True
+
+
+def test_build_engine_indexes_permissions_once() -> None:
+    now = _now()
+    role_id = generate_id57()
+    role = Role(
+        id=role_id,
+        name="reader",
+        scope=RoleScope.TENANT,
+        tenant="acme",
+        description=None,
+        created_at=now,
+        updated_at=now,
+    )
+    permission = Permission(
+        id=generate_id57(),
+        role_id=role_id,
+        action="orders:read",
+        resource_type="orders",
+        effect=PermissionEffect.ALLOW,
+        condition={},
+        created_at=now,
+        updated_at=now,
+    )
+
+    class CountingPermissions:
+        def __init__(self, data: list[Permission]) -> None:
+            self.data = data
+            self.iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return iter(self.data)
+
+    permissions = CountingPermissions([permission])
+    bindings = [RoleBinding(principal_type="User", principal_id="user-1", role_id=role_id)]
+    engine = build_engine(roles=[role], permissions=permissions, bindings=bindings)
+    assert isinstance(engine, CedarEngine)
+    assert permissions.iterations == 1
+
+
+def test_cedar_engine_supports_wildcard_principals_and_actions() -> None:
+    wildcard_policy = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=CedarReference("*", "*"),
+        actions=(),
+        resource=CedarReference("orders", "*"),
+    )
+    engine = CedarEngine([wildcard_policy])
+    principal = CedarEntity(type="User", id="random")
+    resource = CedarEntity(type="orders", id="acme")
+    assert engine.check(principal=principal, action="orders:delete", resource=resource, context=None) is True
+
+
+def test_cedar_engine_deduplicates_candidates() -> None:
+    policy = CedarPolicy(
+        effect=CedarEffect.ALLOW,
+        principal=CedarReference("User", "user-1"),
+        actions=("orders:read",),
+        resource=CedarReference("orders", "*"),
+    )
+    engine = CedarEngine([policy, policy])
+    principal = CedarEntity(type="User", id="user-1")
+    resource = CedarEntity(type="orders", id="beta")
+    assert engine.check(principal=principal, action="orders:read", resource=resource, context=None) is True
+
+
+def test_policy_action_keys_normalizes_wildcards() -> None:
+    keys = rbac_module._policy_action_keys(["orders:read", "*", "orders:read"])
+    assert keys == ("orders:read", None)

@@ -387,14 +387,17 @@ class ArtemisApp:
         host = headers.get("host")
         if host is None:
             raise RuntimeError("Host header required for multi-tenant resolution")
-        body = b""
+        body_chunks = bytearray()
         more_body = True
         while more_body:
             message = await receive()
             if message["type"] != "http.request":
                 continue
-            body += message.get("body", b"")
+            chunk = message.get("body", b"")
+            if chunk:
+                body_chunks.extend(chunk)
             more_body = message.get("more_body", False)
+        body = bytes(body_chunks)
         response = await self.dispatch(
             scope["method"],
             scope["path"],

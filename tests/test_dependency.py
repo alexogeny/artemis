@@ -100,3 +100,49 @@ async def test_dependency_factory_receives_request() -> None:
     scope = provider.scope(request)
     payload = await scope.get(dict)
     assert payload == {"path": "/payload"}
+
+
+@pytest.mark.asyncio
+async def test_dependency_reflection_cached(monkeypatch: pytest.MonkeyPatch) -> None:
+    import artemis.dependency as dependency_module
+
+    dependency_module._cached_signature.cache_clear()
+    dependency_module._cached_type_hints.cache_clear()
+
+    signature_calls = 0
+    type_hint_calls = 0
+
+    original_signature = dependency_module.inspect.signature
+    original_get_type_hints = dependency_module.get_type_hints
+
+    def counting_signature(func):
+        nonlocal signature_calls
+        signature_calls += 1
+        return original_signature(func)
+
+    def counting_get_type_hints(func):
+        nonlocal type_hint_calls
+        type_hint_calls += 1
+        return original_get_type_hints(func)
+
+    monkeypatch.setattr(dependency_module.inspect, "signature", counting_signature)
+    monkeypatch.setattr(dependency_module, "get_type_hints", counting_get_type_hints)
+
+    provider = DependencyProvider()
+
+    @provider.register(int)
+    def provide_number() -> int:
+        return 1
+
+    @provider.register(str)
+    def provide_message(value: int) -> str:
+        return f"value={value}"
+
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+    first_scope = provider.scope(Request(method="GET", path="/", tenant=tenant))
+    second_scope = provider.scope(Request(method="GET", path="/", tenant=tenant))
+
+    assert await first_scope.get(str) == "value=1"
+    assert await second_scope.get(str) == "value=1"
+    assert signature_calls == 2
+    assert type_hint_calls == 2
