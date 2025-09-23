@@ -110,14 +110,16 @@ class AuditTrail:
 
         entry_info = self._entry_info_for_scope(info.scope)
         actor = current_actor()
+        sanitized_changes = self._sanitize_model_payload(info, changes or data)
+        metadata = self._metadata_for(info, before=before, context=current_context())
         payload = self._entry_payload(
             entry_info,
             action=action,
             entity_type=info.table,
             entity_id=self._identity_from_row(info, data),
             actor=actor,
-            changes=changes or data,
-            metadata=self._metadata_for(before=before, context=current_context()),
+            changes=sanitized_changes,
+            metadata=metadata,
         )
         await self._write_entry(entry_info, payload, tenant if entry_info.scope == "tenant" else None)
 
@@ -222,16 +224,34 @@ class AuditTrail:
 
     def _metadata_for(
         self,
+        info: "ModelInfo[Any]",
         *,
         before: Mapping[str, Any] | None,
         context: AuditContext | None,
     ) -> Mapping[str, Any]:
         metadata: dict[str, Any] = {}
         if before is not None:
-            metadata["before"] = msgspec.to_builtins(before)
+            sanitized = self._sanitize_model_payload(info, before)
+            metadata["before"] = msgspec.to_builtins(sanitized)
         if context and context.tenant is not None:
             metadata.setdefault("tenant", context.tenant.tenant)
         return metadata
+
+    def _sanitize_model_payload(
+        self,
+        info: "ModelInfo[Any]",
+        payload: Mapping[str, Any],
+    ) -> dict[str, Any]:
+        data = dict(payload)
+        redacted = self._effective_redacted_fields(info)
+        if not redacted:
+            return data
+        return {key: value for key, value in data.items() if key not in redacted}
+
+    def _effective_redacted_fields(self, info: "ModelInfo[Any]") -> frozenset[str]:
+        if info.exposed or info.redacted_fields:
+            return info.redacted_fields
+        return frozenset(field.name for field in info.fields)
 
 
 __all__ = [
