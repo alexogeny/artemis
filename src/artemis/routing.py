@@ -76,6 +76,7 @@ class RouteGuard:
 class Router:
     def __init__(self) -> None:
         self._routes: list[Route] = []
+        self._routes_by_method: dict[str, list[Route]] = {}
         self._global_guards: list[RouteGuard] = []
 
     def add_route(
@@ -89,9 +90,10 @@ class Router:
     ) -> Route:
         pattern, param_names = _compile_path(path)
         guard_tuple = tuple(guards or ())
+        normalized_methods = tuple(dict.fromkeys(m.upper() for m in methods))
         spec = RouteSpec(
             path=path,
-            methods=tuple(m.upper() for m in methods),
+            methods=normalized_methods,
             endpoint=endpoint,
             name=name,
             guards=guard_tuple,
@@ -106,6 +108,8 @@ class Router:
             guards=tuple(self._global_guards) + guard_tuple,
         )
         self._routes.append(route)
+        for method in normalized_methods:
+            self._routes_by_method.setdefault(method, []).append(route)
         return route
 
     def guard(self, *guards: RouteGuard) -> None:
@@ -113,9 +117,12 @@ class Router:
 
     def find(self, method: str, path: str) -> RouteMatch:
         method = method.upper()
-        for route in self._routes:
-            if method not in route.spec.methods:
-                continue
+        candidates = self._routes_by_method.get(method)
+        if not candidates:
+            candidates = self._routes_by_method.get("*")
+            if not candidates:
+                raise LookupError(f"No route matches {method} {path}")
+        for route in candidates:
             captures = route.pattern.match(path)
             if captures is None:
                 continue
