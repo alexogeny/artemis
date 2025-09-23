@@ -233,6 +233,7 @@ class ArtemisApp:
         query_string: str | None = None,
         headers: Mapping[str, str] | None = None,
         body: bytes | None = None,
+        body_loader: Callable[[], Awaitable[bytes]] | None = None,
     ) -> Response:
         tenant = self.tenant_resolver.resolve(host)
         match = self.router.find(method, path)
@@ -243,7 +244,8 @@ class ArtemisApp:
             tenant=tenant,
             path_params=match.params,
             query_string=query_string or "",
-            body=body or b"",
+            body=body if body is not None else None,
+            body_loader=None if body is not None else body_loader,
         )
         scope = self.dependencies.scope(request)
 
@@ -387,24 +389,44 @@ class ArtemisApp:
         host = headers.get("host")
         if host is None:
             raise RuntimeError("Host header required for multi-tenant resolution")
-        body_chunks = bytearray()
-        more_body = True
-        while more_body:
-            message = await receive()
-            if message["type"] != "http.request":
-                continue
-            chunk = message.get("body", b"")
-            if chunk:
-                body_chunks.extend(chunk)
-            more_body = message.get("more_body", False)
-        body = bytes(body_chunks)
+        body_state: dict[str, Any] = {
+            "buffer": bytearray(),
+            "cached": None,
+            "done": False,
+        }
+
+        async def load_body() -> bytes:
+            cached = body_state["cached"]
+            if cached is not None:
+                return cached
+            while True:
+                if body_state["done"]:
+                    break
+                message = await receive()
+                message_type = message.get("type")
+                if message_type == "http.disconnect":
+                    body_state["done"] = True
+                    continue
+                if message_type != "http.request":
+                    continue
+                chunk = message.get("body", b"")
+                if chunk:
+                    body_state["buffer"].extend(chunk)
+                if not message.get("more_body", False):
+                    body_state["done"] = True
+                    continue
+            body_bytes = bytes(body_state["buffer"])
+            body_state["cached"] = body_bytes
+            body_state["buffer"] = bytearray()
+            return body_bytes
+
         response = await self.dispatch(
             scope["method"],
             scope["path"],
             host=host,
             query_string=(scope.get("query_string") or b"").decode(),
             headers=headers,
-            body=body,
+            body_loader=load_body,
         )
         await send(
             {

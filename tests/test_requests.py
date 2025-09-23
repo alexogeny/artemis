@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import msgspec
 import pytest
 
@@ -30,8 +32,10 @@ async def test_request_body_helpers() -> None:
     request = build_request(headers={"Content-Type": "application/json"}, body=payload)
     assert request.header("content-type") == "application/json"
     assert request.header("missing", "default") == "default"
-    assert request.text() == '{"name":"Widget"}'
-    assert request.body() == payload
+    assert await request.text() == '{"name":"Widget"}'
+    body = await request.body()
+    assert body == payload
+    assert body is await request.body()
     decoded = await request.json()
     assert decoded == {"name": "Widget"}
     model = await request.json(BodyModel)
@@ -81,6 +85,159 @@ def test_request_query_type_hints_cached(monkeypatch: pytest.MonkeyPatch) -> Non
 async def test_empty_json_body_returns_none() -> None:
     request = build_request()
     assert await request.json() is None
+
+
+@pytest.mark.asyncio
+async def test_request_body_loader_handles_large_payload() -> None:
+    chunk = b"x" * 65536
+    chunks = [chunk] * 32
+    loader_calls = 0
+
+    async def loader() -> bytes:
+        nonlocal loader_calls
+        loader_calls += 1
+        buffer = bytearray()
+        for part in chunks:
+            buffer.extend(part)
+        return bytes(buffer)
+
+    request = build_request(body_loader=loader)
+    assert loader_calls == 0
+    payload = await request.body()
+    assert loader_calls == 1
+    assert len(payload) == len(chunk) * len(chunks)
+    assert payload is await request.body()
+    assert await request.text() == payload.decode()
+
+
+@pytest.mark.asyncio
+async def test_request_json_loader_caches_large_payload() -> None:
+    payload_obj = {"name": "x" * (1024 * 256)}
+    payload = json_encode(payload_obj)
+    chunk_size = 32768
+    loader_calls = 0
+
+    async def loader() -> bytes:
+        nonlocal loader_calls
+        loader_calls += 1
+        buffer = bytearray()
+        for index in range(0, len(payload), chunk_size):
+            buffer.extend(payload[index : index + chunk_size])
+        return bytes(buffer)
+
+    request = build_request(headers={"Content-Type": "application/json"}, body_loader=loader)
+    decoded = await request.json()
+    assert loader_calls == 1
+    assert decoded == payload_obj
+    assert await request.json() is decoded
+    raw = await request.body()
+    assert raw == payload
+    assert raw is await request.body()
+    assert await request.text() == payload.decode()
+
+
+@pytest.mark.asyncio
+async def test_request_loader_serializes_concurrent_access() -> None:
+    calls = 0
+
+    async def loader() -> bytes:
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0)
+        return b"sync"
+
+    request = build_request(body_loader=loader)
+    first, second = await asyncio.gather(request.body(), request.body())
+    assert first is second
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_request_loader_waiters_receive_cached_body() -> None:
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def loader() -> bytes:
+        nonlocal calls
+        calls += 1
+        ready.set()
+        await release.wait()
+        return b"payload"
+
+    request = build_request(body_loader=loader)
+
+    first_task = asyncio.create_task(request.body())
+    await ready.wait()
+
+    waiter_task = asyncio.create_task(request.body())
+    await asyncio.sleep(0)
+    release.set()
+
+    first, waiter = await asyncio.gather(first_task, waiter_task)
+    assert first == waiter == b"payload"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_request_waiter_skips_loader_after_cache_fill() -> None:
+    calls = 0
+
+    async def loader() -> bytes:
+        nonlocal calls
+        calls += 1
+        return b"never-called"
+
+    request = build_request(body_loader=loader)
+
+    await request._body_lock.acquire()
+    try:
+        waiter = asyncio.create_task(request.body())
+        for _ in range(100):
+            await asyncio.sleep(0)
+            waiters = request._body_lock._waiters  # pragma: no cover - exercised in tests only
+            if waiters:
+                break
+        else:  # pragma: no cover
+            pytest.fail("waiter did not block on request body lock")
+        request._body = b"prefilled"
+        request._body_loader = None
+    finally:
+        request._body_lock.release()
+
+    body = await waiter
+    assert body == b"prefilled"
+    assert calls == 0
+
+
+@pytest.mark.asyncio
+async def test_request_loader_handles_none_and_bytearray() -> None:
+    async def none_loader() -> bytes | None:
+        return None
+
+    request_empty = build_request(body_loader=none_loader)
+    empty_body = await request_empty.body()
+    assert empty_body == b""
+    assert empty_body is await request_empty.body()
+
+    async def array_loader() -> bytearray:
+        return bytearray(b"abc")
+
+    request_array = build_request(body_loader=array_loader)
+    body = await request_array.body()
+    assert body == b"abc"
+    assert isinstance(body, bytes)
+    assert body is await request_array.body()
+
+
+def test_request_body_and_loader_are_mutually_exclusive() -> None:
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+
+    async def loader() -> bytes:
+        return b"payload"
+
+    with pytest.raises(ValueError):
+        Request(method="GET", path="/", tenant=tenant, body=b"payload", body_loader=loader)
 
 
 @pytest.mark.asyncio
