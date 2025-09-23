@@ -190,7 +190,7 @@ class AuditTrail:
     def sanitize_model_payload(
         self,
         info: "ModelInfo[Any]",
-        payload: Mapping[str, Any],
+        payload: object,
     ) -> dict[str, Any]:
         """Remove sensitive fields from ``payload`` using model metadata."""
 

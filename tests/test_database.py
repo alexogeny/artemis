@@ -1,4 +1,4 @@
-from typing import Any, Mapping
+from typing import Any, Mapping, cast
 
 import pytest
 
@@ -54,7 +54,7 @@ async def test_database_sets_search_path_and_role() -> None:
 
 @pytest.mark.asyncio
 async def test_database_schema_resolution_and_pool_factory() -> None:
-    captured_options: list[dict[str, object]] = []
+    captured_options: list[dict[str, Any]] = []
 
     def factory(options: Mapping[str, Any]) -> FakePool:
         captured_options.append(dict(options))
@@ -223,12 +223,15 @@ def test_secret_value_requires_resolver() -> None:
 
 def test_secret_value_requires_string() -> None:
     class Resolver:
-        def resolve(self, _: SecretRef) -> object:
-            return 123
+        def resolve(self, _: SecretRef) -> str:
+            return cast(str, 123)
 
     secret = SecretValue(secret=SecretRef(provider="vault", name="db-user"))
     with pytest.raises(DatabaseError):
-        secret.resolve(Resolver(), field="credentials.username")
+        secret.resolve(
+            cast(database_module.SecretResolver, Resolver()),
+            field="credentials.username",
+        )
 
 
 def test_tls_config_disabled_mode() -> None:
