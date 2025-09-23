@@ -52,6 +52,7 @@ async def test_audit_trail_records_tenant_mutation() -> None:
     assert inserted["created_by"] == actor.id
     assert inserted["metadata"]["tenant"] == "acme"
     assert inserted["changes"]["email"] == "user@example.com"
+    assert "hashed_password" not in inserted["changes"]
     assert inserted["created_at"] == now
     assert inserted["updated_at"] == now
 
@@ -164,7 +165,7 @@ async def test_audit_metadata_includes_before_snapshot() -> None:
     tenant = resolver.context_for("acme")
     user = TenantUser(email="user@example.com", hashed_password="secret")
     row = msgspec.to_builtins(user)
-    before = {"email": "old@example.com"}
+    before = {"email": "old@example.com", "hashed_password": "old"}
     async with audit_context(tenant=tenant, actor=actor):
         await trail.record_model_change(
             info=default_registry().info_for(TenantUser),
@@ -178,4 +179,17 @@ async def test_audit_metadata_includes_before_snapshot() -> None:
     _, _, params, _ = connection.calls[-1]
     info = default_registry().info_for(TenantAuditLogEntry)
     inserted = {field.name: value for field, value in zip(info.fields, params)}
-    assert inserted["metadata"]["before"] == before
+    assert inserted["metadata"]["before"]["email"] == "old@example.com"
+    assert "hashed_password" not in inserted["metadata"]["before"]
+
+
+def test_audit_sanitize_model_payload_handles_non_mapping() -> None:
+    trail, _ = _trail()
+    info = default_registry().info_for(TenantUser)
+    assert trail.sanitize_model_payload(info, ["invalid"]) == {}
+
+
+def test_audit_metadata_without_model_info() -> None:
+    trail, _ = _trail()
+    metadata = trail._metadata_for(info=None, before={"token": "value"}, context=None)
+    assert metadata["before"]["token"] == "value"

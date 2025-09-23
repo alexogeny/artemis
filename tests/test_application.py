@@ -16,7 +16,12 @@ from artemis.http import Status
 from artemis.orm import ORM
 from artemis.rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
 from artemis.requests import Request
-from artemis.responses import JSONResponse, Response
+from artemis.responses import (
+    DEFAULT_SECURITY_HEADERS,
+    JSONResponse,
+    Response,
+    security_headers_middleware,
+)
 from artemis.routing import RouteGuard, get
 from artemis.serialization import json_decode, json_encode
 from artemis.tenancy import TenantContext
@@ -145,6 +150,33 @@ async def test_query_parsing(app: ArtemisApp) -> None:
     async with TestClient(app) as client:
         response = await client.get("/search", tenant="acme", query={"limit": 5, "offset": 2})
         assert json_decode(response.body) == {"limit": 5, "offset": 2}
+
+
+@pytest.mark.asyncio
+async def test_security_headers_present(app: ArtemisApp) -> None:
+    async with TestClient(app) as client:
+        response = await client.get("/noop", tenant="acme")
+        headers = dict(response.headers)
+        for name, value in DEFAULT_SECURITY_HEADERS:
+            assert headers.get(name) == value
+
+
+def test_security_middleware_ordering() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    async def custom(request: Request, handler):
+        return await handler(request)
+
+    app.add_middleware(custom)
+    assert app._middlewares[-1] is security_headers_middleware
+    assert app._middlewares[-2] is custom
+
+    app.add_middleware(security_headers_middleware)
+    assert app._middlewares.count(security_headers_middleware) == 1
+
+    app._middlewares.pop()
+    app.add_middleware(custom)
+    assert app._middlewares[-1] is custom
 
 
 @pytest.mark.asyncio

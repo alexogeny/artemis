@@ -21,7 +21,14 @@ from .observability import Observability
 from .orm import ORM
 from .rbac import CedarEngine, CedarEntity
 from .requests import Request
-from .responses import JSONResponse, PlainTextResponse, Response, exception_to_response
+from .responses import (
+    JSONResponse,
+    PlainTextResponse,
+    Response,
+    apply_default_security_headers,
+    exception_to_response,
+    security_headers_middleware,
+)
 from .routing import RouteGuard, Router
 from .static import StaticFiles
 from .tenancy import TenantContext, TenantResolver
@@ -74,6 +81,7 @@ class ArtemisApp:
         else:
             self.audit_trail = None
         self._middlewares: list[MiddlewareCallable] = []
+        self.add_middleware(security_headers_middleware)
         self._startup_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._shutdown_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._named_routes: dict[str, str] = {}
@@ -184,7 +192,14 @@ class ArtemisApp:
 
     # ------------------------------------------------------------------ middleware
     def add_middleware(self, middleware: MiddlewareCallable) -> None:
-        self._middlewares.append(middleware)
+        if middleware is security_headers_middleware:
+            if middleware not in self._middlewares:
+                self._middlewares.append(middleware)
+            return
+        if self._middlewares and self._middlewares[-1] is security_headers_middleware:
+            self._middlewares.insert(len(self._middlewares) - 1, middleware)
+        else:
+            self._middlewares.append(middleware)
 
     # ------------------------------------------------------------------ lifecycle
     def on_startup(self, func: Callable[[], Awaitable[None] | None]) -> Callable[[], Awaitable[None] | None]:
@@ -421,7 +436,7 @@ def _coerce_response(result: Any) -> Response:
     if isinstance(result, Response):
         return result
     if result is None:
-        return Response(status=int(Status.NO_CONTENT), body=b"")
+        return apply_default_security_headers(Response(status=int(Status.NO_CONTENT), body=b""))
     if isinstance(result, str):
         return PlainTextResponse(result)
     return JSONResponse(result)

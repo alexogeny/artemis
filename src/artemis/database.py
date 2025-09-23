@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Mapping, Sequence
+from typing import Any, AsyncIterator, Callable, Mapping, Protocol, Sequence
 
 import msgspec
 
@@ -24,12 +24,101 @@ class DatabaseError(RuntimeError):
 PoolFactory = Callable[[Mapping[str, Any]], Any]
 
 
+class SecretRef(msgspec.Struct, frozen=True, omit_defaults=True):
+    """Location of a secret managed outside the application."""
+
+    provider: str
+    name: str
+    version: str | None = None
+
+
+class SecretResolver(Protocol):
+    """Resolve secret references into concrete values."""
+
+    def resolve(self, secret: SecretRef) -> str:
+        ...
+
+
+class SecretValue(msgspec.Struct, frozen=True, omit_defaults=True):
+    """String material sourced either inline or from a secret manager."""
+
+    secret: SecretRef | None = None
+    literal: str | None = None
+
+    def resolve(self, resolver: "SecretResolver | None", *, field: str) -> str | None:
+        if self.secret is not None:
+            if resolver is None:
+                raise DatabaseError(f"Secret resolver required for {field}")
+            value = resolver.resolve(self.secret)
+            if not isinstance(value, str):
+                raise DatabaseError(f"Secret resolver returned non-string value for {field}")
+            return value
+        return self.literal
+
+
+class DatabaseCredentials(msgspec.Struct, frozen=True, omit_defaults=True):
+    """Database authentication material."""
+
+    username: SecretValue | None = None
+    password: SecretValue | None = None
+
+    def resolve(self, resolver: "SecretResolver | None") -> Mapping[str, str]:
+        credentials: dict[str, str] = {}
+        if self.username is not None:
+            value = self.username.resolve(resolver, field="credentials.username")
+            if value is not None:
+                credentials["user"] = value
+        if self.password is not None:
+            value = self.password.resolve(resolver, field="credentials.password")
+            if value is not None:
+                credentials["password"] = value
+        return credentials
+
+
+class TLSConfig(msgspec.Struct, frozen=True, omit_defaults=True):
+    """Transport encryption configuration for PostgreSQL connections."""
+
+    mode: str = "verify-full"
+    ca_certificate: SecretValue | None = None
+    client_certificate: SecretValue | None = None
+    client_key: SecretValue | None = None
+    client_key_password: SecretValue | None = None
+    server_name: str | None = None
+    certificate_pins: tuple[str, ...] = ()
+    minimum_version: str | None = None
+    maximum_version: str | None = None
+
+    def resolve(self, resolver: "SecretResolver | None") -> Mapping[str, Any]:
+        if not self.mode:
+            return {}
+        options: dict[str, Any] = {"sslmode": self.mode}
+        sources = [
+            (self.ca_certificate, "sslrootcert", "tls.ca_certificate"),
+            (self.client_certificate, "sslcert", "tls.client_certificate"),
+            (self.client_key, "sslkey", "tls.client_key"),
+            (self.client_key_password, "sslpassword", "tls.client_key_password"),
+        ]
+        for source, option_key, field in sources:
+            if source is None:
+                continue
+            value = source.resolve(resolver, field=field)
+            if value is not None:
+                options[option_key] = value
+        if self.server_name:
+            options["ssl_server_name"] = self.server_name
+        if self.certificate_pins:
+            options["ssl_cert_pins"] = tuple(self.certificate_pins)
+        if self.minimum_version:
+            options["ssl_min_protocol_version"] = self.minimum_version
+        if self.maximum_version:
+            options["ssl_max_protocol_version"] = self.maximum_version
+        return options
+
+
 class PoolConfig(msgspec.Struct, frozen=True, omit_defaults=True):
     """Configuration values passed to :class:`psqlpy.ConnectionPool`."""
 
     dsn: str | None = None
-    username: str | None = None
-    password: str | None = None
     host: str | None = None
     port: int | None = None
     db_name: str | None = None
@@ -38,6 +127,8 @@ class PoolConfig(msgspec.Struct, frozen=True, omit_defaults=True):
     options: dict[str, str] = msgspec.field(default_factory=dict)
     connect_timeout_sec: int | None = None
     tcp_user_timeout_sec: int | None = None
+    credentials: DatabaseCredentials = DatabaseCredentials()
+    tls: TLSConfig = TLSConfig()
 
 
 class DatabaseConfig(msgspec.Struct, frozen=True):
@@ -146,10 +237,12 @@ class Database:
         *,
         pool: Any | None = None,
         pool_factory: Callable[[Mapping[str, Any]], Any] | None = None,
+        secret_resolver: "SecretResolver | None" = None,
     ) -> None:
         self.config = config
         self._pool = pool
         self._pool_factory = pool_factory or _default_pool_factory
+        self._secret_resolver = secret_resolver
 
     async def startup(self) -> None:
         """Instantiate the underlying :class:`psqlpy.ConnectionPool` if needed."""
@@ -210,7 +303,7 @@ class Database:
             return self._pool
         if self._pool_factory is None:
             raise DatabaseError("No pool factory configured")
-        options = _pool_kwargs(self.config.pool)
+        options = _pool_kwargs(self.config.pool, resolver=self._secret_resolver)
         self._pool = self._pool_factory(options)
         return self._pool
 
@@ -244,11 +337,26 @@ def _coerce_rows(result: Any) -> list[dict[str, Any]]:
     raise DatabaseError(f"Unexpected query result type: {type(data)!r}")
 
 
-def _pool_kwargs(config: PoolConfig) -> Mapping[str, Any]:
-    payload: dict[str, Any] = {}
+def _pool_kwargs(config: PoolConfig, *, resolver: "SecretResolver | None" = None) -> Mapping[str, Any]:
     builtins = msgspec.to_builtins(config)
-    payload.update(builtins)
+    # ``options`` is merged both nested and flattened for backward compatibility.
+    raw_options = dict(builtins.pop("options", {}))
+    builtins.pop("credentials", None)
+    builtins.pop("tls", None)
+
+    payload: dict[str, Any] = {key: value for key, value in builtins.items() if value is not None}
     payload.update(config.options)
+    nested_options: dict[str, Any] = {**raw_options, **config.options}
+
+    credentials = config.credentials.resolve(resolver)
+    payload.update(credentials)
+
+    tls_options = config.tls.resolve(resolver)
+    payload.update(tls_options)
+    for key, value in tls_options.items():
+        nested_options[key] = value
+
+    payload["options"] = nested_options
     return {key: value for key, value in payload.items() if value is not None}
 
 
@@ -267,9 +375,14 @@ __all__ = [
     "Database",
     "DatabaseConfig",
     "DatabaseConnection",
+    "DatabaseCredentials",
     "DatabaseError",
     "DatabaseResult",
     "PoolConfig",
+    "SecretRef",
+    "SecretResolver",
+    "SecretValue",
+    "TLSConfig",
     "_quote_identifier",
 ]
 

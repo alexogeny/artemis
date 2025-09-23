@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Iterable, List, Sequence
+from typing import Any, Iterable, List, Mapping, Sequence
+
+from artemis.database import SecretRef
 
 
 @dataclass
@@ -63,4 +65,18 @@ class FakePool:
         self.closed = True
 
 
-__all__ = ["FakeConnection", "FakePool", "FakeResult"]
+class StaticSecretResolver:
+    def __init__(self, secrets: Mapping[tuple[str, str, str | None], str]) -> None:
+        self._secrets = dict(secrets)
+        self.calls: list[SecretRef] = []
+
+    def resolve(self, secret: SecretRef) -> str:
+        self.calls.append(secret)
+        key = (secret.provider, secret.name, secret.version)
+        try:
+            return self._secrets[key]
+        except KeyError as exc:  # pragma: no cover - defensive guard
+            raise LookupError(f"Secret {key} not found") from exc
+
+
+__all__ = ["FakeConnection", "FakePool", "FakeResult", "StaticSecretResolver"]

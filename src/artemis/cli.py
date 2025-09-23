@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import importlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Sequence
@@ -24,10 +25,28 @@ class CLIEnvironment:
     migrations: list[Migration]
 
 
+QUALITY_COMMANDS: tuple[tuple[str, ...], ...] = (
+    ("ruff", "check"),
+    ("ty", "check", "src"),
+    ("pytest",),
+)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
     return args.func(args)
+
+
+def quality() -> int:
+    """Run the project quality checks in sequence."""
+
+    for command in QUALITY_COMMANDS:
+        print(f"$ {' '.join(command)}", flush=True)
+        result = subprocess.run(command, check=False)
+        if result.returncode != 0:
+            return result.returncode
+    return 0
 
 
 def _build_parser() -> argparse.ArgumentParser:

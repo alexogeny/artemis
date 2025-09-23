@@ -19,6 +19,7 @@ dependencies = [
 
 [project.scripts]
 artemis = "artemis.cli:main"
+quality = "artemis.cli:quality"
 
 [tool.uv]
 managed = true
