@@ -153,6 +153,33 @@ async def test_request_loader_serializes_concurrent_access() -> None:
 
 
 @pytest.mark.asyncio
+async def test_request_loader_waiters_receive_cached_body() -> None:
+    ready = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+
+    async def loader() -> bytes:
+        nonlocal calls
+        calls += 1
+        ready.set()
+        await release.wait()
+        return b"payload"
+
+    request = build_request(body_loader=loader)
+
+    first_task = asyncio.create_task(request.body())
+    await ready.wait()
+
+    waiter_task = asyncio.create_task(request.body())
+    await asyncio.sleep(0)
+    release.set()
+
+    first, waiter = await asyncio.gather(first_task, waiter_task)
+    assert first == waiter == b"payload"
+    assert calls == 1
+
+
+@pytest.mark.asyncio
 async def test_request_loader_handles_none_and_bytearray() -> None:
     async def none_loader() -> bytes | None:
         return None
