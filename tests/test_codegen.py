@@ -103,14 +103,24 @@ def test_generate_typescript_client_emits_strict_types() -> None:
     assert "export type MultiType = string | null;" in source
     assert "export interface Dictionary {" in source
     assert "export type UnknownType = unknown;" in source
-    assert "async op_123FetchItem(path: {" in source
-    assert "init?: RequestInit): Promise<string> {" in source
-    assert "async createItem(body: {" in source
-    assert "Promise<Widget> {" in source
-    assert "async noop(init?: RequestInit): Promise<void> {" in source
-    assert "async specialCase(body: string, init?: RequestInit): Promise<void> {" in source
-    assert "{ 'content-type': 'application/json' }" in source
-    assert "{ 'content-type': 'application/x-custom' }" in source
+    assert "export interface ItemsIdGetInput {" in source
+    assert "export type ItemsIdGetOutput = string;" in source
+    assert "const op_123FetchItemRoute = createRoute<ItemsIdGetInput, ItemsIdGetOutput>({" in source
+    assert "async op_123FetchItem(input: ItemsIdGetInput): Promise<ItemsIdGetOutput> {" in source
+    assert "op_123FetchItemSuspense(input: ItemsIdGetInput): SuspenseResource<ItemsIdGetOutput> {" in source
+    assert "op_123FetchItemLoadable(input: ItemsIdGetInput): Loadable<ItemsIdGetOutput> {" in source
+    assert "op_123FetchItemQuery(" in source
+    assert "export type ItemsPostOutput = Widget;" in source
+    assert "const createItemRoute = createRoute<ItemsPostInput, ItemsPostOutput>({" in source
+    assert "createItemSuspense(input: ItemsPostInput): SuspenseResource<ItemsPostOutput> {" in source
+    assert "createItemQuery(" in source
+    assert "const noopRoute = createRoute<NoopDeleteInput, NoopDeleteOutput>({" in source
+    assert "export type NoopDeleteOutput = void;" in source
+    assert "const specialCaseRoute = createRoute<OtherPatchInput, OtherPatchOutput>({" in source
+    assert "export const routes = {" in source
+    assert "  op_123FetchItem: op_123FetchItemRoute," in source
+    assert "mediaType: 'application/json'" in source
+    assert "mediaType: 'application/x-custom'" in source
 
 
 def test_generate_client_without_components() -> None:
@@ -126,7 +136,14 @@ def test_generate_client_without_components() -> None:
     }
     source = generate_typescript_client(spec)
     assert "export class ArtemisClient" in source
-    assert "async ping(init?: RequestInit): Promise<void> {" in source
+    assert "async ping(input: PingGetInput): Promise<PingGetOutput> {" in source
+    assert "pingSuspense(input: PingGetInput): SuspenseResource<PingGetOutput> {" in source
+
+
+def test_generate_client_without_paths() -> None:
+    source = generate_typescript_client({})
+    assert "export const routes = {" not in source
+    assert " = createRoute<" not in source
 
 
 def test_schema_renderer_handles_combinations() -> None:
@@ -152,6 +169,8 @@ def test_schema_renderer_handles_combinations() -> None:
 def test_operation_helpers_cover_edge_cases() -> None:
     assert ts_codegen._sanitize_operation_id("!!!") == "operation"
     assert ts_codegen._sanitize_operation_id("123") == "op_123"
+    assert ts_codegen._type_name_from_path("/", "GET") == "RootGet"
+    assert ts_codegen._type_name_from_path("/123/resource", "POST") == "Route123ResourcePost"
     request_body = ts_codegen._select_request_body({
         "requestBody": {
             "content": {

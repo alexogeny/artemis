@@ -3,9 +3,61 @@ export interface CreateItem {
   name: string;
 }
 
+export type HttpMethod = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE' | 'OPTIONS' | 'HEAD';
+
 export interface ClientOptions {
   fetch?: typeof fetch;
   init?: RequestInit;
+}
+
+export interface SuspenseResource<T> {
+  promise: Promise<T>;
+  read(): T;
+}
+
+export interface Loadable<T> {
+  state: 'idle' | 'loading' | 'success' | 'error';
+  data?: T;
+  error?: unknown;
+  run(): Promise<T>;
+}
+
+export interface QueryOptions<T> {
+  key?: readonly unknown[];
+  enabled?: boolean;
+  placeholderData?: T;
+}
+
+export interface QueryDescriptor<T> {
+  queryKey: readonly unknown[];
+  queryFn: () => Promise<T>;
+  enabled?: boolean;
+  placeholderData?: T;
+}
+
+interface RouteRuntime<I, O> {
+  method: HttpMethod;
+  path: string;
+  hasPath: boolean;
+  hasBody: boolean;
+  mediaType?: string;
+  response: 'json' | 'text' | 'void';
+  key: (input: I) => readonly unknown[];
+}
+
+interface ArtemisClientRuntime {
+  request<I, O>(route: RouteRuntime<I, O>, input: I): Promise<O>;
+}
+
+export interface RouteHandle<I, O> extends RouteRuntime<I, O> {
+  request(client: ArtemisClientRuntime, input: I): Promise<O>;
+  suspense(client: ArtemisClientRuntime, input: I): SuspenseResource<O>;
+  loadable(client: ArtemisClientRuntime, input: I): Loadable<O>;
+  query(
+    client: ArtemisClientRuntime,
+    input: I,
+    options?: QueryOptions<O>
+  ): QueryDescriptor<O>;
 }
 
 function interpolatePath(path: string, params?: Record<string, unknown>): string {
@@ -32,7 +84,185 @@ function mergeHeaders(base?: HeadersInit, override?: HeadersInit): HeadersInit |
   return merged;
 }
 
-export class ArtemisClient {
+function mergeInit(base: RequestInit, override?: RequestInit): RequestInit {
+  const merged: RequestInit = { ...base };
+  if (override) {
+    for (const [key, value] of Object.entries(override)) {
+      if (key === 'headers' || key === 'body' || value === undefined) {
+        continue;
+      }
+      (merged as Record<string, unknown>)[key] = value as unknown;
+    }
+  }
+  const headers = mergeHeaders(base.headers, override?.headers);
+  if (headers) {
+    merged.headers = headers;
+  }
+  return merged;
+}
+
+export class ArtemisHttpError extends Error {
+  readonly response: Response;
+  readonly status: number;
+
+  constructor(response: Response) {
+    super(`Request failed with status ${response.status}`);
+    this.name = 'ArtemisHttpError';
+    this.response = response;
+    this.status = response.status;
+  }
+}
+
+function createSuspenseResource<T>(promise: Promise<T>): SuspenseResource<T> {
+  let status: 'pending' | 'resolved' | 'rejected' = 'pending';
+  let result: T;
+  let error: unknown;
+  const suspender = promise.then(
+    (value) => {
+      status = 'resolved';
+      result = value;
+      return value;
+    },
+    (reason) => {
+      status = 'rejected';
+      error = reason;
+      throw reason;
+    }
+  );
+  return {
+    promise: suspender,
+    read(): T {
+      if (status === 'pending') {
+        throw suspender;
+      }
+      if (status === 'rejected') {
+        throw error;
+      }
+      return result;
+    },
+  };
+}
+
+function createLoadable<T>(executor: () => Promise<T>): Loadable<T> {
+  const loadable: Loadable<T> = {
+    state: 'idle',
+    async run(): Promise<T> {
+      loadable.state = 'loading';
+      loadable.error = undefined;
+      try {
+        const value = await executor();
+        loadable.state = 'success';
+        loadable.data = value;
+        return value;
+      } catch (err) {
+        loadable.state = 'error';
+        loadable.error = err;
+        throw err;
+      }
+    },
+  };
+  return loadable;
+}
+
+function createRoute<I, O>(definition: RouteRuntime<I, O>): RouteHandle<I, O> {
+  return {
+    ...definition,
+    request(client: ArtemisClientRuntime, input: I): Promise<O> {
+      return client.request(definition, input);
+    },
+    suspense(client: ArtemisClientRuntime, input: I): SuspenseResource<O> {
+      return createSuspenseResource(client.request(definition, input));
+    },
+    loadable(client: ArtemisClientRuntime, input: I): Loadable<O> {
+      return createLoadable(() => client.request(definition, input));
+    },
+    query(
+      client: ArtemisClientRuntime,
+      input: I,
+      options?: QueryOptions<O>
+    ): QueryDescriptor<O> {
+      const descriptor: QueryDescriptor<O> = {
+        queryKey: options?.key ?? definition.key(input),
+        queryFn: () => client.request(definition, input),
+      };
+      if (options?.enabled !== undefined) {
+        descriptor.enabled = options.enabled;
+      }
+      if (options?.placeholderData !== undefined) {
+        descriptor.placeholderData = options.placeholderData;
+      }
+      return descriptor;
+    },
+  };
+}
+
+export interface ItemsPostInput {
+  body: CreateItem;
+  init?: RequestInit;
+}
+
+export type ItemsPostOutput = {
+};
+
+const createItemRoute = createRoute<ItemsPostInput, ItemsPostOutput>({
+  method: 'POST',
+  path: '/items',
+  hasPath: false,
+  hasBody: true,
+  mediaType: 'application/json',
+  response: 'json',
+  key(input) {
+    return ['POST', '/items', input.body] as const;
+  },
+});
+
+export interface ItemsItemIdGetInput {
+  path: {
+  item_id: number;
+};
+  init?: RequestInit;
+}
+
+export type ItemsItemIdGetOutput = {
+  [key: string]: {
+  };
+};
+
+const getItemRoute = createRoute<ItemsItemIdGetInput, ItemsItemIdGetOutput>({
+  method: 'GET',
+  path: '/items/{item_id}',
+  hasPath: true,
+  hasBody: false,
+  response: 'json',
+  key(input) {
+    return ['GET', '/items/{item_id}', input.path] as const;
+  },
+});
+
+export interface PingGetInput {
+  init?: RequestInit;
+}
+
+export type PingGetOutput = string;
+
+const getPingRoute = createRoute<PingGetInput, PingGetOutput>({
+  method: 'GET',
+  path: '/ping',
+  hasPath: false,
+  hasBody: false,
+  response: 'text',
+  key(input) {
+    return ['GET', '/ping'] as const;
+  },
+});
+
+export const routes = {
+  createItem: createItemRoute,
+  getItem: getItemRoute,
+  getPing: getPingRoute,
+} as const;
+
+export class ArtemisClient implements ArtemisClientRuntime {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly defaultInit: RequestInit;
@@ -43,57 +273,102 @@ export class ArtemisClient {
     this.defaultInit = options.init ?? {};
   }
 
-  async createItem(body: CreateItem, init?: RequestInit): Promise<{
-}> {
-    const url = new URL('/items', this.baseUrl);
-    const merged: RequestInit = { ...this.defaultInit, ...init, method: 'POST' };
-    const baseHeaders = mergeHeaders(this.defaultInit.headers, init?.headers);
-    const headers = mergeHeaders(baseHeaders, { 'content-type': 'application/json' });
-    if (headers) {
-      merged.headers = headers;
-    }
-    merged.body = JSON.stringify(body);
-    const response = await this.fetchImpl(url.toString(), merged);
+  async request<I, O>(route: RouteRuntime<I, O>, input: I): Promise<O> {
+    const params = route.hasPath ? (input as Record<string, unknown>).path : undefined;
+    const resolved = route.hasPath
+      ? interpolatePath(route.path, params as Record<string, unknown>)
+      : route.path;
+    const url = new URL(resolved, this.baseUrl);
+    const init = this.composeInit(route, input);
+    const response = await this.fetchImpl(url.toString(), init);
     if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
+      throw new ArtemisHttpError(response);
     }
-    return await response.json() as {
-};
+    return this.parseResponse(route, response);
   }
 
-  async getItem(path: {
-  item_id: number;
-}, init?: RequestInit): Promise<{
-  [key: string]: {
-  };
-}> {
-    const url = new URL(interpolatePath('/items/{item_id}', path), this.baseUrl);
-    const merged: RequestInit = { ...this.defaultInit, ...init, method: 'GET' };
-    const baseHeaders = mergeHeaders(this.defaultInit.headers, init?.headers);
-    if (baseHeaders) {
-      merged.headers = baseHeaders;
+  private composeInit<I>(route: RouteRuntime<I, unknown>, input: I): RequestInit {
+    const override = (input as Record<string, unknown>).init as RequestInit | undefined;
+    const merged = mergeInit(this.defaultInit, override);
+    merged.method = route.method;
+    if (route.hasBody) {
+      const body = (input as Record<string, unknown>).body;
+      if (route.mediaType === 'application/json') {
+        merged.body = JSON.stringify(body ?? null);
+      } else if (body !== undefined) {
+        merged.body = body as BodyInit;
+      }
+      if (route.mediaType) {
+        merged.headers = mergeHeaders(merged.headers, { 'content-type': route.mediaType });
+      }
     }
-    const response = await this.fetchImpl(url.toString(), merged);
-    if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
-    }
-    return await response.json() as {
-  [key: string]: {
-  };
-};
+    return merged;
   }
 
-  async getPing(init?: RequestInit): Promise<string> {
-    const url = new URL('/ping', this.baseUrl);
-    const merged: RequestInit = { ...this.defaultInit, ...init, method: 'GET' };
-    const baseHeaders = mergeHeaders(this.defaultInit.headers, init?.headers);
-    if (baseHeaders) {
-      merged.headers = baseHeaders;
+  private async parseResponse<I, O>(route: RouteRuntime<I, O>, response: Response): Promise<O> {
+    if (route.response === 'void') {
+      return undefined as O;
     }
-    const response = await this.fetchImpl(url.toString(), merged);
-    if (!response.ok) {
-      throw new Error(`Request failed with status ${response.status}`);
+    if (route.response === 'text') {
+      return (await response.text()) as unknown as O;
     }
-    return await response.text() as string;
+    return (await response.json()) as O;
+  }
+
+  async createItem(input: ItemsPostInput): Promise<ItemsPostOutput> {
+    return createItemRoute.request(this, input);
+  }
+
+  createItemSuspense(input: ItemsPostInput): SuspenseResource<ItemsPostOutput> {
+    return createItemRoute.suspense(this, input);
+  }
+
+  createItemLoadable(input: ItemsPostInput): Loadable<ItemsPostOutput> {
+    return createItemRoute.loadable(this, input);
+  }
+
+  createItemQuery(
+    input: ItemsPostInput,
+    options?: QueryOptions<ItemsPostOutput>,
+  ): QueryDescriptor<ItemsPostOutput> {
+    return createItemRoute.query(this, input, options);
+  }
+
+  async getItem(input: ItemsItemIdGetInput): Promise<ItemsItemIdGetOutput> {
+    return getItemRoute.request(this, input);
+  }
+
+  getItemSuspense(input: ItemsItemIdGetInput): SuspenseResource<ItemsItemIdGetOutput> {
+    return getItemRoute.suspense(this, input);
+  }
+
+  getItemLoadable(input: ItemsItemIdGetInput): Loadable<ItemsItemIdGetOutput> {
+    return getItemRoute.loadable(this, input);
+  }
+
+  getItemQuery(
+    input: ItemsItemIdGetInput,
+    options?: QueryOptions<ItemsItemIdGetOutput>,
+  ): QueryDescriptor<ItemsItemIdGetOutput> {
+    return getItemRoute.query(this, input, options);
+  }
+
+  async getPing(input: PingGetInput): Promise<PingGetOutput> {
+    return getPingRoute.request(this, input);
+  }
+
+  getPingSuspense(input: PingGetInput): SuspenseResource<PingGetOutput> {
+    return getPingRoute.suspense(this, input);
+  }
+
+  getPingLoadable(input: PingGetInput): Loadable<PingGetOutput> {
+    return getPingRoute.loadable(this, input);
+  }
+
+  getPingQuery(
+    input: PingGetInput,
+    options?: QueryOptions<PingGetOutput>,
+  ): QueryDescriptor<PingGetOutput> {
+    return getPingRoute.query(this, input, options);
   }
 }
