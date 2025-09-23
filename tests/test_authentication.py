@@ -719,7 +719,7 @@ def test_oidc_authenticator_rejects_invalid_token_structures() -> None:
 
 def test_oidc_authenticator_handles_header_anomalies() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, _secret = _build_oidc_authenticator(now=now)
     payload = _b64url(json.dumps({"iss": provider.issuer}).encode())
 
     header = _b64url(json.dumps({"alg": 123}).encode())
@@ -971,7 +971,13 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
         "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(small_modulus), "e": _b64url(exponent)}]
     }
     authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_small)
-    token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature[: len(small_modulus)])
+    token = _issue_oidc_token(
+        base_claims,
+        secret,
+        kid="rsa",
+        alg="RS256",
+        signature_bytes=signature[: len(small_modulus)],
+    )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
