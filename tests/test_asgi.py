@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Mapping
+from typing import Mapping, cast
 
 import pytest
 
@@ -186,7 +186,8 @@ async def test_asgi_large_post_body_reuse() -> None:
 
     assert not chunks
     assert messages[0]["status"] == 200
-    assert int(messages[-1]["body"].decode()) == len(payload)
+    body = cast(bytes, messages[-1]["body"])
+    assert int(body.decode()) == len(payload)
 
 
 @pytest.mark.asyncio
