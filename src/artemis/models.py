@@ -302,6 +302,8 @@ class TenantSamlProvider(DatabaseModel):
     acs_url: str
     enabled: bool = True
     attribute_mapping: dict[str, str] = msgspec.field(default_factory=dict)
+    clock_skew_seconds: int = 120
+    allowed_audiences: list[str] = msgspec.field(default_factory=list)
 
 
 @model(scope=ModelScope.TENANT, table="federated_users")
