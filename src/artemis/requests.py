@@ -2,8 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, Mapping, MutableMapping, TypeVar, get_type_hints
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Mapping,
+    MutableMapping,
+    TypeVar,
+    get_type_hints,
+)
 from urllib.parse import parse_qsl
 
 import msgspec
@@ -18,6 +28,8 @@ if TYPE_CHECKING:
 
 T = TypeVar("T")
 
+BodyLoader = Callable[[], Awaitable[bytes | bytearray | memoryview | None]]
+
 
 @lru_cache(maxsize=None)
 def _model_type_hints(model: type[Any]) -> Mapping[str, Any]:
@@ -29,6 +41,8 @@ class Request:
 
     __slots__ = (
         "_body",
+        "_body_loader",
+        "_body_lock",
         "_json_cache",
         "_query_params",
         "_raw_query",
@@ -50,15 +64,20 @@ class Request:
         path_params: Mapping[str, str] | None = None,
         query_string: str | None = None,
         body: bytes | None = None,
+        body_loader: BodyLoader | None = None,
         principal: "CedarEntity | None" = None,
     ) -> None:
+        if body is not None and body_loader is not None:
+            raise ValueError("Request body and body_loader are mutually exclusive")
         self.method = method.upper()
         self.path = path
         self.headers = {k.lower(): v for k, v in (headers or {}).items()}
         self.tenant = tenant
         self.path_params = dict(path_params or {})
         self._raw_query = query_string or ""
-        self._body = body or b""
+        self._body: bytes | None = body if body is not None else None
+        self._body_loader = body_loader
+        self._body_lock = asyncio.Lock()
         self._json_cache: Any = msgspec.UNSET
         self._query_params: MutableMapping[str, list[str]] | None = None
         self.principal = principal
@@ -91,23 +110,45 @@ class Request:
             converted[key] = convert_primitive(values[-1], annotation, source=f"query:{key}")
         return msgspec.convert(converted, type=model)
 
+    async def _ensure_body(self) -> bytes:
+        if self._body is None:
+            loader = self._body_loader
+            if loader is None:
+                self._body = b""
+            else:
+                async with self._body_lock:
+                    if self._body is None:
+                        raw = await loader()
+                        if raw is None:
+                            self._body = b""
+                        elif isinstance(raw, bytes):
+                            self._body = raw
+                        else:
+                            self._body = bytes(raw)
+                        self._body_loader = None
+        body = self._body
+        assert body is not None
+        return body
+
     async def json(self, model: type[T] | None = None) -> T | Any:
         """Decode the JSON body using :mod:`msgspec`."""
 
         if self._json_cache is msgspec.UNSET:
-            if not self._body:
+            body = await self._ensure_body()
+            if not body:
                 self._json_cache = None
             else:
-                self._json_cache = json_decode(self._body)
+                self._json_cache = json_decode(body)
         if model is None:
             return self._json_cache
         return msgspec.convert(self._json_cache, type=model)
 
-    def text(self) -> str:
-        return self._body.decode()
+    async def text(self) -> str:
+        body = await self._ensure_body()
+        return body.decode()
 
-    def body(self) -> bytes:
-        return self._body
+    async def body(self) -> bytes:
+        return await self._ensure_body()
 
     def with_principal(self, principal: "CedarEntity | None") -> "Request":
         self.principal = principal

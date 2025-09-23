@@ -8,6 +8,7 @@ from artemis.application import ArtemisApp
 from artemis.config import AppConfig
 from artemis.requests import Request
 from artemis.responses import Response
+from artemis.serialization import json_encode
 
 
 @pytest.mark.asyncio
@@ -87,7 +88,9 @@ async def test_asgi_collects_body_chunks() -> None:
 
     @app.post("/upload")
     async def upload(request: Request) -> Response:
-        return Response(body=request.body())
+        payload = await request.body()
+        assert payload is await request.body()
+        return Response(body=payload)
 
     messages: list[dict[str, object]] = []
     chunks = [
@@ -120,3 +123,117 @@ async def test_asgi_collects_body_chunks() -> None:
     await app.shutdown()
 
     assert messages[-1]["body"] == b"chunk-1chunk-2"
+
+
+@pytest.mark.asyncio
+async def test_asgi_large_post_body_reuse() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.post("/bulk")
+    async def bulk(request: Request) -> Response:
+        first = await request.body()
+        second = await request.body()
+        assert first is second
+        decoded_body = first.decode()
+        text = await request.text()
+        assert text == decoded_body
+        parsed = await request.json()
+        again = await request.json()
+        assert parsed is again
+        return Response(body=str(len(first)).encode())
+
+    payload_obj = {"records": ["x" * 512 for _ in range(512)]}
+    payload = json_encode(payload_obj)
+    chunk_size = 65536
+    chunks: list[dict[str, object]] = []
+    for index in range(0, len(payload), chunk_size):
+        chunk = payload[index : index + chunk_size]
+        chunks.append(
+            {
+                "type": "http.request",
+                "body": chunk,
+                "more_body": index + chunk_size < len(payload),
+            }
+        )
+    chunks.insert(0, {"type": "http.request", "body": b"", "more_body": True})
+
+    messages: list[dict[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        if chunks:
+            return chunks.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    await app(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/bulk",
+            "query_string": b"",
+            "headers": [
+                (b"host", b"acme.demo.example.com"),
+                (b"content-type", b"application/json"),
+            ],
+        },
+        receive,
+        send,
+    )
+    await app.shutdown()
+
+    assert not chunks
+    assert messages[0]["status"] == 200
+    assert int(messages[-1]["body"].decode()) == len(payload)
+
+
+@pytest.mark.asyncio
+async def test_asgi_body_loader_handles_disconnect_and_cached_reads() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.post("/manual")
+    async def manual(request: Request) -> Response:
+        loader = request._body_loader
+        assert loader is not None
+        first = await loader()
+        second = await loader()
+        assert first is second
+        body = await request.body()
+        assert body is first
+        return Response(body=body)
+
+    incoming: list[dict[str, object]] = [
+        {"type": "lifespan.startup"},
+        {"type": "http.request", "body": b"chunk-a", "more_body": True},
+        {"type": "http.request", "body": b"chunk-b", "more_body": True},
+        {"type": "http.disconnect"},
+    ]
+    messages: list[dict[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    await app(
+        {
+            "type": "http",
+            "method": "POST",
+            "path": "/manual",
+            "query_string": b"",
+            "headers": [(b"host", b"acme.demo.example.com")],
+        },
+        receive,
+        send,
+    )
+    await app.shutdown()
+
+    assert messages[0]["status"] == 200
+    assert messages[-1]["body"] == b"chunk-achunk-b"
+    assert not incoming
