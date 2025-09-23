@@ -101,6 +101,8 @@ class ModelInfo(Generic[M]):
     fields: tuple[FieldInfo, ...]
     accessor: str
     field_map: Mapping[str, FieldInfo]
+    exposed: bool
+    redacted_fields: frozenset[str]
 
 
 class ModelRegistry:
@@ -153,6 +155,8 @@ def model(
     identity: Sequence[str] = ("id",),
     accessor: str | None = None,
     registry: ModelRegistry | None = None,
+    exposed: bool = True,
+    redacted_fields: Sequence[str] = (),
 ) -> Callable[[type[M]], type[M]]:
     """Class decorator used to register ORM models."""
 
@@ -165,6 +169,8 @@ def model(
             schema=schema,
             identity=tuple(identity),
             accessor=accessor or table,
+            exposed=exposed,
+            redacted_fields=tuple(redacted_fields),
         )
         setattr(cls, "__model_info__", info)
         reg.register(info)
@@ -196,6 +202,7 @@ class ORM:
 
     async def insert(self, model: type[M], data: M | Mapping[str, Any], *, tenant: TenantContext | None = None) -> M:
         info = self.registry.info_for(model)
+        self._ensure_exposed(info)
         instance = self._coerce_instance(info, data)
         return await self._insert(info, instance, tenant)
 
@@ -209,6 +216,7 @@ class ORM:
         limit: int | None = None,
     ) -> list[M]:
         info = self.registry.info_for(model)
+        self._ensure_exposed(info)
         rows = await self._select(info, tenant=tenant, filters=filters, order_by=order_by, limit=limit)
         return [msgspec.convert(row, type=info.model) for row in rows]
 
@@ -221,6 +229,7 @@ class ORM:
         filters: Mapping[str, Any] | None = None,
     ) -> list[M]:
         info = self.registry.info_for(model)
+        self._ensure_exposed(info)
         rows = await self._update(info, values, tenant=tenant, filters=filters)
         return [msgspec.convert(row, type=info.model) for row in rows]
 
@@ -232,11 +241,19 @@ class ORM:
         filters: Mapping[str, Any] | None = None,
     ) -> int:
         info = self.registry.info_for(model)
+        self._ensure_exposed(info)
         return await self._delete(info, tenant=tenant, filters=filters)
 
     def manager(self, model: type[M]) -> "ModelManager[M]":
         info = self.registry.info_for(model)
+        self._ensure_exposed(info)
         return ModelManager(self, info)
+
+    def _ensure_exposed(self, info: ModelInfo[Any]) -> None:
+        if not info.exposed:
+            raise PermissionError(
+                f"Model {info.model.__name__} is restricted and cannot be accessed via the ORM"
+            )
 
     async def _insert(self, info: ModelInfo[M], instance: M, tenant: TenantContext | None) -> M:
         payload = msgspec.to_builtins(instance)
@@ -487,6 +504,10 @@ class _Namespace:
             return self._cache[item]
         except KeyError:
             info = self._orm.registry.get_by_accessor(self._scope, item)
+            if not info.exposed:
+                raise AttributeError(
+                    f"Model accessor '{item}' in scope '{self._scope}' is restricted"
+                )
             manager = ModelManager(self._orm, info)
             self._cache[item] = manager
             return manager
@@ -500,6 +521,8 @@ def _build_model_info(
     schema: str | None,
     identity: tuple[str, ...],
     accessor: str,
+    exposed: bool,
+    redacted_fields: Sequence[str],
 ) -> ModelInfo[M]:
     metadata = type_info(model)
     if not isinstance(metadata, StructType):  # pragma: no cover - msgspec ensures this
@@ -521,6 +544,11 @@ def _build_model_info(
         )
         fields.append(info)
         field_map[field.name] = info
+    redacted = frozenset(str(name) for name in redacted_fields)
+    unknown = [name for name in redacted if name not in field_map]
+    if unknown:
+        joined = ", ".join(sorted(unknown))
+        raise ValueError(f"Unknown redacted field(s) {joined} for model {model.__name__}")
     return ModelInfo(
         model=model,
         table=table,
@@ -530,6 +558,8 @@ def _build_model_info(
         fields=tuple(fields),
         accessor=_normalize_accessor(accessor),
         field_map=field_map,
+        exposed=exposed,
+        redacted_fields=redacted,
     )
 
 

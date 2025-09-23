@@ -785,6 +785,8 @@ def test_projection_and_identity_order_clause_variants() -> None:
         fields=(alias_field, other_field),
         accessor="projection_table",
         field_map={"py_name": alias_field, "other": other_field},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     rendered = projection(info)
     assert '"db_name" AS "py_name"' in rendered
@@ -800,6 +802,8 @@ def test_projection_and_identity_order_clause_variants() -> None:
         fields=(alias_field,),
         accessor="projection_identity",
         field_map={"py_name": alias_field},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     assert identity_order_clause(info_identity) == '"db_name"'
 
@@ -812,6 +816,8 @@ def test_projection_and_identity_order_clause_variants() -> None:
         fields=(alias_field,),
         accessor="projection_no_identity",
         field_map={"py_name": alias_field},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     assert identity_order_clause(info_no_identity) == '"db_name"'
 
@@ -1006,6 +1012,8 @@ def test_models_by_scope_filters_models(monkeypatch: pytest.MonkeyPatch) -> None
             fields=(plain_field,),
             accessor="plain_table",
             field_map={"id": plain_field},
+            exposed=True,
+            redacted_fields=frozenset(),
         ),
     )
 

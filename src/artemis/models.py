@@ -46,14 +46,19 @@ class Subscription(DatabaseModel):
     current_period_end: dt.datetime
 
 
-@model(scope=ModelScope.ADMIN, table="app_secrets")
+@model(
+    scope=ModelScope.ADMIN,
+    table="app_secrets",
+    exposed=False,
+    redacted_fields=("secret_value", "salt"),
+)
 class AppSecret(DatabaseModel):
     secret_value: str
     salt: str
     rotated_at: dt.datetime | None = None
 
 
-@model(scope=ModelScope.ADMIN, table="customers")
+@model(scope=ModelScope.ADMIN, table="customers", redacted_fields=("tenant_secret",))
 class Customer(DatabaseModel):
     tenant: str
     schema_name: str
@@ -90,7 +95,17 @@ class Permission(DatabaseModel):
     condition: dict[str, Any] = msgspec.field(default_factory=dict)
 
 
-@model(scope=ModelScope.ADMIN, table="admin_users")
+@model(
+    scope=ModelScope.ADMIN,
+    table="admin_users",
+    redacted_fields=(
+        "hashed_password",
+        "password_salt",
+        "password_secret",
+        "mfa_enforced",
+        "mfa_enrolled_at",
+    ),
+)
 class AdminUser(DatabaseModel):
     email: str
     hashed_password: str
@@ -109,7 +124,18 @@ class AdminRoleAssignment(DatabaseModel):
     assigned_at: dt.datetime
 
 
-@model(scope=ModelScope.ADMIN, table="admin_passkeys")
+@model(
+    scope=ModelScope.ADMIN,
+    table="admin_passkeys",
+    exposed=False,
+    redacted_fields=(
+        "credential_id",
+        "public_key",
+        "attestation_format",
+        "sign_count",
+        "last_used_at",
+    ),
+)
 class AdminPasskey(DatabaseModel):
     admin_user_id: str
     credential_id: str
@@ -120,14 +146,29 @@ class AdminPasskey(DatabaseModel):
     label: str | None = None
 
 
-@model(scope=ModelScope.TENANT, table="tenant_secrets")
+@model(
+    scope=ModelScope.TENANT,
+    table="tenant_secrets",
+    exposed=False,
+    redacted_fields=("secret",),
+)
 class TenantSecret(DatabaseModel):
     secret: str
     rotated_at: dt.datetime | None = None
     purpose: str = "password"
 
 
-@model(scope=ModelScope.TENANT, table="users")
+@model(
+    scope=ModelScope.TENANT,
+    table="users",
+    redacted_fields=(
+        "hashed_password",
+        "password_salt",
+        "password_secret",
+        "mfa_enforced",
+        "mfa_enrolled_at",
+    ),
+)
 class TenantUser(DatabaseModel):
     email: str
     hashed_password: str
@@ -163,7 +204,12 @@ class SessionLevel(str, Enum):
     PASSKEY = "passkey"
 
 
-@model(scope=ModelScope.TENANT, table="session_tokens")
+@model(
+    scope=ModelScope.TENANT,
+    table="session_tokens",
+    exposed=False,
+    redacted_fields=("token",),
+)
 class SessionToken(DatabaseModel):
     user_id: str
     token: str
@@ -172,7 +218,20 @@ class SessionToken(DatabaseModel):
     revoked_at: dt.datetime | None = None
 
 
-@model(scope=ModelScope.TENANT, table="passkeys")
+@model(
+    scope=ModelScope.TENANT,
+    table="passkeys",
+    exposed=False,
+    redacted_fields=(
+        "credential_id",
+        "public_key",
+        "user_handle",
+        "attestation_format",
+        "sign_count",
+        "last_used_at",
+        "transports",
+    ),
+)
 class Passkey(DatabaseModel):
     user_id: str
     credential_id: str
@@ -191,7 +250,12 @@ class MfaPurpose(str, Enum):
     ENROLLMENT = "enrollment"
 
 
-@model(scope=ModelScope.TENANT, table="mfa_codes")
+@model(
+    scope=ModelScope.TENANT,
+    table="mfa_codes",
+    exposed=False,
+    redacted_fields=("code",),
+)
 class MfaCode(DatabaseModel):
     user_id: str
     code: str

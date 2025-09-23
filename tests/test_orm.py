@@ -8,7 +8,7 @@ import artemis.orm as orm_module
 from artemis.audit import AuditActor, AuditTrail, audit_context
 from artemis.database import Database, DatabaseConfig, PoolConfig
 from artemis.id57 import generate_id57
-from artemis.models import BillingRecord, BillingStatus, TenantUser
+from artemis.models import AppSecret, BillingRecord, BillingStatus, Passkey, TenantUser
 from artemis.orm import (
     ORM,
     Model,
@@ -154,6 +154,34 @@ def test_registry_accessor_and_namespace() -> None:
     assert orm.admin.billing is admin_manager
     with pytest.raises(LookupError):
         orm.admin.missing
+    with pytest.raises(AttributeError):
+        orm.admin.app_secrets
+    with pytest.raises(AttributeError):
+        orm.tenants.passkeys
+
+
+@pytest.mark.asyncio
+async def test_restricted_models_not_exposed() -> None:
+    database = Database(DatabaseConfig(pool=PoolConfig(dsn="postgres://")), pool=FakePool())
+    orm = ORM(database)
+    with pytest.raises(AttributeError):
+        orm.admin.app_secrets
+    with pytest.raises(AttributeError):
+        orm.tenants.passkeys
+    with pytest.raises(PermissionError):
+        await orm.select(AppSecret)
+    with pytest.raises(PermissionError):
+        await orm.insert(AppSecret, {"secret_value": "s", "salt": "t"})
+    with pytest.raises(PermissionError):
+        await orm.update(AppSecret, {"secret_value": "x"})
+    with pytest.raises(PermissionError):
+        await orm.delete(AppSecret)
+    with pytest.raises(PermissionError):
+        orm.manager(AppSecret)
+    with pytest.raises(PermissionError):
+        await orm.select(Passkey)
+    with pytest.raises(PermissionError):
+        orm.manager(Passkey)
 
 
 @pytest.mark.asyncio
@@ -270,6 +298,16 @@ def test_registry_prevents_duplicates_and_normalizes_accessor() -> None:
 def test_normalize_accessor_fallback_behavior() -> None:
     assert orm_module._normalize_accessor("Orders-Manage!!") == "orders_manage"
     assert orm_module._normalize_accessor("!!!") == "!!!"
+
+
+def test_model_redacted_field_validation() -> None:
+    registry = ModelRegistry()
+
+    with pytest.raises(ValueError):
+
+        @model(scope=ModelScope.ADMIN, table="invalid", registry=registry, redacted_fields=("missing",))
+        class InvalidModel(Model):
+            id: str
 
 
 @pytest.mark.asyncio
@@ -447,6 +485,8 @@ def test_apply_insert_metadata_skips_when_field_missing() -> None:
         fields=tuple(),
         accessor="users",
         field_map={},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     payload: dict[str, Any] = {"created_at": None, "updated_at": None}
     _apply_insert_metadata(info, payload)
@@ -464,6 +504,8 @@ def test_apply_update_metadata_skips_when_field_missing() -> None:
         fields=tuple(),
         accessor="users",
         field_map={},
+        exposed=True,
+        redacted_fields=frozenset(),
     )
     values: dict[str, Any] = {}
     _apply_update_metadata(info, values)
