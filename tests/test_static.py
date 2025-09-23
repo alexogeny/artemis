@@ -165,6 +165,7 @@ async def test_staticfiles_direct_behaviors(tmp_path) -> None:
 
         with pytest.raises(HTTPError) as excinfo:
             await server.serve("index.html", method="POST")
+        assert isinstance(excinfo.value, HTTPError)
         assert excinfo.value.status == 405
 
         with pytest.raises(HTTPError):
