@@ -94,6 +94,7 @@ from .rbac import (
 from .requests import Request
 from .responses import JSONResponse, PlainTextResponse, Response
 from .routing import get, post, route
+from .static import StaticFiles
 from .tenancy import TenantContext, TenantResolver, TenantScope
 from .testing import TestClient
 
@@ -167,6 +168,7 @@ __all__ = [
     "SessionLevel",
     "SessionToken",
     "SlackWebhookConfig",
+    "StaticFiles",
     "Subscription",
     "SubscriptionStatus",
     "TenantAuditLogEntry",

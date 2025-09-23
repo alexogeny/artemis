@@ -26,6 +26,9 @@ if TYPE_CHECKING:
 Endpoint = Callable[..., Awaitable[Any] | Any]
 
 
+_PATH_PARAM_PATTERN = re.compile(r"{([a-zA-Z_][a-zA-Z0-9_]*)(?::([a-zA-Z_][a-zA-Z0-9_]*))?}")
+
+
 @dataclass(slots=True)
 class RouteSpec:
     path: str
@@ -167,8 +170,13 @@ def _compile_path(path: str) -> tuple[RegexObject, tuple[str, ...]]:
 
     def replace(match: re.Match[str]) -> str:
         name = match.group(1)
+        converter = match.group(2)
         param_names.append(name)
-        return f"(?P<{name}>[^/]+)"
+        if converter is None:
+            return f"(?P<{name}>[^/]+)"
+        if converter == "path":
+            return f"(?P<{name}>.*)"
+        raise ValueError(f"Unsupported path converter: {converter}")
 
-    pattern = "^" + re.sub(r"{([a-zA-Z_][a-zA-Z0-9_]*)}", replace, path) + "$"
+    pattern = "^" + _PATH_PARAM_PATTERN.sub(replace, path) + "$"
     return rure.compile(pattern), tuple(param_names)

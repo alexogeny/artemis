@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import os
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 
 import msgspec
@@ -21,6 +22,7 @@ from .rbac import CedarEngine, CedarEntity
 from .requests import Request
 from .responses import JSONResponse, PlainTextResponse, Response, exception_to_response
 from .routing import RouteGuard, Router
+from .static import StaticFiles
 from .tenancy import TenantContext, TenantResolver
 from .typing_utils import convert_primitive
 
@@ -121,6 +123,48 @@ class ArtemisApp:
         authorize: RouteGuard | Sequence[RouteGuard] | None = None,
     ) -> Callable[[Callable[..., Awaitable[Any] | Any]], Callable[..., Awaitable[Any] | Any]]:
         return self.route(path, methods=("POST",), name=name, authorize=authorize)
+
+    def mount_static(
+        self,
+        path: str,
+        *,
+        directory: str | os.PathLike[str],
+        name: str | None = None,
+        index_file: str | None = "index.html",
+        cache_control: str | None = "public, max-age=3600",
+        follow_symlinks: bool = False,
+        content_types: Mapping[str, str] | None = None,
+    ) -> None:
+        """Serve files rooted at ``directory`` under ``path``."""
+
+        normalized = path.strip()
+        if not normalized:
+            raise ValueError("Static mount path cannot be empty")
+        if not normalized.startswith("/"):
+            normalized = "/" + normalized
+        stripped = normalized.strip("/")
+        if not stripped:
+            raise ValueError("Static mount path cannot be '/' or whitespace only")
+        mount_path = "/" + stripped
+        server = StaticFiles(
+            directory=directory,
+            executor=self.executor,
+            index_file=index_file,
+            follow_symlinks=follow_symlinks,
+            cache_control=cache_control,
+            content_types=content_types,
+        )
+
+        async def _serve_root(request: Request) -> Response:
+            return await server.serve("", method=request.method)
+
+        async def _serve_path(filepath: str, request: Request) -> Response:
+            return await server.serve(filepath, method=request.method)
+
+        self.router.add_route(mount_path, methods=("GET", "HEAD"), endpoint=_serve_root, name=name)
+        self.router.add_route(f"{mount_path}/{{filepath:path}}", methods=("GET", "HEAD"), endpoint=_serve_path)
+        if name is not None:
+            self._named_routes[name] = mount_path
 
     def include(self, *handlers: Callable[..., Awaitable[Any] | Any]) -> None:
         self.router.include(handlers)
