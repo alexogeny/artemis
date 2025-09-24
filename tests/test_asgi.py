@@ -74,10 +74,16 @@ async def test_asgi_rejects_non_http_scope() -> None:
     async def receive() -> Mapping[str, object]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
+    messages: list[Mapping[str, object]] = []
+
     async def send(message: Mapping[str, object]) -> None:
-        raise AssertionError("send should not be called")
+        messages.append(dict(message))
 
     scope = {"type": "websocket", "headers": []}
+    await app(scope, receive, send)
+    assert messages == [{"type": "websocket.close", "code": 4400}]
+
+    scope = {"type": "lifespan"}
     with pytest.raises(RuntimeError):
         await app(scope, receive, send)
 

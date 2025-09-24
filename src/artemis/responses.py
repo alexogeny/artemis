@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterable
 from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable
 
 import msgspec
@@ -35,11 +36,17 @@ class Response(msgspec.Struct, frozen=True):
     status: int = int(Status.OK)
     headers: Headers = ()
     body: bytes = b""
+    stream: AsyncIterable[bytes] | None = None
 
     def with_headers(self, headers: Iterable[tuple[str, str]]) -> "Response":
         """Return a new response with ``headers`` appended."""
 
-        return Response(status=self.status, headers=self.headers + tuple(headers), body=self.body)
+        return Response(
+            status=self.status,
+            headers=self.headers + tuple(headers),
+            body=self.body,
+            stream=self.stream,
+        )
 
 
 def apply_default_security_headers(
