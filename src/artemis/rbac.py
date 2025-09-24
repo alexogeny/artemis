@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import importlib.util
+import json
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Iterable, Mapping, Sequence
+from types import ModuleType
+from typing import TYPE_CHECKING, Any, Callable, Iterable, Mapping, Sequence
 
 from .models import (
     AdminRoleAssignment,
@@ -15,6 +18,17 @@ from .models import (
     RoleScope,
     UserRole,
 )
+
+if TYPE_CHECKING:  # pragma: no cover - imported for typing only
+    import cedarpy
+
+cedarpy: ModuleType | None
+if importlib.util.find_spec("cedarpy") is not None:  # pragma: no cover - import guard
+    import cedarpy as _cedarpy
+
+    cedarpy = _cedarpy
+else:  # pragma: no cover - fallback when cedarpy is unavailable
+    cedarpy = None
 
 
 class CedarEffect(str, Enum):
@@ -55,6 +69,7 @@ class CedarPolicy:
     actions: tuple[str, ...]
     resource: CedarReference
     condition: Condition | None = None
+    condition_data: Mapping[str, Any] | None = field(default=None, repr=False)
 
     def matches(
         self,
@@ -87,6 +102,7 @@ class CedarEngine:
     def __init__(self, policies: Sequence[CedarPolicy]) -> None:
         self._policies = tuple(policies)
         self._index = self._build_index(self._policies)
+        self._cedar_runtime = _CedarPyRuntime.build(self._policies)
 
     def check(
         self,
@@ -96,6 +112,15 @@ class CedarEngine:
         resource: CedarEntity | None = None,
         context: Mapping[str, Any] | None = None,
     ) -> bool:
+        if self._cedar_runtime is not None:
+            compiled = self._cedar_runtime.check(
+                principal=principal,
+                action=action,
+                resource=resource,
+                context=context,
+            )
+            if compiled is not None:
+                return compiled
         allowed = False
         for policy in self._candidates(principal, action):
             if not policy.matches(principal, action, resource, context):
@@ -104,6 +129,9 @@ class CedarEngine:
                 return False
             allowed = True
         return allowed
+
+    def uses_cedarpy(self) -> bool:
+        return self._cedar_runtime is not None
 
     def policies(self) -> Sequence[CedarPolicy]:
         return self._policies
@@ -194,6 +222,7 @@ def build_engine(
                     actions=_normalize_actions(permission.action),
                     resource=_permission_resource(permission, role),
                     condition=_condition_from_mapping(permission.condition),
+                    condition_data=permission.condition,
                 )
             )
     return CedarEngine(policies)
@@ -256,6 +285,306 @@ def _to_effect(effect: PermissionEffect | str) -> CedarEffect:
     if isinstance(effect, PermissionEffect):
         return CedarEffect(effect.value)
     return CedarEffect(effect.lower())
+
+
+class _CedarPyRuntime:
+    __slots__ = (
+        "_module",
+        "_policies_text",
+        "_principal_attributes",
+        "_schema_json",
+    )
+
+    def __init__(
+        self,
+        *,
+        module: ModuleType,
+        policies_text: str,
+        schema_json: str,
+        principal_attributes: Mapping[str, Mapping[str, str]],
+    ) -> None:
+        self._module = module
+        self._policies_text = policies_text
+        self._schema_json = schema_json
+        self._principal_attributes = {
+            key: dict(value) for key, value in principal_attributes.items()
+        }
+
+    @classmethod
+    def build(cls, policies: Sequence[CedarPolicy]) -> _CedarPyRuntime | None:
+        module = cedarpy
+        if module is None:
+            return None
+        compiler = _CedarPolicyCompiler(policies)
+        if not compiler.supported:
+            return None
+        return cls(
+            module=module,
+            policies_text=compiler.policies_text,
+            schema_json=compiler.schema_json,
+            principal_attributes=compiler.principal_attributes,
+        )
+
+    def check(
+        self,
+        *,
+        principal: CedarEntity,
+        action: str,
+        resource: CedarEntity | None,
+        context: Mapping[str, Any] | None,
+    ) -> bool | None:
+        if resource is None:
+            return None
+        request = {
+            "principal": _format_entity_reference(principal),
+            "action": _action_literal(action),
+            "resource": _format_entity_reference(resource),
+        }
+        if context is not None:
+            request["context"] = context
+        try:
+            entities = json.dumps(
+                [
+                    _serialize_entity(principal, self._principal_attributes.get(principal.type, {})),
+                    _serialize_entity(resource, {}),
+                ]
+            )
+            result = self._module.is_authorized(
+                request=request,
+                policies=self._policies_text,
+                entities=entities,
+                schema=self._schema_json,
+            )
+        except Exception:  # pragma: no cover - cedar runtime failure falls back to python path
+            return None
+        if result.decision is self._module.Decision.Allow:
+            return True
+        if result.decision is self._module.Decision.Deny:
+            return False
+        return False
+
+
+class _CedarPolicyCompiler:
+    __slots__ = (
+        "_actions",
+        "_context_attributes",
+        "_entity_types",
+        "_principal_attributes",
+        "_statements",
+        "policies_text",
+        "schema_json",
+        "supported",
+    )
+
+    def __init__(self, policies: Sequence[CedarPolicy]) -> None:
+        self.supported = True
+        self._statements: list[str] = []
+        self._entity_types: dict[str, dict[str, str]] = defaultdict(dict)
+        self._context_attributes: dict[str, dict[str, str]] = defaultdict(dict)
+        self._actions: dict[str, dict[str, set[str]]] = {}
+        self._compile(policies)
+        if self.supported:
+            self._finalize(policies)
+
+    @property
+    def principal_attributes(self) -> Mapping[str, Mapping[str, str]]:
+        return self._entity_types
+
+    def _compile(self, policies: Sequence[CedarPolicy]) -> None:
+        for index, policy in enumerate(policies):
+            if not self._translate_policy(policy, index):
+                self.supported = False
+                return
+
+    def _translate_policy(self, policy: CedarPolicy, index: int) -> bool:
+        principal_clause, principal_type = _render_reference("principal", policy.principal)
+        if principal_clause is None:
+            return False
+        resource_clause, resource_type = _render_reference("resource", policy.resource)
+        if resource_clause is None:
+            return False
+        if not policy.actions:
+            return False
+        for action in policy.actions:
+            if action == "*":
+                return False
+            when_clause = _render_condition(
+                policy.condition,
+                policy.condition_data,
+                action=action,
+                principal_type=principal_type,
+                principal_attributes=self._entity_types,
+                context_attributes=self._context_attributes,
+            )
+            if when_clause is None and policy.condition is not None:
+                return False
+            effect = "permit" if policy.effect is CedarEffect.ALLOW else "forbid"
+            statement = (
+                f"{effect}(\n"
+                f"    {principal_clause},\n"
+                f"    action == {_action_literal(action)},\n"
+                f"    {resource_clause}\n"
+                f"){when_clause};"
+            )
+            self._statements.append(statement)
+            action_entry = self._actions.setdefault(action, {"principalTypes": set(), "resourceTypes": set()})
+            action_entry["principalTypes"].add(principal_type)
+            action_entry["resourceTypes"].add(resource_type)
+        return True
+
+    def _finalize(self, policies: Sequence[CedarPolicy]) -> None:
+        if not self._statements:
+            self.supported = False
+            return
+        entity_types: dict[str, Any] = {}
+        for entity_type, attributes in self._entity_types.items():
+            entity_types[entity_type] = {
+                "shape": {
+                    "type": "Record",
+                    "attributes": {
+                        name: {"type": attr_type, "required": False}
+                        for name, attr_type in sorted(attributes.items())
+                    },
+                }
+            }
+        for policy in policies:
+            resource_type = policy.resource.entity_type
+            if resource_type == "*":
+                continue
+            entity_types.setdefault(
+                resource_type,
+                {"shape": {"type": "Record", "attributes": {}}},
+            )
+        actions: dict[str, Any] = {}
+        for action, data in self._actions.items():
+            applies_to: dict[str, Any] = {
+                "principalTypes": sorted(data["principalTypes"]),
+                "resourceTypes": sorted(data["resourceTypes"]),
+            }
+            context_types = self._context_attributes.get(action)
+            if context_types:
+                applies_to["context"] = {
+                    "type": "Record",
+                    "attributes": {
+                        name: {"type": attr_type, "required": False}
+                        for name, attr_type in sorted(context_types.items())
+                    },
+                }
+            actions[action] = {"appliesTo": applies_to}
+        self.policies_text = "\n".join(self._statements)
+        self.schema_json = json.dumps({"": {"entityTypes": entity_types, "actions": actions}})
+
+
+def _format_entity_reference(entity: CedarEntity) -> str:
+    return f"{entity.type}::\"{_escape_string(entity.id)}\""
+
+
+def _action_literal(action: str) -> str:
+    return f"Action::\"{_escape_string(action)}\""
+
+
+def _serialize_entity(entity: CedarEntity, attribute_types: Mapping[str, str]) -> Mapping[str, Any]:
+    attributes: dict[str, Any] = {}
+    data = entity.attributes or {}
+    for name, attr_type in attribute_types.items():
+        if name not in data:
+            continue
+        value = _cedar_attribute_value(data[name], attr_type)
+        if value is None:
+            raise ValueError(f"Unsupported attribute type for {name!r}")
+        attributes[name] = value
+    return {
+        "uid": {"type": entity.type, "id": entity.id},
+        "attrs": attributes,
+        "parents": [],
+    }
+
+
+def _render_reference(label: str, reference: CedarReference) -> tuple[str | None, str]:
+    entity_type = reference.entity_type
+    if entity_type == "*":
+        return None, entity_type
+    identifier = reference.identifier
+    if identifier in (None, "*"):
+        clause = f"{label} is {entity_type}"
+    else:
+        clause = f"{label} == {entity_type}::\"{_escape_string(identifier)}\""
+    return clause, entity_type
+
+
+def _render_condition(
+    condition: Condition | None,
+    data: Mapping[str, Any] | None,
+    *,
+    action: str,
+    principal_type: str,
+    principal_attributes: dict[str, dict[str, str]],
+    context_attributes: dict[str, dict[str, str]],
+) -> str | None:
+    if data is None:
+        return None if condition is not None else ""
+    expressions: list[str] = []
+    context_types = context_attributes.setdefault(action, {})
+    for key, expected in (data.get("context_equals") or {}).items():
+        literal = _cedar_literal(expected)
+        attr_type = _cedar_type_for_value(expected)
+        if literal is None or attr_type is None:
+            return None
+        existing = context_types.get(key)
+        if existing is None:
+            context_types[key] = attr_type
+        elif existing != attr_type:
+            return None
+        expressions.append(f"context.{key} == {literal}")
+    attr_types = principal_attributes.setdefault(principal_type, {})
+    for key, expected in (data.get("principal_attr_equals") or {}).items():
+        literal = _cedar_literal(expected)
+        attr_type = _cedar_type_for_value(expected)
+        if literal is None or attr_type is None:
+            return None
+        existing = attr_types.get(key)
+        if existing is None:
+            attr_types[key] = attr_type
+        elif existing != attr_type:
+            return None
+        expressions.append(f"principal.{key} == {literal}")
+    if not expressions:
+        return ""
+    return " when { " + " && ".join(expressions) + " }"
+
+
+def _cedar_literal(value: Any) -> str | None:
+    if isinstance(value, str):
+        return f'"{_escape_string(value)}"'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    return None
+
+
+def _cedar_type_for_value(value: Any) -> str | None:
+    if isinstance(value, str):
+        return "String"
+    if isinstance(value, bool):
+        return "Boolean"
+    if isinstance(value, int):
+        return "Long"
+    return None
+
+
+def _cedar_attribute_value(value: Any, attr_type: str) -> Any | None:
+    if attr_type == "String" and isinstance(value, str):
+        return value
+    if attr_type == "Boolean" and isinstance(value, bool):
+        return value
+    if attr_type == "Long" and isinstance(value, int):
+        return value
+    return None
+
+
+def _escape_string(value: str) -> str:
+    return value.replace("\\", "\\\\").replace('"', "\\\"")
 
 
 __all__ = [
