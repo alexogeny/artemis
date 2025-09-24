@@ -32,6 +32,7 @@ from .database import (
     TLSConfig,
 )
 from .dependency import DependencyProvider
+from .events import EventStream, ServerSentEvent
 from .exceptions import ArtemisError, HTTPError
 from .http import (
     Status,
@@ -124,6 +125,7 @@ from .routing import get, post, route
 from .static import StaticFiles
 from .tenancy import TenantContext, TenantResolver, TenantScope
 from .testing import TestClient
+from .websockets import WebSocket, WebSocketDisconnect
 
 __all__ = [
     "DEFAULT_SECURITY_HEADERS",
@@ -161,6 +163,7 @@ __all__ = [
     "DatabaseCredentials",
     "DatabaseModel",
     "DependencyProvider",
+    "EventStream",
     "FederatedIdentityDirectory",
     "FederatedProvider",
     "HTTPError",
@@ -197,6 +200,7 @@ __all__ = [
     "SecretRef",
     "SecretResolver",
     "SecretValue",
+    "ServerSentEvent",
     "SessionLevel",
     "SessionToken",
     "SlackWebhookConfig",
@@ -216,6 +220,8 @@ __all__ = [
     "TenantUser",
     "TestClient",
     "UserRole",
+    "WebSocket",
+    "WebSocketDisconnect",
     "apply_default_security_headers",
     "attach_quickstart",
     "audit_context",
