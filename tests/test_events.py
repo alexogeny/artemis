@@ -269,8 +269,10 @@ async def test_send_response_body_handles_async_iterable() -> None:
     await _send_response_body(response, send)
     assert messages[0]["more_body"] is True
     assert messages[0]["body"] == b"chunk-one"
-    assert messages[1]["more_body"] is False
+    assert messages[1]["more_body"] is True
     assert messages[1]["body"] == b"chunk-two"
+    assert messages[2]["more_body"] is False
+    assert messages[2]["body"] == b""
 
 
 @pytest.mark.asyncio

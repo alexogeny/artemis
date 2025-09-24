@@ -613,14 +613,10 @@ async def _send_response_body(
     except StopAsyncIteration:
         await send({"type": "http.response.body", "body": response.body, "more_body": False})
         return
-    while True:
-        try:
-            next_chunk = await anext(iterator)
-        except StopAsyncIteration:
-            await send({"type": "http.response.body", "body": chunk, "more_body": False})
-            break
+    await send({"type": "http.response.body", "body": chunk, "more_body": True})
+    async for chunk in iterator:
         await send({"type": "http.response.body", "body": chunk, "more_body": True})
-        chunk = next_chunk
+    await send({"type": "http.response.body", "body": b"", "more_body": False})
 
 
 def _ensure_async_iterator(stream: AsyncIterable[bytes]) -> AsyncIterator[bytes]:
