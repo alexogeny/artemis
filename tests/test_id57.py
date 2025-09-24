@@ -1,17 +1,17 @@
-import datetime as dt
+import uuid
 
 import pytest
 
-from artemis.id57 import ALPHABET, Id57Parts, base57_encode, decode57, generate_id57
+from artemis.id57 import ALPHABET, USING_RUST_BACKEND, base57_encode, decode57, generate_id57
 
 
 def test_generate_id57_lexicographically_sorted() -> None:
-    first = generate_id57(timestamp=dt.datetime(2024, 1, 1, tzinfo=dt.UTC))
-    second = generate_id57(timestamp=dt.datetime(2024, 1, 1, 0, 0, 0, 1, tzinfo=dt.UTC))
-    assert first < second
-    assert len(first) == len(second) == 33
-    for char in first + second:
-        assert char in ALPHABET
+    first = generate_id57(timestamp=1_000_000, uuid=0)
+    second = generate_id57(timestamp=1_000_000, uuid=1)
+    third = generate_id57(timestamp=1_000_001, uuid=0)
+    assert first < second < third
+    assert len(first) == len(second) == len(third) == 33
+    assert all(char in ALPHABET for char in first + second + third)
 
 
 def test_base57_round_trip() -> None:
@@ -25,15 +25,13 @@ def test_base57_rejects_negative() -> None:
         base57_encode(-5)
 
 
-def test_generate_with_custom_parts() -> None:
-    parts = (
-        Id57Parts(lambda ts, _uuid_factory, _idx: 123, pad_to=5),
-        Id57Parts(lambda _ts, _uuid_factory, index: index + 7, pad_to=5),
-    )
-    custom = generate_id57(timestamp=dt.datetime(2024, 1, 1, tzinfo=dt.UTC), parts=parts)
-    assert len(custom) == 10
+def test_generate_id57_allows_uuid_inputs() -> None:
+    custom_uuid = uuid.UUID(int=987654321)
+    token = generate_id57(timestamp=0, uuid=custom_uuid)
+    assert decode57(token[:11]) == 0
+    assert decode57(token[11:]) == custom_uuid.int
 
 
-def test_generate_requires_parts() -> None:
-    with pytest.raises(ValueError):
-        generate_id57(parts=(part for part in ()))
+def test_rust_backend_is_loaded() -> None:
+    assert USING_RUST_BACKEND is True
+    assert generate_id57.__module__ == "id57._core"

@@ -58,6 +58,7 @@ dependencies = [
     { name = "brotli" },
     { name = "cedarpy" },
     { name = "granian" },
+    { name = "id57" },
     { name = "msgspec" },
     { name = "psqlpy" },
     { name = "rloop" },
@@ -81,6 +82,7 @@ requires-dist = [
     { name = "brotli", specifier = ">=1.1.0" },
     { name = "cedarpy", specifier = ">=4.1.0" },
     { name = "granian", specifier = ">=1.5.0" },
+    { name = "id57", specifier = ">=1.0.0" },
     { name = "msgspec", specifier = ">=0.18.6" },
     { name = "psqlpy", specifier = ">=0.11.0" },
     { name = "rloop", specifier = ">=0.2.0" },
@@ -431,6 +433,17 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/49/42/ecb762dbf7a1447a89b4884907d07fa505fd89f904c1e2d3bd4f30aeb9d1/granian-2.5.4-pp311-pypy311_pp73-musllinux_1_1_armv7l.whl", hash = "sha256:b78b8a6f30d0534b2db3f9cb99702d06be110b6e91f5639837a6f52f4891fc1d", size = 3172980, upload-time = "2025-09-18T11:51:59.428Z" },
     { url = "https://files.pythonhosted.org/packages/4c/2f/2abc969b206033d789c87d0ed7ee17a8831b0740e30590348abb544dba13/granian-2.5.4-pp311-pypy311_pp73-musllinux_1_1_x86_64.whl", hash = "sha256:10ae5ce26b1048888ac5aa3747415d8be8bbb014106b27ef0e77d23d2e00c51d", size = 3183479, upload-time = "2025-09-18T11:52:01.133Z" },
     { url = "https://files.pythonhosted.org/packages/2b/01/6fed17eab6232a19defdb42f5bd2fe51785e1de2e2086c78586ee1463898/granian-2.5.4-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:602fc22b2fde1c624cbc4ee64b0c8e547d394fbef70927ec7b0ca5e2d1ccea31", size = 2194686, upload-time = "2025-09-18T11:52:02.614Z" },
+]
+
+[[package]]
+name = "id57"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/99/56/20501da3ca6363321bc491e1f2bab2c1cb0957b470a26f42c7aac0671084/id57-1.0.0.tar.gz", hash = "sha256:b7e174f305a16b5b25d46a957e44f8b3ec5ef3e359448978e5ae94f851f7062d", size = 32334, upload-time = "2025-09-24T14:29:03.031Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/87/aa/e37c5c4bf5d68fb95ff019c44b7a8a8d6f1e09f9e63ea7e93895066d5c51/id57-1.0.0-cp39-abi3-macosx_11_0_arm64.whl", hash = "sha256:35ecb58df4f08134211369b8fa5db0579d06c9e95f7f9d94590bec117593cac9", size = 202301, upload-time = "2025-09-24T14:29:18.632Z" },
+    { url = "https://files.pythonhosted.org/packages/56/7a/fe7b07beb20afd2984f06e31823e8789ff23f3c5e8457621f5800a2c880d/id57-1.0.0-cp39-abi3-manylinux_2_34_x86_64.whl", hash = "sha256:392f9436e8d2432ac1e6ea5c59609c6a2675d47a2827a5fff18d77974c88700c", size = 239294, upload-time = "2025-09-24T14:29:01.644Z" },
+    { url = "https://files.pythonhosted.org/packages/8a/59/ed0593841b366d1a30789c6fa2454cbc91ff156bbb7524da3e6fbf748c85/id57-1.0.0-cp39-abi3-win_amd64.whl", hash = "sha256:24644043f0e7f169a3f4d9ba81b45165b8c68e8e37b773023afa2aafa716353d", size = 138330, upload-time = "2025-09-24T14:30:44.635Z" },
 ]
 
 [[package]]
