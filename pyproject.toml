@@ -16,6 +16,7 @@ dependencies = [
     "brotli>=1.1.0",
     "zstandard>=0.22.0",
     "cedarpy>=4.1.0",
+    "id57>=1.0.0",
 ]
 
 [project.scripts]
