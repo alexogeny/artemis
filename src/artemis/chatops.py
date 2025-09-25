@@ -221,7 +221,29 @@ async def _default_transport(
     def _send() -> None:
         try:
             context = ssl.create_default_context()
-            with urllib.request.urlopen(request, timeout=config.timeout, context=context) as response:
+            base_host = _webhook_host(config.webhook_url)
+            allowed_redirect_hosts = {value.lower() for value in config.allowed_hosts}
+            if base_host:
+                allowed_redirect_hosts.add(base_host.lower())
+
+            class _RedirectValidator(urllib.request.HTTPRedirectHandler):
+                def redirect_request(self, req, fp, code, msg, headers, newurl):  # type: ignore[override]
+                    parsed = urlparse(newurl)
+                    scheme = (parsed.scheme or "").lower()
+                    if scheme != "https":
+                        raise ChatOpsError("Slack webhook redirected to a non-HTTPS endpoint")
+                    host = (parsed.hostname or "").lower()
+                    if not host:
+                        raise ChatOpsError("Slack webhook redirect missing destination host")
+                    if allowed_redirect_hosts and host not in allowed_redirect_hosts:
+                        raise ChatOpsError(f"Slack webhook redirect to disallowed host '{host}'")
+                    raise ChatOpsError(
+                        f"Slack webhook redirect to '{host}' is not supported",
+                    )
+
+            https_handler = urllib.request.HTTPSHandler(context=context)
+            opener = urllib.request.build_opener(_RedirectValidator(), https_handler)
+            with opener.open(request, timeout=config.timeout) as response:
                 _ensure_tls_destination(response, config)
                 if config.certificate_pins:
                     _validate_certificate_pin(response, config.certificate_pins)
@@ -250,6 +272,10 @@ def _ensure_tls_destination(response: Any, config: SlackWebhookConfig) -> None:
     if not host:
         raise ChatOpsError("Slack webhook response missing destination host")
     allowed = {value.lower() for value in config.allowed_hosts}
+    if not allowed:
+        base_host = _webhook_host(config.webhook_url)
+        if base_host:
+            allowed.add(base_host.lower())
     if allowed and host not in allowed:
         raise ChatOpsError(f"Slack webhook resolved to disallowed host '{host}'")
 

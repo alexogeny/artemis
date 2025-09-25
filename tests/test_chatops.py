@@ -605,11 +605,15 @@ async def test_default_transport(monkeypatch: pytest.MonkeyPatch) -> None:
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float, context: Any | None = None) -> DummyResponse:
-        captured.append((request.full_url, timeout, dict(request.headers)))
-        return DummyResponse(status=202, url=request.full_url)
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                captured.append((request.full_url, timeout, dict(request.headers)))
+                return DummyResponse(status=202, url=request.full_url)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(
         webhook_url="https://hooks.slack.com/services/default",
@@ -648,6 +652,20 @@ def test_ensure_tls_destination_requires_host() -> None:
         _ensure_tls_destination(DummyResponse(), config)
 
 
+def test_ensure_tls_destination_rejects_disallowed_host() -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https://malicious.example.com/hook"
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        _ensure_tls_destination(DummyResponse(), config)
+
+
 @pytest.mark.asyncio
 async def test_default_transport_error_status(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyResponse:
@@ -667,10 +685,14 @@ async def test_default_transport_error_status(monkeypatch: pytest.MonkeyPatch) -
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float, context: Any | None = None) -> DummyResponse:
-        return DummyResponse(status=503, url=request.full_url)
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse(status=503, url=request.full_url)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default", timeout=1.0)
 
@@ -698,10 +720,151 @@ async def test_default_transport_rejects_redirect_host(monkeypatch: pytest.Monke
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float, context: Any | None = None) -> DummyResponse:
-        return DummyResponse(url="https://malicious.example.com/hook")
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "https://malicious.example.com/hook",
+                )
+                return DummyResponse(url="https://malicious.example.com/hook")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_handles_missing_base_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.status = 200
+            self._url = "https://hooks.slack.com/services/default"
+            self.fp = types.SimpleNamespace(raw=types.SimpleNamespace(_sslobj=types.SimpleNamespace(getpeercert=lambda binary_form=True: b"")))
+
+        def getcode(self) -> int:
+            return self.status
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse()
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+    monkeypatch.setattr("artemis.chatops._webhook_host", lambda url: None)
+
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
+
+    await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_redirect_even_if_host_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> Any:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "https://hooks.slack.com/services/redirect",
+                )
+                pytest.fail("redirect_request should have raised")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_insecure_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> Any:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "http://malicious.example.com/hook",
+                )
+                pytest.fail("redirect_request should have raised")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_redirect_without_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> Any:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "https:///missing",
+                )
+                pytest.fail("redirect_request should have raised")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(
         webhook_url="https://hooks.slack.com/services/default",
@@ -739,10 +902,14 @@ async def test_default_transport_validates_certificate_pin(monkeypatch: pytest.M
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float, context: Any | None = None) -> DummyResponse:
-        return DummyResponse()
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(
         webhook_url="https://hooks.slack.com/services/default",
@@ -776,10 +943,14 @@ async def test_default_transport_rejects_bad_certificate_pin(monkeypatch: pytest
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float, context: Any | None = None) -> DummyResponse:
-        return DummyResponse()
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse()
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(
         webhook_url="https://hooks.slack.com/services/default",
@@ -797,3 +968,25 @@ def test_validate_certificate_pin_requires_ssl_object() -> None:
 
     with pytest.raises(ChatOpsError):
         _validate_certificate_pin(DummyResponse(), ("deadbeef",))
+
+
+def test_ensure_tls_destination_allows_base_host_without_explicit_allowlist() -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https://hooks.slack.com/services/default"
+
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
+
+    _ensure_tls_destination(DummyResponse(), config)
+
+
+def test_ensure_tls_destination_allows_missing_base_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https://hooks.slack.com/services/default"
+
+    monkeypatch.setattr("artemis.chatops._webhook_host", lambda url: None)
+
+    config = SlackWebhookConfig(webhook_url="https:///missing")
+
+    _ensure_tls_destination(DummyResponse(), config)
