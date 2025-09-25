@@ -1,18 +1,40 @@
 from __future__ import annotations
 
+import datetime as dt
 import json
 import types
+from collections import defaultdict
 from pathlib import Path
-from typing import Mapping, Sequence, cast
+from types import SimpleNamespace
+from typing import Iterable, Mapping, Sequence, cast
 
+import msgspec
 import pytest
 
 import artemis.quickstart as quickstart
 from artemis import AppConfig, ArtemisApp, PasskeyManager, SessionLevel, TestClient
+from artemis.chatops import (
+    ChatMessage,
+    ChatOpsCommandBinding,
+    ChatOpsCommandContext,
+    ChatOpsCommandRegistry,
+    ChatOpsCommandResolutionError,
+    ChatOpsConfig,
+    ChatOpsError,
+    ChatOpsService,
+    ChatOpsSlashCommand,
+    SlackWebhookConfig,
+)
 from artemis.database import Database, DatabaseConfig, PoolConfig
 from artemis.exceptions import HTTPError
 from artemis.http import Status
 from artemis.migrations import MigrationRunner
+from artemis.models import (
+    BillingRecord,
+    BillingStatus,
+    SupportTicketKind,
+    SupportTicketStatus,
+)
 from artemis.orm import ORM
 from artemis.quickstart import (
     DEFAULT_QUICKSTART_AUTH,
@@ -20,25 +42,37 @@ from artemis.quickstart import (
     MfaAttempt,
     PasskeyAttempt,
     PasswordAttempt,
+    QuickstartAdminControlPlane,
     QuickstartAdminRealm,
     QuickstartAdminUserRecord,
     QuickstartAuthConfig,
     QuickstartAuthEngine,
+    QuickstartChatOpsControlPlane,
+    QuickstartChatOpsSettings,
     QuickstartPasskey,
     QuickstartPasskeyRecord,
     QuickstartRepository,
     QuickstartSeeder,
     QuickstartSeedStateRecord,
+    QuickstartSlashCommand,
+    QuickstartSlashCommandInvocation,
     QuickstartSsoProvider,
+    QuickstartSupportTicketRecord,
+    QuickstartSupportTicketRequest,
+    QuickstartSupportTicketUpdateRequest,
     QuickstartTenant,
     QuickstartTenantRecord,
+    QuickstartTenantSupportTicketRecord,
     QuickstartTenantUserRecord,
+    QuickstartTrialExtensionRecord,
     QuickstartUser,
     attach_quickstart,
     ensure_tenant_schemas,
     load_quickstart_auth_from_env,
     quickstart_migrations,
 )
+from artemis.requests import Request
+from artemis.responses import JSONResponse
 from artemis.tenancy import TenantContext, TenantScope
 from tests.support import FakeConnection, FakePool
 
@@ -338,6 +372,1433 @@ async def test_quickstart_migrations_create_tables() -> None:
     statements = [sql for kind, sql, *_ in connection.calls if kind == "execute"]
     assert any("CREATE TABLE" in sql and "quickstart_tenants" in sql for sql in statements)
     assert any("CREATE TABLE" in sql and "quickstart_users" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "\"billing\"" in sql for sql in statements)
+    assert any(
+        "CREATE TABLE" in sql and "quickstart_trial_extensions" in sql
+        for sql in statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme", "beta"),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    async def _noop_apply(
+        self: quickstart.QuickstartSeeder,
+        config: QuickstartAuthConfig,
+        *,
+        tenants: Mapping[str, TenantContext],
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
+
+    async def _noop_run_all(
+        self: quickstart.MigrationRunner,
+        *,
+        tenants: Sequence[TenantContext],
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
+
+    empty_auth = QuickstartAuthConfig(tenants=(), admin=QuickstartAdminRealm(users=()))
+    attach_quickstart(app, auth_config=empty_auth)
+
+    orm = cast(ORM, app.orm)
+    cycle_start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    cycle_end = dt.datetime(2024, 2, 1, tzinfo=dt.timezone.utc)
+    seeded_record = BillingRecord(
+        customer_id="cust_acme",
+        plan_code="pro",
+        status=BillingStatus.ACTIVE,
+        amount_due_cents=5000,
+        currency="USD",
+        cycle_start=cycle_start,
+        cycle_end=cycle_end,
+    )
+    connection.queue_result([msgspec.to_builtins(seeded_record)])
+    await orm.admin.billing.create(seeded_record)
+
+    async with TestClient(app) as client:
+        connection.queue_result([msgspec.to_builtins(seeded_record)])
+        admin_response = await client.get(
+            "/__artemis/admin/billing",
+            tenant=app.config.admin_subdomain,
+        )
+        assert admin_response.status == Status.OK
+        admin_payload = json.loads(admin_response.body.decode())
+        assert admin_payload[0]["customer_id"] == "cust_acme"
+
+        tenant_response = await client.get(
+            "/__artemis/admin/billing",
+            tenant="acme",
+        )
+        assert tenant_response.status == Status.FORBIDDEN
+
+        new_cycle_start = dt.datetime(2024, 3, 1, tzinfo=dt.timezone.utc)
+        new_cycle_end = dt.datetime(2024, 4, 1, tzinfo=dt.timezone.utc)
+        created_record = BillingRecord(
+            id="billing_gamma",
+            customer_id="cust_gamma",
+            plan_code="starter",
+            status=BillingStatus.PAST_DUE,
+            amount_due_cents=1200,
+            currency="USD",
+            cycle_start=new_cycle_start,
+            cycle_end=new_cycle_end,
+            created_at=new_cycle_start,
+            updated_at=new_cycle_start,
+            metadata={"notes": "manual"},
+        )
+        connection.queue_result([msgspec.to_builtins(created_record)])
+        create_response = await client.post(
+            "/__artemis/admin/billing",
+            tenant=app.config.admin_subdomain,
+            json={
+                "customer_id": "cust_gamma",
+                "plan_code": "starter",
+                "status": BillingStatus.PAST_DUE.value,
+                "amount_due_cents": 1200,
+                "currency": "USD",
+                "cycle_start": new_cycle_start.isoformat(),
+                "cycle_end": new_cycle_end.isoformat(),
+                "metadata": {"notes": "manual"},
+            },
+        )
+        assert create_response.status == 201
+        created_payload = json.loads(create_response.body.decode())
+        assert created_payload["id"] == created_record.id
+        assert created_payload["metadata"]["notes"] == "manual"
+
+        denied_create = await client.post(
+            "/__artemis/admin/billing",
+            tenant="acme",
+            json={
+                "customer_id": "cust_blocked",
+                "plan_code": "basic",
+                "status": BillingStatus.ACTIVE.value,
+                "amount_due_cents": 1000,
+                "currency": "USD",
+                "cycle_start": new_cycle_start.isoformat(),
+                "cycle_end": new_cycle_end.isoformat(),
+            },
+        )
+        assert denied_create.status == Status.FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme", "beta"),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    async def _noop_apply(
+        self: quickstart.QuickstartSeeder,
+        config: QuickstartAuthConfig,
+        *,
+        tenants: Mapping[str, TenantContext],
+    ) -> bool:
+        return False
+
+    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
+
+    async def _noop_run_all(
+        self: quickstart.MigrationRunner,
+        *,
+        tenants: Sequence[TenantContext],
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
+
+    empty_auth = QuickstartAuthConfig(tenants=(), admin=QuickstartAdminRealm(users=()))
+    attach_quickstart(app, auth_config=empty_auth)
+
+    orm = cast(ORM, app.orm)
+    acme_record = QuickstartTenantRecord(slug="acme", name="Acme Rockets")
+    connection.queue_result([msgspec.to_builtins(acme_record)])
+    await orm.admin.quickstart_tenants.create(acme_record)
+    beta_record = QuickstartTenantRecord(slug="beta", name="Beta Industries")
+    connection.queue_result([msgspec.to_builtins(beta_record)])
+    await orm.admin.quickstart_tenants.create(beta_record)
+
+    async with TestClient(app) as client:
+        connection.queue_result([
+            msgspec.to_builtins(acme_record),
+            msgspec.to_builtins(beta_record),
+        ])
+        admin_response = await client.get(
+            "/__artemis/tenants",
+            tenant=app.config.admin_subdomain,
+        )
+        assert admin_response.status == Status.OK
+        admin_payload = json.loads(admin_response.body.decode())
+        assert {item["slug"] for item in admin_payload} == {"acme", "beta"}
+
+        connection.queue_result([msgspec.to_builtins(acme_record)])
+        acme_response = await client.get("/__artemis/tenants", tenant="acme")
+        assert acme_response.status == Status.OK
+        acme_payload = json.loads(acme_response.body.decode())
+        assert acme_payload[0]["name"] == "Acme Rockets"
+
+        connection.queue_result([msgspec.to_builtins(beta_record)])
+        beta_response = await client.get("/__artemis/tenants", tenant="beta")
+        assert beta_response.status == Status.OK
+        beta_payload = json.loads(beta_response.body.decode())
+        assert beta_payload[0]["slug"] == "beta"
+
+        gamma_created = QuickstartTenantRecord(
+            id="tenant_gamma",
+            slug="gamma",
+            name="Gamma Co",
+            created_at=dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc),
+            updated_at=dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc),
+        )
+        async def _stub_create(
+            data: Mapping[str, object] | QuickstartTenantRecord,
+            *,
+            tenant: TenantContext | None = None,
+        ) -> QuickstartTenantRecord:
+            return gamma_created
+
+        monkeypatch.setattr(orm.admin.quickstart_tenants, "create", _stub_create)
+
+        connection.queue_result([])
+        create_response = await client.post(
+            "/__artemis/tenants",
+            tenant=app.config.admin_subdomain,
+            json={"slug": "gamma", "name": "Gamma Co"},
+        )
+        assert create_response.status == 201
+        created_payload = json.loads(create_response.body.decode())
+        assert created_payload["slug"] == "gamma"
+        assert "gamma" in app.tenant_resolver.allowed_tenants
+
+        connection.queue_result([msgspec.to_builtins(gamma_created)])
+        gamma_response = await client.get("/__artemis/tenants", tenant="gamma")
+        assert gamma_response.status == Status.OK
+        gamma_payload = json.loads(gamma_response.body.decode())
+        assert gamma_payload[0]["slug"] == "gamma"
+
+        ping_response = await client.get("/__artemis/ping", tenant="gamma")
+        assert ping_response.status == Status.OK
+
+        scope_request = Request(
+            method="GET",
+            path="/__artemis/tenants",
+            tenant=TenantContext(
+                tenant=app.config.admin_subdomain,
+                site=app.config.site,
+                domain=app.config.domain,
+                scope=TenantScope.ADMIN,
+            ),
+        )
+        scope = app.dependencies.scope(scope_request)
+        engine = await scope.get(QuickstartAuthEngine)
+        assert any(tenant.slug == "gamma" for tenant in engine.config.tenants)
+
+        denied_response = await client.post(
+            "/__artemis/tenants",
+            tenant="acme",
+            json={"slug": "delta", "name": "Delta"},
+        )
+        assert denied_response.status == Status.FORBIDDEN
+
+        invalid_slug = await client.post(
+            "/__artemis/tenants",
+            tenant=app.config.admin_subdomain,
+            json={"slug": "!!bad!!", "name": "Broken"},
+        )
+        assert invalid_slug.status == Status.BAD_REQUEST
+        invalid_slug_payload = json.loads(invalid_slug.body.decode())
+        assert invalid_slug_payload["error"]["detail"]["detail"] == "invalid_slug"
+
+        invalid_name = await client.post(
+            "/__artemis/tenants",
+            tenant=app.config.admin_subdomain,
+            json={"slug": "delta", "name": "   "},
+        )
+        assert invalid_name.status == Status.BAD_REQUEST
+        invalid_name_payload = json.loads(invalid_name.body.decode())
+        assert invalid_name_payload["error"]["detail"]["detail"] == "invalid_name"
+
+        reserved_slug = await client.post(
+            "/__artemis/tenants",
+            tenant=app.config.admin_subdomain,
+            json={"slug": app.config.admin_subdomain, "name": "Admin"},
+        )
+        assert reserved_slug.status == 409
+        reserved_payload = json.loads(reserved_slug.body.decode())
+        assert reserved_payload["error"]["detail"]["detail"] == "slug_reserved"
+
+        connection.queue_result([msgspec.to_builtins(gamma_created)])
+        duplicate = await client.post(
+            "/__artemis/tenants",
+            tenant=app.config.admin_subdomain,
+            json={"slug": "gamma", "name": "Gamma Again"},
+        )
+        assert duplicate.status == 409
+        duplicate_payload = json.loads(duplicate.body.decode())
+        assert duplicate_payload["error"]["detail"]["detail"] == "tenant_exists"
+
+
+@pytest.mark.asyncio
+async def test_quickstart_chatops_configuration_and_slash_commands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme", "beta"),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    class RecordingChatOpsService(ChatOpsService):
+        def __init__(
+            self,
+            config: ChatOpsConfig,
+            *,
+            transport: object | None = None,
+            observability: object | None = None,
+        ) -> None:
+            super().__init__(config)
+            self.sent: list[tuple[TenantContext, ChatMessage]] = []
+            self.fail_on_events: set[str] = set()
+
+        async def send(self, tenant: TenantContext, message: ChatMessage) -> None:
+            event_name = message.extra.get("event")
+            if isinstance(event_name, str) and event_name in self.fail_on_events:
+                raise ChatOpsError("forced")
+            self.sent.append((tenant, message))
+
+    async def _noop_apply(
+        self: quickstart.QuickstartSeeder,
+        config: QuickstartAuthConfig,
+        *,
+        tenants: Mapping[str, TenantContext],
+    ) -> bool:
+        return False
+
+    async def _noop_run_all(
+        self: quickstart.MigrationRunner,
+        *,
+        tenants: Sequence[TenantContext],
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
+    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
+    monkeypatch.setattr(quickstart, "ChatOpsService", RecordingChatOpsService)
+
+    attach_quickstart(app)
+    orm = cast(ORM, app.orm)
+
+    created_tenants: dict[str, QuickstartTenantRecord] = {}
+
+    async def _stub_get(
+        *,
+        filters: Mapping[str, object] | None = None,
+        tenant: TenantContext | None = None,
+    ) -> QuickstartTenantRecord | None:
+        slug = cast(str | None, (filters or {}).get("slug"))
+        if slug is None:
+            return None
+        return created_tenants.get(slug)
+
+    async def _stub_create(
+        data: Mapping[str, object] | QuickstartTenantRecord,
+        *,
+        tenant: TenantContext | None = None,
+    ) -> QuickstartTenantRecord:
+        if isinstance(data, Mapping):
+            record = QuickstartTenantRecord(
+                slug=cast(str, data["slug"]),
+                name=cast(str, data["name"]),
+            )
+        else:
+            record = data
+        created_tenants[record.slug] = record
+        return record
+
+    monkeypatch.setattr(orm.admin.quickstart_tenants, "get", _stub_get)
+    monkeypatch.setattr(orm.admin.quickstart_tenants, "create", _stub_create)
+
+    recorded_extensions: list[quickstart.QuickstartTrialExtensionRecord] = []
+
+    async def _stub_extension_create(
+        record: quickstart.QuickstartTrialExtensionRecord,
+        *,
+        tenant: TenantContext | None = None,
+    ) -> quickstart.QuickstartTrialExtensionRecord:
+        recorded_extensions.append(record)
+        return record
+
+    monkeypatch.setattr(
+        orm.admin.quickstart_trial_extensions,
+        "create",
+        _stub_extension_create,
+    )
+
+    admin_support_tickets: dict[str, quickstart.QuickstartSupportTicketRecord] = {}
+    tenant_support_tickets: defaultdict[
+        str, dict[str, quickstart.QuickstartTenantSupportTicketRecord]
+    ] = defaultdict(dict)
+
+    async def _admin_support_create(
+        record: quickstart.QuickstartSupportTicketRecord,
+        *,
+        tenant: TenantContext | None = None,
+    ) -> quickstart.QuickstartSupportTicketRecord:
+        admin_support_tickets[record.id] = record
+        return record
+
+    async def _admin_support_get(
+        *,
+        filters: Mapping[str, object] | None = None,
+        tenant: TenantContext | None = None,
+    ) -> quickstart.QuickstartSupportTicketRecord | None:
+        if not filters:
+            return None
+        ticket_id = cast(str | None, filters.get("id"))
+        if ticket_id is None:
+            return None
+        return admin_support_tickets.get(ticket_id)
+
+    async def _admin_support_list(
+        *,
+        order_by: Sequence[str] | tuple[str, ...] = (),
+        tenant: TenantContext | None = None,
+    ) -> list[quickstart.QuickstartSupportTicketRecord]:
+        tickets = list(admin_support_tickets.values())
+        if order_by:
+            field_spec = order_by[0]
+            field, _, direction = field_spec.partition(" ")
+            reverse = direction.lower() == "desc"
+            tickets.sort(key=lambda item: getattr(item, field), reverse=reverse)
+        return tickets
+
+    async def _admin_support_update(
+        *,
+        filters: Mapping[str, object] | None = None,
+        values: Mapping[str, object],
+        tenant: TenantContext | None = None,
+    ) -> quickstart.QuickstartSupportTicketRecord:
+        ticket_id = cast(str, (filters or {}).get("id"))
+        existing = admin_support_tickets[ticket_id]
+        data = msgspec.to_builtins(existing)
+        data.update(values)
+        updated = msgspec.convert(data, type=quickstart.QuickstartSupportTicketRecord)
+        admin_support_tickets[ticket_id] = updated
+        return updated
+
+    async def _tenant_support_create(
+        record: quickstart.QuickstartTenantSupportTicketRecord | None = None,
+        *,
+        tenant: TenantContext,
+        model: quickstart.QuickstartTenantSupportTicketRecord | None = None,
+    ) -> quickstart.QuickstartTenantSupportTicketRecord:
+        entry = model or record
+        assert entry is not None
+        tenant_support_tickets[tenant.tenant][entry.admin_ticket_id] = entry
+        return entry
+
+    async def _tenant_support_get(
+        *,
+        filters: Mapping[str, object] | None = None,
+        tenant: TenantContext,
+    ) -> quickstart.QuickstartTenantSupportTicketRecord | None:
+        if not filters:
+            return None
+        ticket_id = cast(str | None, filters.get("admin_ticket_id"))
+        if ticket_id is None:
+            return None
+        return tenant_support_tickets[tenant.tenant].get(ticket_id)
+
+    async def _tenant_support_list(
+        *,
+        tenant: TenantContext,
+        order_by: Sequence[str] | tuple[str, ...] = (),
+    ) -> list[quickstart.QuickstartTenantSupportTicketRecord]:
+        tickets = list(tenant_support_tickets[tenant.tenant].values())
+        if order_by:
+            field_spec = order_by[0]
+            field, _, direction = field_spec.partition(" ")
+            reverse = direction.lower() == "desc"
+            tickets.sort(key=lambda item: getattr(item, field), reverse=reverse)
+        return tickets
+
+    async def _tenant_support_update(
+        *,
+        filters: Mapping[str, object] | None = None,
+        values: Mapping[str, object],
+        tenant: TenantContext,
+    ) -> quickstart.QuickstartTenantSupportTicketRecord:
+        ticket_id = cast(str, (filters or {}).get("admin_ticket_id"))
+        existing = tenant_support_tickets[tenant.tenant][ticket_id]
+        data = msgspec.to_builtins(existing)
+        data.update(values)
+        updated = msgspec.convert(
+            data,
+            type=quickstart.QuickstartTenantSupportTicketRecord,
+        )
+        tenant_support_tickets[tenant.tenant][ticket_id] = updated
+        return updated
+
+    monkeypatch.setattr(orm.admin.support_tickets, "create", _admin_support_create)
+    monkeypatch.setattr(orm.admin.support_tickets, "get", _admin_support_get)
+    monkeypatch.setattr(orm.admin.support_tickets, "list", _admin_support_list)
+    monkeypatch.setattr(orm.admin.support_tickets, "update", _admin_support_update)
+    monkeypatch.setattr(
+        orm.tenants.support_tickets,
+        "create",
+        _tenant_support_create,
+    )
+    monkeypatch.setattr(
+        orm.tenants.support_tickets,
+        "get",
+        _tenant_support_get,
+    )
+    monkeypatch.setattr(
+        orm.tenants.support_tickets,
+        "list",
+        _tenant_support_list,
+    )
+    monkeypatch.setattr(
+        orm.tenants.support_tickets,
+        "update",
+        _tenant_support_update,
+    )
+
+    async with TestClient(app) as client:
+        admin = app.config.admin_subdomain
+        settings_response = await client.get("/__artemis/admin/chatops", tenant=admin)
+        assert settings_response.status == Status.OK
+        settings_payload = json.loads(settings_response.body.decode())
+        assert settings_payload["enabled"] is False
+        assert settings_payload["slash_commands"] == []
+
+        update_response = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                "enabled": True,
+                "webhook": {
+                    "webhook_url": "https://hooks.slack.com/services/demo",
+                    "default_channel": "#alerts",
+                    "username": "Artemis",
+                },
+                "notifications": {
+                    "tenant_created": "#tenants",
+                    "billing_updated": "#billing",
+                    "subscription_past_due": "#alerts",
+                },
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert update_response.status == Status.OK
+        updated_payload = json.loads(update_response.body.decode())
+        assert updated_payload["enabled"] is True
+        assert updated_payload["notifications"]["tenant_created"] == "#tenants"
+        assert any(
+            command["action"] == "create_tenant"
+            for command in updated_payload["slash_commands"]
+        )
+        assert all(command["visibility"] == "admin" for command in updated_payload["slash_commands"])
+        assert {command["name"] for command in updated_payload["slash_commands"]} == {
+            "create-tenant",
+            "extend-trial",
+            "tenant-metrics",
+            "system-diagnostics",
+            "ticket-update",
+        }
+        commands_payload = updated_payload["slash_commands"]
+        base_update = {
+            "enabled": True,
+            "webhook": updated_payload["webhook"],
+            "notifications": updated_payload["notifications"],
+        }
+        initial_commands = list(commands_payload)
+
+        chatops_service = cast(RecordingChatOpsService, app.chatops)
+        chatops_service.fail_on_events.add("subscription_past_due")
+
+        create_response = await client.post(
+            "/__artemis/tenants",
+            tenant=admin,
+            json={"slug": "gamma", "name": "Gamma Org"},
+        )
+        assert create_response.status == 201
+        tenant_payload = json.loads(create_response.body.decode())
+        assert tenant_payload["slug"] == "gamma"
+        assert len(chatops_service.sent) == 1
+        tenant_message = chatops_service.sent[0][1]
+        assert tenant_message.channel == "#tenants"
+        assert "gamma" in tenant_message.text.lower()
+
+        past_due_start = dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc)
+        past_due_end = dt.datetime(2024, 6, 1, tzinfo=dt.timezone.utc)
+        created_record = BillingRecord(
+            id="billing_gamma",
+            customer_id="cust_gamma",
+            plan_code="starter",
+            status=BillingStatus.PAST_DUE,
+            amount_due_cents=1200,
+            currency="USD",
+            cycle_start=past_due_start,
+            cycle_end=past_due_end,
+            created_at=past_due_start,
+            updated_at=past_due_start,
+        )
+        connection.queue_result([msgspec.to_builtins(created_record)])
+        billing_response = await client.post(
+            "/__artemis/admin/billing",
+            tenant=admin,
+            json={
+                "customer_id": created_record.customer_id,
+                "plan_code": created_record.plan_code,
+                "status": created_record.status.value,
+                "amount_due_cents": created_record.amount_due_cents,
+                "currency": created_record.currency,
+                "cycle_start": past_due_start.isoformat(),
+                "cycle_end": past_due_end.isoformat(),
+            },
+        )
+        assert billing_response.status == 201
+        assert len(chatops_service.sent) == 2
+        billing_message = chatops_service.sent[1][1]
+        assert billing_message.channel == "#billing"
+        assert created_record.customer_id in billing_message.text
+        assert not any(
+            message.extra.get("event") == "subscription_past_due"
+            for _, message in chatops_service.sent
+        )
+
+        active_record = BillingRecord(
+            id="billing_active",
+            customer_id="cust_active",
+            plan_code="starter",
+            status=BillingStatus.ACTIVE,
+            amount_due_cents=5000,
+            currency="USD",
+            cycle_start=past_due_end,
+            cycle_end=past_due_end + dt.timedelta(days=30),
+            created_at=past_due_end,
+            updated_at=past_due_end,
+        )
+        connection.queue_result([msgspec.to_builtins(active_record)])
+        active_response = await client.post(
+            "/__artemis/admin/billing",
+            tenant=admin,
+            json={
+                "customer_id": active_record.customer_id,
+                "plan_code": active_record.plan_code,
+                "status": active_record.status.value,
+                "amount_due_cents": active_record.amount_due_cents,
+                "currency": active_record.currency,
+                "cycle_start": active_record.cycle_start.isoformat(),
+                "cycle_end": active_record.cycle_end.isoformat(),
+            },
+        )
+        assert active_response.status == 201
+        assert chatops_service.sent[-1][1].extra["event"] == "billing_updated"
+
+        slash_create = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> create-tenant slug=omega note=demo extra-token name=Omega",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert slash_create.status == Status.OK
+        slash_payload = json.loads(slash_create.body.decode())
+        assert slash_payload["tenant"]["slug"] == "omega"
+        assert "omega" in created_tenants
+        assert len(chatops_service.sent) == 4
+        slash_message = chatops_service.sent[3][1]
+        assert slash_message.channel == "#tenants"
+        assert "omega" in slash_message.text.lower()
+
+        legacy_slash = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "command": "/quickstart-create-tenant",
+                "text": "slug=sigma name=Sigma",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert legacy_slash.status == Status.OK
+        legacy_payload = json.loads(legacy_slash.body.decode())
+        assert legacy_payload["tenant"]["slug"] == "sigma"
+        assert "sigma" in created_tenants
+        assert len(chatops_service.sent) == 5
+        sigma_message = chatops_service.sent[4][1]
+        assert "sigma" in sigma_message.text.lower()
+
+        extend_trial = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> extend-trial tenant=gamma days=14 note=demo",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert extend_trial.status == Status.OK
+        extend_payload = json.loads(extend_trial.body.decode())
+        assert extend_payload["extension"]["tenant_slug"] == "gamma"
+        assert recorded_extensions[-1].tenant_slug == "gamma"
+        assert recorded_extensions[-1].extended_days == 14
+        assert len(chatops_service.sent) == 6
+        extension_message = chatops_service.sent[5][1]
+        assert extension_message.channel is None
+        assert "extended" in extension_message.text.lower()
+        assert chatops_service.sent[-1][0].scope is TenantScope.ADMIN
+
+        support_create = await client.post(
+            "/__artemis/support/tickets",
+            tenant="acme",
+            json={
+                "subject": "Login issue",
+                "message": "Cannot access dashboard",
+                "kind": "issue",
+            },
+        )
+        assert support_create.status == Status.CREATED
+        ticket_payload = json.loads(support_create.body.decode())
+        ticket_id = ticket_payload["id"]
+        assert ticket_payload.get("status", "open") == "open"
+        assert len(chatops_service.sent) == 7
+        created_ticket_message = chatops_service.sent[6][1]
+        assert created_ticket_message.extra["ticket_id"] == ticket_id
+        assert created_ticket_message.extra["tenant"] == "acme"
+
+        admin_support_empty = await client.get(
+            "/__artemis/support/tickets",
+            tenant=admin,
+        )
+        assert admin_support_empty.status == Status.OK
+        assert json.loads(admin_support_empty.body.decode()) == []
+
+        admin_support_forbidden = await client.post(
+            "/__artemis/support/tickets",
+            tenant=admin,
+            json={
+                "subject": "Admin ticket",
+                "message": "Should fail",
+                "kind": "general",
+            },
+        )
+        assert admin_support_forbidden.status == Status.FORBIDDEN
+
+        tenant_ticket_list = await client.get(
+            "/__artemis/support/tickets",
+            tenant="acme",
+        )
+        assert tenant_ticket_list.status == Status.OK
+        tenant_ticket_payload = json.loads(tenant_ticket_list.body.decode())
+        assert tenant_ticket_payload[0]["admin_ticket_id"] == ticket_id
+
+        admin_ticket_list = await client.get(
+            "/__artemis/admin/support/tickets",
+            tenant=admin,
+        )
+        assert admin_ticket_list.status == Status.OK
+        admin_ticket_payload = json.loads(admin_ticket_list.body.decode())
+        assert admin_ticket_payload[0]["id"] == ticket_id
+
+        metrics_response = await client.get(
+            "/__artemis/admin/metrics",
+            tenant=admin,
+        )
+        assert metrics_response.status == Status.OK
+        metrics_payload = json.loads(metrics_response.body.decode())
+        assert metrics_payload["support_tickets"]["open"] == 1
+        assert metrics_payload["support_tickets"]["resolved"] == 0
+
+        diagnostics_response = await client.get(
+            "/__artemis/admin/diagnostics",
+            tenant=admin,
+        )
+        assert diagnostics_response.status == Status.OK
+        diagnostics_payload = json.loads(diagnostics_response.body.decode())
+        assert diagnostics_payload["support"]["open"] == 1
+
+        metrics_slash = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> tenant-metrics",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert metrics_slash.status == Status.OK
+        metrics_slash_payload = json.loads(metrics_slash.body.decode())
+        assert metrics_slash_payload["metrics"]["support_tickets"]["open"] == 1
+
+        diagnostics_slash = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> system-diagnostics",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert diagnostics_slash.status == Status.OK
+        diag_slash_payload = json.loads(diagnostics_slash.body.decode())
+        assert diag_slash_payload["diagnostics"]["support"]["open"] == 1
+
+        admin_ticket_update = await client.post(
+            f"/__artemis/admin/support/tickets/{ticket_id}",
+            tenant=admin,
+            json={"status": "responded", "note": "Acknowledged"},
+        )
+        assert admin_ticket_update.status == Status.OK
+        assert len(chatops_service.sent) == 8
+        responded_message = chatops_service.sent[7][1]
+        assert responded_message.extra["status"] == "responded"
+
+        ticket_update = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": f"<@U999> ticket-update ticket={ticket_id} status=resolved note=Fixed",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert ticket_update.status == Status.OK
+        ticket_update_payload = json.loads(ticket_update.body.decode())
+        assert ticket_update_payload["ticket"]["status"] == "resolved"
+        assert len(chatops_service.sent) == 9
+        resolved_message = chatops_service.sent[8][1]
+        assert resolved_message.extra["status"] == "resolved"
+
+        missing_ticket_args = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": f"<@U999> ticket-update ticket={ticket_id}",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert missing_ticket_args.status == Status.BAD_REQUEST
+
+        invalid_ticket_status = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": f"<@U999> ticket-update ticket={ticket_id} status=invalid",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert invalid_ticket_status.status == Status.BAD_REQUEST
+
+        metrics_after_update = await client.get(
+            "/__artemis/admin/metrics",
+            tenant=admin,
+        )
+        metrics_after_payload = json.loads(metrics_after_update.body.decode())
+        assert metrics_after_payload["support_tickets"]["open"] == 0
+        assert metrics_after_payload["support_tickets"]["resolved"] == 1
+
+        missing_webhook = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={"enabled": True},
+        )
+        assert missing_webhook.status == Status.BAD_REQUEST
+
+        unknown_command = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> unknown",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert unknown_command.status == Status.NOT_FOUND
+
+        invalid_mention = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U000> create-tenant slug=bad name=Bad",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert invalid_mention.status == Status.FORBIDDEN
+
+        at_mention_create = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "@U999 create-tenant slug=phi name=Phi",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert at_mention_create.status == Status.OK
+        at_payload = json.loads(at_mention_create.body.decode())
+        assert at_payload["tenant"]["slug"] == "phi"
+        assert "phi" in created_tenants
+
+        bare_token_create = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "U999 create-tenant slug=chi name=Chi",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert bare_token_create.status == Status.OK
+        bare_payload = json.loads(bare_token_create.body.decode())
+        assert bare_payload["tenant"]["slug"] == "chi"
+        assert "chi" in created_tenants
+
+        missing_command_token = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999>",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert missing_command_token.status == Status.BAD_REQUEST
+
+        empty_text = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert empty_text.status == Status.BAD_REQUEST
+
+        missing_create_args = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> create-tenant slug=delta",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert missing_create_args.status == Status.BAD_REQUEST
+
+        workspace_forbidden = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> create-tenant slug=theta name=Theta",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T999",
+            },
+        )
+        assert workspace_forbidden.status == Status.FORBIDDEN
+
+        missing_workspace = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> create-tenant slug=iota name=Iota",
+                "user_id": "U123",
+                "user_name": "demo",
+            },
+        )
+        assert missing_workspace.status == Status.FORBIDDEN
+
+        missing_extend_days = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> extend-trial tenant=gamma",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert missing_extend_days.status == Status.BAD_REQUEST
+
+        invalid_days = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> extend-trial tenant=gamma days=abc",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert invalid_days.status == Status.BAD_REQUEST
+
+        zero_days = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> extend-trial tenant=gamma days=0",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert zero_days.status == Status.BAD_REQUEST
+
+        invalid_slug = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> extend-trial tenant=!!bad!! days=10",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert invalid_slug.status == Status.BAD_REQUEST
+
+        missing_tenant = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> extend-trial tenant=unknown days=5",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert missing_tenant.status == Status.NOT_FOUND
+
+        disable_bot = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": commands_payload,
+                "bot_user_id": None,
+                "admin_workspace": "T123",
+            },
+        )
+        assert disable_bot.status == Status.OK
+        disabled_payload = json.loads(disable_bot.body.decode())
+        commands_payload = disabled_payload["slash_commands"]
+
+        no_bot = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "text": "<@U999> create-tenant slug=upsilon name=Upsilon",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert no_bot.status == Status.BAD_REQUEST
+
+        restore_bot = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": commands_payload,
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert restore_bot.status == Status.OK
+        restored_payload = json.loads(restore_bot.body.decode())
+        commands_payload = restored_payload["slash_commands"]
+
+        tenant_forbidden = await client.post(
+            "/__artemis/chatops/slash",
+            tenant="acme",
+            json={
+                "command": "/create-tenant",
+                "text": "slug=rho name=Rho",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert tenant_forbidden.status == Status.FORBIDDEN
+
+        public_commands = list(commands_payload)
+        public_commands.append(
+            {
+                "name": "demo-extend",
+                "action": "extend_trial",
+                "description": "Public trial extension",
+                "visibility": "public",
+            }
+        )
+        public_update = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": public_commands,
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert public_update.status == Status.OK
+        public_payload = json.loads(public_update.body.decode())
+        commands_payload = public_payload["slash_commands"]
+
+        chatops_service = cast(RecordingChatOpsService, app.chatops)
+        chatops_service.config = ChatOpsConfig(enabled=False)
+        unconfigured_public = await client.post(
+            "/__artemis/chatops/slash",
+            tenant="acme",
+            json={
+                "text": "<@U999> demo-extend",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert unconfigured_public.status == Status.FORBIDDEN
+        unconfigured_payload = json.loads(unconfigured_public.body.decode())
+        assert unconfigured_payload["error"]["detail"]["detail"] == "chatops_unconfigured"
+        chatops_service.config = ChatOpsConfig(
+            enabled=True,
+            default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
+        )
+
+        configured_public = await client.post(
+            "/__artemis/chatops/slash",
+            tenant="acme",
+            json={
+                "text": "<@U999> demo-extend tenant=gamma days=2",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert configured_public.status == Status.OK
+        configured_payload = json.loads(configured_public.body.decode())
+        assert configured_payload["action"] == "extend_trial"
+        assert recorded_extensions[-1].extended_days == 2
+
+        invalid_command_update = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": [
+                    {
+                        "name": "Invalid Name",
+                        "action": "create_tenant",
+                        "description": "Invalid",
+                        "visibility": "admin",
+                    }
+                ],
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert invalid_command_update.status == Status.BAD_REQUEST
+
+        duplicate_command_update = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": [commands_payload[0], commands_payload[0]],
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert duplicate_command_update.status == Status.BAD_REQUEST
+
+        invalid_alias_update = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": [
+                    {
+                        "name": "alias-test",
+                        "action": "create_tenant",
+                        "description": "Alias validation",
+                        "visibility": "admin",
+                        "aliases": ["Invalid Alias"],
+                    }
+                ],
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert invalid_alias_update.status == Status.BAD_REQUEST
+
+        duplicate_alias_update = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": [
+                    {
+                        "name": "alias-test",
+                        "action": "create_tenant",
+                        "description": "Alias duplicate",
+                        "visibility": "admin",
+                        "aliases": ["alias-test", "alias-test"],
+                    }
+                ],
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert duplicate_alias_update.status == Status.OK
+        alias_payload = json.loads(duplicate_alias_update.body.decode())
+        assert alias_payload["slash_commands"][0]["aliases"] == []
+        commands_payload = initial_commands
+
+        refresh_commands = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": commands_payload,
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert refresh_commands.status == Status.OK
+        commands_payload = json.loads(refresh_commands.body.decode())["slash_commands"]
+
+        create_binding = app.chatops_commands.binding_by_name("quickstart.chatops.create_tenant")
+
+        async def response_handler(context: ChatOpsCommandContext) -> JSONResponse:
+            return JSONResponse(
+                {
+                    "status": "ok",
+                    "action": "create_tenant",
+                    "tenant": {"slug": context.args.get("slug")},
+                }
+            )
+
+        app.chatops_commands.register(
+            ChatOpsCommandBinding(
+                command=create_binding.command,
+                handler=response_handler,
+                name=create_binding.name,
+            )
+        )
+
+        response_invocation = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "command": "/quickstart-create-tenant",
+                "text": "slug=psi name=Psi",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert response_invocation.status == Status.OK
+        response_payload = json.loads(response_invocation.body.decode())
+        assert response_payload["tenant"]["slug"] == "psi"
+
+
+@pytest.mark.asyncio
+async def test_quickstart_admin_support_ticket_update_branches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme",),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    settings = QuickstartChatOpsSettings(
+        enabled=True,
+        webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
+    )
+    chatops_control = QuickstartChatOpsControlPlane(
+        app,
+        settings,
+        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+    )
+
+    async def noop_send(self: ChatOpsService, tenant: TenantContext, message: ChatMessage) -> None:
+        return None
+
+    monkeypatch.setattr(ChatOpsService, "send", noop_send, raising=False)
+    chatops_control.configure(settings)
+
+    ticket = QuickstartSupportTicketRecord(
+        tenant_slug="acme",
+        kind=SupportTicketKind.ISSUE,
+        subject="Login",
+        message="Cannot login",
+    )
+    tenant_ticket = QuickstartTenantSupportTicketRecord(
+        admin_ticket_id=ticket.id,
+        kind=SupportTicketKind.ISSUE,
+        subject=ticket.subject,
+        message=ticket.message,
+    )
+
+    class AdminSupportStore:
+        def __init__(self) -> None:
+            self.records: dict[str, QuickstartSupportTicketRecord] = {ticket.id: ticket}
+
+        async def get(
+            self, *, filters: Mapping[str, object] | None = None, tenant: TenantContext | None = None
+        ) -> QuickstartSupportTicketRecord | None:
+            return self.records.get(cast(str, filters.get("id")))
+
+        async def update(
+            self,
+            *,
+            filters: Mapping[str, object],
+            values: Mapping[str, object],
+        ) -> QuickstartSupportTicketRecord:
+            current = self.records[cast(str, filters["id"])]
+            updated = msgspec.structs.replace(current, **values)
+            self.records[current.id] = updated
+            return updated
+
+    class TenantSupportStore:
+        def __init__(self) -> None:
+            self.records: dict[str, QuickstartTenantSupportTicketRecord] = {
+                tenant_ticket.admin_ticket_id: tenant_ticket
+            }
+
+        async def get(
+            self,
+            *,
+            tenant: TenantContext,
+            filters: Mapping[str, object],
+        ) -> QuickstartTenantSupportTicketRecord | None:
+            return self.records.get(cast(str, filters["admin_ticket_id"]))
+
+        async def update(
+            self,
+            *,
+            tenant: TenantContext,
+            filters: Mapping[str, object],
+            values: Mapping[str, object],
+        ) -> QuickstartTenantSupportTicketRecord:
+            current = self.records[cast(str, filters["admin_ticket_id"])]
+            updated = msgspec.structs.replace(current, **values)
+            self.records[current.admin_ticket_id] = updated
+            return updated
+
+    stub_orm = SimpleNamespace(
+        admin=SimpleNamespace(
+            support_tickets=AdminSupportStore(),
+        ),
+        tenants=SimpleNamespace(
+            support_tickets=TenantSupportStore(),
+        ),
+    )
+
+    async def ensure_contexts(slugs: Iterable[str]) -> None:
+        return None
+
+    admin_control = QuickstartAdminControlPlane(
+        app,
+        slug_normalizer=lambda raw: raw.strip().lower(),
+        slug_pattern=quickstart._TENANT_SLUG_PATTERN,
+        ensure_contexts=ensure_contexts,
+        chatops=chatops_control,
+        sync_allowed_tenants=lambda config: None,
+    )
+
+    update_payload = QuickstartSupportTicketUpdateRequest(status="responded", note=" Investigating ")
+    updated = await admin_control.update_support_ticket(
+        ticket.id,
+        update_payload,
+        orm=stub_orm,
+        actor="agent",
+    )
+
+    assert updated.status == SupportTicketStatus.RESPONDED
+    assert updated.updates[-1].note == "Investigating"
+    tenant_updated = stub_orm.tenants.support_tickets.records[ticket.id]
+    assert tenant_updated.status == SupportTicketStatus.RESPONDED
+    assert tenant_updated.updates[-1].note == "Investigating"
+
+    no_note_payload = QuickstartSupportTicketUpdateRequest(status="responded", note=None)
+    updated_no_note = await admin_control.update_support_ticket(
+        ticket.id,
+        no_note_payload,
+        orm=stub_orm,
+        actor="agent",
+    )
+    assert updated_no_note.status == SupportTicketStatus.RESPONDED
+
+    stub_orm.tenants.support_tickets.records.pop(ticket.id)
+    resolved_payload = QuickstartSupportTicketUpdateRequest(status="resolved", note=None)
+    updated_missing = await admin_control.update_support_ticket(
+        ticket.id,
+        resolved_payload,
+        orm=stub_orm,
+        actor="agent",
+    )
+    assert updated_missing.status == SupportTicketStatus.RESOLVED
 
 
 @pytest.mark.asyncio
@@ -1439,3 +2900,565 @@ async def test_quickstart_engine_sso_fallback_to_passkey() -> None:
         ),
     )
     assert success.next is LoginStep.SUCCESS
+
+
+def test_chatops_command_registry_lookup_paths() -> None:
+    registry = ChatOpsCommandRegistry()
+
+    async def handler(_: ChatOpsCommandContext) -> dict[str, str]:
+        return {"status": "ok"}
+
+    command = ChatOpsSlashCommand(name="demo", description="Demo handler")
+    binding = ChatOpsCommandBinding(command=command, handler=handler, name="demo.binding")
+    registry.register(binding)
+
+    assert registry.bindings() == (binding,)
+    assert registry.commands() == (command,)
+    assert registry.binding_by_name("demo.binding") is binding
+
+    with pytest.raises(LookupError):
+        registry.binding_by_name("unknown.binding")
+
+    assert registry.binding_for(command) is binding
+    equivalent = ChatOpsSlashCommand(name="demo", description="Demo handler")
+    assert registry.binding_for(equivalent) is binding
+
+    with pytest.raises(LookupError):
+        registry.binding_for(ChatOpsSlashCommand(name="other", description="Other handler"))
+
+
+@pytest.mark.asyncio
+async def test_quickstart_chatops_control_plane_validation_paths() -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme", "beta"),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    notifications = quickstart.QuickstartChatOpsNotificationChannels(
+        tenant_created="#tenants",
+        billing_updated="#billing",
+        subscription_past_due="#pastdue",
+        trial_extended="#trials",
+        support_ticket_created="#support",
+        support_ticket_updated="#support",
+    )
+    commands = (
+        QuickstartSlashCommand(
+            name="create-tenant",
+            action="create_tenant",
+            description="Provision tenants",
+            aliases=("QuickStart-Create-Tenant", "create-tenant"),
+        ),
+        QuickstartSlashCommand(
+            name="extend-trial",
+            action="extend_trial",
+            description="Extend tenant trial periods",
+        ),
+    )
+    settings = QuickstartChatOpsSettings(
+        enabled=True,
+        webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
+        notifications=notifications,
+        slash_commands=commands,
+        bot_user_id="U999",
+        admin_workspace="T123",
+    )
+    control = QuickstartChatOpsControlPlane(
+        app,
+        settings,
+        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+    )
+
+    @app.chatops_command(
+        ChatOpsSlashCommand(
+            name="create-tenant",
+            description="Create tenant via ChatOps",
+            visibility="admin",
+        ),
+        name="quickstart.chatops.create_tenant",
+    )
+    async def _create_tenant_handler(context: ChatOpsCommandContext) -> dict[str, str]:
+        return {"status": "ok", "slug": context.args.get("slug", "")}
+
+    control.register_action_binding("create_tenant", "quickstart.chatops.create_tenant")
+    control.register_action_binding("extend_trial", "missing.binding")
+
+    control.configure(settings)
+
+    assert control.settings.bot_user_id == "U999"
+    assert control.settings.slash_commands[0].aliases == ("quickstart-create-tenant",)
+
+    with pytest.raises(HTTPError) as invalid_name:
+        control.normalize_command_definition(
+            QuickstartSlashCommand(
+                name="Invalid Name",
+                action="create_tenant",
+                description="bad",
+            )
+        )
+    _assert_error_detail(invalid_name, "invalid_command_name")
+
+    with pytest.raises(HTTPError) as invalid_alias:
+        control.normalize_command_definition(
+            QuickstartSlashCommand(
+                name="valid-alias",
+                action="create_tenant",
+                description="bad alias",
+                aliases=("invalid alias",),
+            )
+        )
+    _assert_error_detail(invalid_alias, "invalid_command_name")
+
+    with pytest.raises(HTTPError) as duplicate:
+        control.normalize_commands(
+            (
+                QuickstartSlashCommand(
+                    name="alpha",
+                    action="create_tenant",
+                    description="demo",
+                    aliases=("dupe",),
+                ),
+                QuickstartSlashCommand(
+                    name="beta",
+                    action="extend_trial",
+                    description="demo",
+                    aliases=("dupe",),
+                ),
+            )
+        )
+    _assert_error_detail(duplicate, "duplicate_command")
+
+    admin_context = app.tenant_resolver.context_for(app.config.admin_subdomain, TenantScope.ADMIN)
+    request = Request(method="POST", path="/__artemis/chatops/slash", tenant=admin_context)
+
+    payload_create = QuickstartSlashCommandInvocation(
+        text="<@U999> create-tenant slug=nu name=Nu",
+        user_id="U123",
+        user_name=None,
+        workspace_id="T123",
+    )
+    binding, args, actor = control.resolve_invocation(request, payload_create)
+    assert args["slug"] == "nu"
+    assert actor == "U123"
+    assert control.action_for_binding(binding) == "create_tenant"
+
+    payload_missing_binding = QuickstartSlashCommandInvocation(
+        text="<@U999> extend-trial days=3",
+        user_id="U123",
+        user_name="demo",
+        workspace_id="T123",
+    )
+    with pytest.raises(ChatOpsCommandResolutionError) as missing_binding_exc:
+        control.resolve_invocation(request, payload_missing_binding)
+    assert missing_binding_exc.value.code == "unknown_command"
+
+    control.configure(
+        QuickstartChatOpsSettings(
+            enabled=True,
+            webhook=settings.webhook,
+            notifications=settings.notifications,
+            slash_commands=(
+                *control.settings.slash_commands,
+                QuickstartSlashCommand(
+                    name="tenant-metrics",
+                    action="tenant_metrics",
+                    description="Metrics overview",
+                ),
+            ),
+            bot_user_id="U999",
+            admin_workspace="T123",
+        )
+    )
+    payload_repeat = QuickstartSlashCommandInvocation(
+        text="<@U999> create-tenant slug=omicron name=Omicron",
+        user_id="U456",
+        user_name="demo",
+        workspace_id="T123",
+    )
+    binding_repeat, repeat_args, repeat_actor = control.resolve_invocation(request, payload_repeat)
+    assert repeat_args["slug"] == "omicron"
+    assert repeat_actor == "demo"
+    assert control.action_for_binding(binding_repeat) == "create_tenant"
+
+    filtered = control.serialize_settings()
+    assert any(cmd["visibility"] == "admin" for cmd in filtered["slash_commands"])
+
+    control.configure(
+        QuickstartChatOpsSettings(
+            enabled=True,
+            webhook=settings.webhook,
+            notifications=settings.notifications,
+            slash_commands=control.settings.slash_commands,
+            bot_user_id="U999",
+            admin_workspace=None,
+        )
+    )
+    filtered_without_admin = control.serialize_settings()
+    assert all(cmd["visibility"] != "admin" for cmd in filtered_without_admin["slash_commands"])
+
+
+@pytest.mark.asyncio
+async def test_quickstart_admin_control_plane_support_and_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme", "beta"),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    notifications = quickstart.QuickstartChatOpsNotificationChannels(
+        tenant_created="#tenants",
+        billing_updated="#billing",
+        subscription_past_due="#pastdue",
+        trial_extended="#trials",
+        support_ticket_created="#support",
+        support_ticket_updated="#support",
+    )
+    settings = QuickstartChatOpsSettings(
+        enabled=True,
+        webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
+        notifications=notifications,
+    )
+    control = QuickstartChatOpsControlPlane(
+        app,
+        settings,
+        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+    )
+
+    events: list[tuple[TenantContext, ChatMessage]] = []
+
+    async def record_send(self: ChatOpsService, tenant: TenantContext, message: ChatMessage) -> None:
+        events.append((tenant, message))
+
+    monkeypatch.setattr(ChatOpsService, "send", record_send, raising=False)
+    control.configure(settings)
+
+    class StubAuthEngine:
+        def __init__(self) -> None:
+            self.config = QuickstartAuthConfig(
+                tenants=(QuickstartTenant(slug="acme", name="Acme", users=()),),
+                admin=DEFAULT_QUICKSTART_AUTH.admin,
+            )
+            self.reloaded: list[QuickstartAuthConfig] = []
+
+        async def reload(self, config: QuickstartAuthConfig) -> None:
+            self.config = config
+            self.reloaded.append(config)
+
+    class StubTenantsStore:
+        def __init__(self) -> None:
+            self.records: dict[str, QuickstartTenantRecord] = {}
+
+        async def get(self, *, filters: Mapping[str, object] | None = None) -> QuickstartTenantRecord | None:
+            slug = cast(str | None, (filters or {}).get("slug"))
+            return self.records.get(slug) if slug else None
+
+        async def create(
+            self,
+            data: Mapping[str, object] | QuickstartTenantRecord,
+        ) -> QuickstartTenantRecord:
+            if isinstance(data, Mapping):
+                record = QuickstartTenantRecord(slug=cast(str, data["slug"]), name=cast(str, data["name"]))
+            else:
+                record = data
+            self.records[record.slug] = record
+            return record
+
+        async def list(self, *, order_by: Sequence[str] = ()) -> list[QuickstartTenantRecord]:
+            return [self.records[key] for key in sorted(self.records.keys())]
+
+    class StubTrialExtensionsStore:
+        def __init__(self) -> None:
+            self.records: list[QuickstartTrialExtensionRecord] = []
+
+        async def create(
+            self, record: QuickstartTrialExtensionRecord
+        ) -> QuickstartTrialExtensionRecord:
+            self.records.append(record)
+            return record
+
+        async def list(self, *, order_by: Sequence[str] = ()) -> list[QuickstartTrialExtensionRecord]:
+            return list(self.records)
+
+    class StubSupportTicketsStore:
+        def __init__(self) -> None:
+            self.records: dict[str, QuickstartSupportTicketRecord] = {}
+
+        async def create(
+            self, record: QuickstartSupportTicketRecord
+        ) -> QuickstartSupportTicketRecord:
+            self.records[record.id] = record
+            return record
+
+        async def get(
+            self, *, filters: Mapping[str, object] | None = None
+        ) -> QuickstartSupportTicketRecord | None:
+            ticket_id = cast(str | None, (filters or {}).get("id"))
+            if ticket_id is None:
+                return None
+            return self.records.get(ticket_id)
+
+        async def update(
+            self,
+            *,
+            filters: Mapping[str, object],
+            values: Mapping[str, object],
+        ) -> QuickstartSupportTicketRecord:
+            ticket_id = cast(str, filters["id"])
+            record = self.records[ticket_id]
+            updated = msgspec.structs.replace(record, **values)
+            self.records[ticket_id] = updated
+            return updated
+
+        async def list(self, *, order_by: Sequence[str] = ()) -> list[QuickstartSupportTicketRecord]:
+            return list(self.records.values())
+
+    class StubTenantSupportTicketsStore:
+        def __init__(self) -> None:
+            self.records: defaultdict[str, dict[str, QuickstartTenantSupportTicketRecord]] = defaultdict(dict)
+
+        async def create(
+            self,
+            *,
+            tenant: TenantContext,
+            model: QuickstartTenantSupportTicketRecord,
+        ) -> QuickstartTenantSupportTicketRecord:
+            self.records[tenant.tenant][model.admin_ticket_id] = model
+            return model
+
+        async def get(
+            self,
+            *,
+            tenant: TenantContext,
+            filters: Mapping[str, object],
+        ) -> QuickstartTenantSupportTicketRecord | None:
+            ticket_id = cast(str, filters["admin_ticket_id"])
+            return self.records[tenant.tenant].get(ticket_id)
+
+        async def update(
+            self,
+            *,
+            tenant: TenantContext,
+            filters: Mapping[str, object],
+            values: Mapping[str, object],
+        ) -> QuickstartTenantSupportTicketRecord:
+            ticket_id = cast(str, filters["admin_ticket_id"])
+            record = self.records[tenant.tenant][ticket_id]
+            updated = msgspec.structs.replace(record, **values)
+            self.records[tenant.tenant][ticket_id] = updated
+            return updated
+
+        async def list(
+            self,
+            *,
+            tenant: TenantContext,
+            order_by: Sequence[str] = (),
+        ) -> list[QuickstartTenantSupportTicketRecord]:
+            return list(self.records[tenant.tenant].values())
+
+    stub_orm = SimpleNamespace(
+        admin=SimpleNamespace(
+            quickstart_tenants=StubTenantsStore(),
+            quickstart_trial_extensions=StubTrialExtensionsStore(),
+            support_tickets=StubSupportTicketsStore(),
+        ),
+        tenants=SimpleNamespace(
+            support_tickets=StubTenantSupportTicketsStore(),
+        ),
+    )
+
+    engine = StubAuthEngine()
+    ensure_calls: list[str] = []
+
+    async def ensure_contexts(slugs: Iterable[str]) -> None:
+        ensure_calls.extend(slugs)
+
+    synced_configs: list[QuickstartAuthConfig] = []
+
+    def sync_allowed_tenants(config: QuickstartAuthConfig) -> None:
+        synced_configs.append(config)
+
+    admin_control = QuickstartAdminControlPlane(
+        app,
+        slug_normalizer=lambda raw: raw.strip().lower(),
+        slug_pattern=quickstart._TENANT_SLUG_PATTERN,
+        ensure_contexts=ensure_contexts,
+        chatops=control,
+        sync_allowed_tenants=sync_allowed_tenants,
+    )
+
+    with pytest.raises(HTTPError) as invalid_slug:
+        await admin_control.create_tenant_from_inputs(
+            "!!bad!!",
+            "Bad",
+            orm=stub_orm,
+            engine=engine,
+            actor="tester",
+            source="chatops",
+        )
+    _assert_error_detail(invalid_slug, "invalid_slug")
+
+    with pytest.raises(HTTPError) as invalid_name:
+        await admin_control.create_tenant_from_inputs(
+            "gamma",
+            "  ",
+            orm=stub_orm,
+            engine=engine,
+            actor="tester",
+            source="chatops",
+        )
+    _assert_error_detail(invalid_name, "invalid_name")
+
+    with pytest.raises(HTTPError) as reserved_slug:
+        await admin_control.create_tenant_from_inputs(
+            app.config.admin_subdomain,
+            "Admin",
+            orm=stub_orm,
+            engine=engine,
+            actor="tester",
+            source="chatops",
+        )
+    _assert_error_detail(reserved_slug, "slug_reserved")
+
+    await stub_orm.admin.quickstart_tenants.create({"slug": "existing", "name": "Existing"})
+    with pytest.raises(HTTPError) as tenant_exists:
+        await admin_control.create_tenant_from_inputs(
+            "existing",
+            "Existing",
+            orm=stub_orm,
+            engine=engine,
+            actor="tester",
+            source="chatops",
+        )
+    _assert_error_detail(tenant_exists, "tenant_exists")
+
+    record = await admin_control.create_tenant_from_inputs(
+        "delta",
+        "Delta",
+        orm=stub_orm,
+        engine=engine,
+        actor="tester",
+        source="api",
+    )
+    assert record.slug == "delta"
+    assert "delta" in ensure_calls
+    assert engine.reloaded and engine.config.tenants[-1].slug == "delta"
+    assert synced_configs and synced_configs[-1].tenants[-1].slug == "delta"
+    assert events[-1][1].extra["slug"] == "delta"
+
+    with pytest.raises(HTTPError) as invalid_trial_slug:
+        await admin_control.grant_trial_extension(
+            "!!bad!!",
+            3,
+            note=None,
+            actor="tester",
+            orm=stub_orm,
+        )
+    _assert_error_detail(invalid_trial_slug, "invalid_slug")
+
+    with pytest.raises(HTTPError) as invalid_trial_days:
+        await admin_control.grant_trial_extension(
+            "delta",
+            0,
+            note=None,
+            actor="tester",
+            orm=stub_orm,
+        )
+    _assert_error_detail(invalid_trial_days, "invalid_days")
+
+    with pytest.raises(HTTPError) as missing_trial_tenant:
+        await admin_control.grant_trial_extension(
+            "unknown",
+            3,
+            note=None,
+            actor="tester",
+            orm=stub_orm,
+        )
+    _assert_error_detail(missing_trial_tenant, "tenant_missing")
+
+    extension = await admin_control.grant_trial_extension(
+        "delta",
+        5,
+        note="  extend  ",
+        actor="tester",
+        orm=stub_orm,
+    )
+    assert isinstance(extension, QuickstartTrialExtensionRecord)
+    assert extension.note == "extend"
+    assert stub_orm.admin.quickstart_trial_extensions.records[-1] is extension
+
+    tenant_context = TenantContext(
+        tenant="delta",
+        site=app.config.site,
+        domain=app.config.domain,
+        scope=TenantScope.TENANT,
+    )
+
+    with pytest.raises(HTTPError) as invalid_ticket:
+        await admin_control.create_support_ticket(
+            tenant_context,
+            QuickstartSupportTicketRequest(subject=" ", message="Issue", kind="general"),
+            orm=stub_orm,
+            actor="delta-admin",
+        )
+    _assert_error_detail(invalid_ticket, "invalid_ticket")
+
+    ticket_request = QuickstartSupportTicketRequest(
+        subject="Login issue",
+        message="Cannot access dashboard",
+        kind="issue",
+    )
+    ticket = await admin_control.create_support_ticket(
+        tenant_context,
+        ticket_request,
+        orm=stub_orm,
+        actor="delta-admin",
+    )
+    assert ticket.tenant_slug == "delta"
+    assert ticket.id in stub_orm.admin.support_tickets.records
+    assert ticket.id in stub_orm.tenants.support_tickets.records["delta"]
+
+    metrics = await admin_control.tenant_metrics(stub_orm)
+    assert metrics["support_tickets"]["open"] == 1
+
+    diagnostics = await admin_control.system_diagnostics(stub_orm)
+    assert diagnostics["chatops"]["enabled"] is True
+    assert diagnostics["support"]["open"] == 1
+
+    with pytest.raises(HTTPError) as missing_ticket:
+        await admin_control.update_support_ticket(
+            "missing",
+            QuickstartSupportTicketUpdateRequest(status="responded", note=None),
+            orm=stub_orm,
+            actor="agent",
+        )
+    _assert_error_detail(missing_ticket, "ticket_missing")
+
+    update_payload = QuickstartSupportTicketUpdateRequest(status="responded", note=" Investigating ")
+    updated_ticket = await admin_control.update_support_ticket(
+        ticket.id,
+        update_payload,
+        orm=stub_orm,
+        actor="agent",
+    )
+    assert updated_ticket.status == SupportTicketStatus.RESPONDED
+    tenant_ticket = stub_orm.tenants.support_tickets.records["delta"][ticket.id]
+    assert tenant_ticket.status == SupportTicketStatus.RESPONDED
+    assert tenant_ticket.updates[-1].note == "Investigating"
+
+    metrics_after = await admin_control.tenant_metrics(stub_orm)
+    assert metrics_after["support_tickets"]["total"] == 1
