@@ -23,12 +23,16 @@ from artemis import (
     TestClient,
 )
 from artemis.chatops import (
+    ChatOpsCommandResolutionError,
+    ChatOpsInvocationError,
+    ChatOpsSlashCommand,
     SlackWebhookClient,
     _default_transport,
     _ensure_tls_destination,
     _maybe_await,
     _validate_certificate_pin,
     _webhook_host,
+    parse_slash_command_args,
 )
 from artemis.serialization import json_decode
 from tests.observability_stubs import (
@@ -38,6 +42,50 @@ from tests.observability_stubs import (
     setup_stub_opentelemetry_without_status,
     setup_stub_sentry,
 )
+
+
+def test_chatops_parse_slash_command_args() -> None:
+    args = parse_slash_command_args(
+        'slug=alpha =ignored name="Alpha Beta" note=Trial flag extra="value" note2=" spaced "'
+    )
+    assert args == {
+        "slug": "alpha",
+        "name": "Alpha Beta",
+        "note": "Trial",
+        "extra": "value",
+        "note2": " spaced ",
+    }
+
+    fallback_args = parse_slash_command_args('slug=omega name="Alpha Beta note=Trial')
+    assert fallback_args == {
+        "slug": "omega",
+        "name": "Alpha",
+        "note": "Trial",
+    }
+
+
+def test_chatops_extract_command_from_invocation() -> None:
+    class Invocation:
+        def __init__(self, text: str, command: str | None = None) -> None:
+            self.text = text
+            self.command = command
+
+    service = ChatOpsService(ChatOpsConfig(enabled=True))
+    slash_payload = Invocation("/create-tenant slug=alpha name=Alpha", command="/create-tenant")
+    token, remaining = service.extract_command_from_invocation(slash_payload, bot_user_id="U999")
+    assert token == "create-tenant"
+    assert remaining == slash_payload.text
+
+    mention_payload = Invocation("<@U999> extend-trial slug=alpha days=30")
+    token, remaining = service.extract_command_from_invocation(mention_payload, bot_user_id="U999")
+    assert token == "extend-trial"
+    assert remaining == "slug=alpha days=30"
+
+    with pytest.raises(ChatOpsInvocationError):
+        service.extract_command_from_invocation(Invocation(""), bot_user_id="U999")
+
+    with pytest.raises(ChatOpsInvocationError):
+        service.extract_command_from_invocation(Invocation("<@U888> extend"), bot_user_id="U999")
 
 
 class RecordingTransport:
@@ -1002,3 +1050,90 @@ def test_ensure_tls_destination_allows_missing_base_host(monkeypatch: pytest.Mon
     config = SlackWebhookConfig(webhook_url="https:///missing")
 
     _ensure_tls_destination(DummyResponse(), config)
+
+
+def test_chatops_slash_command_resolution_rules() -> None:
+    config = ChatOpsConfig(
+        enabled=True,
+        default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default"),
+    )
+    service = ChatOpsService(config)
+    admin = TenantContext(tenant="admin", site="demo", domain="example.com", scope=TenantScope.ADMIN)
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+    commands = [
+        ChatOpsSlashCommand(
+            name="create-tenant",
+            description="Create a tenant",
+            visibility="admin",
+            aliases=("quickstart-create-tenant",),
+        ),
+        ChatOpsSlashCommand(
+            name="extend-trial",
+            description="Extend a trial",
+            visibility="public",
+        ),
+    ]
+
+    assert service.normalize_command_token(" /Create-Tenant ") == "create-tenant"
+    resolved_admin = service.resolve_slash_command(
+        "/quickstart-create-tenant",
+        commands,
+        tenant=admin,
+        workspace_id="T123",
+        admin_workspace="T123",
+    )
+    assert resolved_admin is commands[0]
+
+    with pytest.raises(ChatOpsCommandResolutionError) as admin_scope_error:
+        service.resolve_slash_command(
+            "create-tenant",
+            commands,
+            tenant=tenant,
+            workspace_id="T123",
+            admin_workspace="T123",
+        )
+    assert isinstance(admin_scope_error.value, ChatOpsCommandResolutionError)
+    assert admin_scope_error.value.code == "admin_command"
+
+    with pytest.raises(ChatOpsCommandResolutionError) as workspace_error:
+        service.resolve_slash_command(
+            "create-tenant",
+            commands,
+            tenant=admin,
+            workspace_id="T999",
+            admin_workspace="T123",
+        )
+    assert isinstance(workspace_error.value, ChatOpsCommandResolutionError)
+    assert workspace_error.value.code == "workspace_forbidden"
+
+    resolved_public = service.resolve_slash_command(
+        "extend-trial",
+        commands,
+        tenant=tenant,
+        workspace_id="T123",
+        admin_workspace="T123",
+    )
+    assert resolved_public is commands[1]
+
+    with pytest.raises(ChatOpsCommandResolutionError) as unknown_error:
+        service.resolve_slash_command(
+            "unknown",
+            commands,
+            tenant=admin,
+            workspace_id="T123",
+            admin_workspace="T123",
+        )
+    assert isinstance(unknown_error.value, ChatOpsCommandResolutionError)
+    assert unknown_error.value.code == "unknown_command"
+
+    disabled_service = ChatOpsService(ChatOpsConfig(enabled=True))
+    with pytest.raises(ChatOpsCommandResolutionError) as unconfigured_error:
+        disabled_service.resolve_slash_command(
+            "extend-trial",
+            commands,
+            tenant=tenant,
+            workspace_id="T123",
+            admin_workspace="T123",
+        )
+    assert isinstance(unconfigured_error.value, ChatOpsCommandResolutionError)
+    assert unconfigured_error.value.code == "chatops_unconfigured"

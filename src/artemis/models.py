@@ -51,6 +51,50 @@ class Subscription(DatabaseModel):
     current_period_end: dt.datetime
 
 
+class SupportTicketKind(str, Enum):
+    GENERAL = "general"
+    FEEDBACK = "feedback"
+    ISSUE = "issue"
+
+
+class SupportTicketStatus(str, Enum):
+    OPEN = "open"
+    RESPONDED = "responded"
+    RESOLVED = "resolved"
+
+
+class SupportTicketUpdate(msgspec.Struct, frozen=True):
+    """Immutable record describing an update applied to a support ticket."""
+
+    timestamp: dt.datetime
+    actor: str
+    note: str
+
+
+@model(scope=ModelScope.ADMIN, table="support_tickets")
+class SupportTicket(DatabaseModel):
+    """Support ticket raised by a tenant and tracked globally."""
+
+    tenant_slug: str
+    kind: SupportTicketKind
+    subject: str
+    message: str
+    status: SupportTicketStatus = SupportTicketStatus.OPEN
+    updates: tuple[SupportTicketUpdate, ...] = msgspec.field(default_factory=tuple)
+
+
+@model(scope=ModelScope.TENANT, table="support_tickets")
+class TenantSupportTicket(DatabaseModel):
+    """Tenant-scoped mirror of support tickets linked to the admin schema."""
+
+    admin_ticket_id: str
+    kind: SupportTicketKind
+    subject: str
+    message: str
+    status: SupportTicketStatus = SupportTicketStatus.OPEN
+    updates: tuple[SupportTicketUpdate, ...] = msgspec.field(default_factory=tuple)
+
+
 @model(
     scope=ModelScope.ADMIN,
     table="app_secrets",
@@ -380,11 +424,16 @@ __all__ = [
     "SessionToken",
     "Subscription",
     "SubscriptionStatus",
+    "SupportTicket",
+    "SupportTicketKind",
+    "SupportTicketStatus",
+    "SupportTicketUpdate",
     "TenantAuditLogEntry",
     "TenantFederatedUser",
     "TenantOidcProvider",
     "TenantSamlProvider",
     "TenantSecret",
+    "TenantSupportTicket",
     "TenantUser",
     "UserRole",
 ]

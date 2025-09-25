@@ -10,7 +10,7 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 import msgspec
 
 from .audit import AuditActor, AuditTrail, audit_context
-from .chatops import ChatOpsService
+from .chatops import ChatOpsCommandBinding, ChatOpsCommandRegistry, ChatOpsService, ChatOpsSlashCommand
 from .config import AppConfig
 from .database import Database
 from .dependency import DependencyProvider
@@ -70,6 +70,7 @@ class ArtemisApp:
         self.orm = orm or (ORM(self.database) if self.database else None)
         self.observability = observability or Observability(self.config.observability)
         self.chatops = chatops or ChatOpsService(self.config.chatops, observability=self.observability)
+        self.chatops_commands = ChatOpsCommandRegistry()
         if self.database:
             existing_audit = self.orm and getattr(self.orm, "_audit_trail", None)
             if existing_audit is not None:
@@ -153,6 +154,25 @@ class ArtemisApp:
         authorize: RouteGuard | Sequence[RouteGuard] | None = None,
     ) -> Callable[[Callable[..., Awaitable[Any] | Any]], Callable[..., Awaitable[Any] | Any]]:
         return self.route(path, methods=("WEBSOCKET",), name=name, authorize=authorize)
+
+    def chatops_command(
+        self,
+        command: ChatOpsSlashCommand,
+        *,
+        name: str | None = None,
+    ) -> Callable[[Callable[..., Awaitable[Any] | Any]], Callable[..., Awaitable[Any] | Any]]:
+        """Register a ChatOps command handler bound to ``command``."""
+
+        def decorator(func: Callable[..., Awaitable[Any] | Any]) -> Callable[..., Awaitable[Any] | Any]:
+            binding = ChatOpsCommandBinding(
+                command=command,
+                handler=func,
+                name=name or command.name,
+            )
+            self.chatops_commands.register(binding)
+            return func
+
+        return decorator
 
     def mount_static(
         self,

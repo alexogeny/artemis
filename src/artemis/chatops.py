@@ -5,15 +5,21 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import inspect
+import shlex
 import ssl
-from typing import Any, Awaitable, Callable, Iterable, Mapping
+from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
+from typing import Literal, TYPE_CHECKING
 from urllib.parse import urlparse
 
 import msgspec
 
+from .dependency import DependencyScope
 from .observability import Observability
 from .serialization import json_encode
 from .tenancy import TenantContext, TenantScope
+
+if TYPE_CHECKING:  # pragma: no cover - used for typing only
+    from .requests import Request
 
 
 class ChatOpsError(RuntimeError):
@@ -79,6 +85,125 @@ class ChatOpsConfig(msgspec.Struct, frozen=True):
 
 
 TransportCallable = Callable[[SlackWebhookConfig, bytes, Mapping[str, str]], Awaitable[None] | None]
+
+
+SlashCommandVisibility = Literal["admin", "public"]
+
+
+class ChatOpsSlashCommand(msgspec.Struct, frozen=True):
+    """Declarative metadata describing a slash command surface."""
+
+    name: str
+    description: str
+    visibility: SlashCommandVisibility = "admin"
+    aliases: tuple[str, ...] = msgspec.field(default_factory=tuple)
+
+
+class ChatOpsCommandContext(msgspec.Struct, frozen=True):
+    """Context passed to ChatOps command handlers."""
+
+    request: "Request"
+    payload: ChatOpsSlashCommandInvocation
+    args: Mapping[str, str]
+    actor: str
+    dependencies: DependencyScope
+
+
+class ChatOpsCommandHandler(Protocol):
+    """Callable signature for ChatOps command handlers."""
+
+    async def __call__(self, context: ChatOpsCommandContext) -> Mapping[str, Any] | Any:  # pragma: no cover - protocol
+        ...
+
+
+class ChatOpsCommandBinding(msgspec.Struct, frozen=True):
+    """Associates a slash command definition with its handler."""
+
+    command: ChatOpsSlashCommand
+    handler: ChatOpsCommandHandler
+    name: str
+
+
+class ChatOpsCommandRegistry:
+    """Registry tracking ChatOps slash command bindings."""
+
+    def __init__(self) -> None:
+        self._bindings: list[ChatOpsCommandBinding] = []
+
+    def register(self, binding: ChatOpsCommandBinding) -> None:
+        self._bindings = [b for b in self._bindings if b.name != binding.name]
+        self._bindings.append(binding)
+
+    def bindings(self) -> tuple[ChatOpsCommandBinding, ...]:
+        return tuple(self._bindings)
+
+    def commands(self) -> tuple[ChatOpsSlashCommand, ...]:
+        return tuple(binding.command for binding in self._bindings)
+
+    def binding_by_name(self, name: str) -> ChatOpsCommandBinding:
+        for binding in self._bindings:
+            if binding.name == name:
+                return binding
+        raise LookupError(f"No ChatOps binding registered with name '{name}'")
+
+    def binding_for(self, command: ChatOpsSlashCommand) -> ChatOpsCommandBinding:
+        for binding in self._bindings:
+            if binding.command is command:
+                return binding
+            if (
+                binding.command.name == command.name
+                and binding.command.visibility == command.visibility
+                and binding.command.aliases == command.aliases
+            ):
+                return binding
+        raise LookupError(f"No ChatOps binding registered for command '{command.name}'")
+
+
+class ChatOpsCommandResolutionError(ChatOpsError):
+    """Raised when a slash command cannot be resolved for a tenant."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ChatOpsInvocationError(ChatOpsError):
+    """Raised when a chat invocation payload cannot be parsed."""
+
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+class ChatOpsSlashCommandInvocation(Protocol):
+    """Protocol describing the attributes required for invocation parsing."""
+
+    text: str
+    command: str | None
+
+
+def parse_slash_command_args(text: str) -> dict[str, str]:
+    """Parse ``key=value`` arguments from ``text`` into a dictionary."""
+
+    args: dict[str, str] = {}
+    try:
+        tokens = shlex.split(text, posix=True)
+        advanced = True
+    except ValueError:  # pragma: no cover - defensive parsing guard
+        tokens = text.split()
+        advanced = False
+    for token in tokens:
+        if "=" not in token:
+            continue
+        key, value = token.split("=", 1)
+        normalized_key = key.strip().lower()
+        if not normalized_key:
+            continue
+        if advanced:
+            args[normalized_key] = value
+        else:
+            args[normalized_key] = value.strip().strip("\"'")
+    return args
 
 
 class SlackWebhookClient:
@@ -147,6 +272,79 @@ class ChatOpsService:
 
     def is_configured(self, tenant: TenantContext) -> bool:
         return self.config.config_for(tenant) is not None
+
+    def normalize_command_token(self, raw: str) -> str:
+        """Return a normalized command token suitable for comparison."""
+
+        token = raw.strip().lower()
+        if token.startswith("/"):
+            token = token[1:]
+        return token
+
+    def resolve_slash_command(
+        self,
+        token: str,
+        commands: Sequence[ChatOpsSlashCommand],
+        *,
+        tenant: TenantContext,
+        workspace_id: str | None,
+        admin_workspace: str | None,
+    ) -> ChatOpsSlashCommand:
+        """Resolve ``token`` against ``commands`` honoring visibility rules."""
+
+        normalized = self.normalize_command_token(token)
+        for command in commands:
+            candidates = (command.name, *command.aliases)
+            for candidate in candidates:
+                if self.normalize_command_token(candidate) != normalized:
+                    continue
+                if command.visibility == "admin":
+                    if tenant.scope is not TenantScope.ADMIN:
+                        raise ChatOpsCommandResolutionError("admin_command")
+                    if (
+                        admin_workspace is None
+                        or workspace_id is None
+                        or workspace_id != admin_workspace
+                    ):
+                        raise ChatOpsCommandResolutionError("workspace_forbidden")
+                else:
+                    if tenant.scope is not TenantScope.ADMIN and not self.is_configured(tenant):
+                        raise ChatOpsCommandResolutionError("chatops_unconfigured")
+                return command
+        raise ChatOpsCommandResolutionError("unknown_command")
+
+    def extract_command_from_invocation(
+        self,
+        payload: ChatOpsSlashCommandInvocation,
+        *,
+        bot_user_id: str | None,
+    ) -> tuple[str, str]:
+        """Return the command token and remaining argument text from ``payload``."""
+
+        if payload.command:
+            normalized_command = self.normalize_command_token(payload.command)
+            return normalized_command, payload.text
+        tokens = payload.text.split()
+        if not tokens:
+            raise ChatOpsInvocationError("missing_command")
+        if bot_user_id is None:
+            raise ChatOpsInvocationError("bot_user_unconfigured")
+        mention = tokens.pop(0)
+        mention_id: str | None
+        if mention.startswith("<@") and mention.endswith(">"):
+            mention_id = mention[2:-1].split("|", 1)[0]
+        elif mention.startswith("@"):
+            mention_id = mention[1:]
+        else:
+            mention_id = mention
+        if mention_id != bot_user_id:
+            raise ChatOpsInvocationError("invalid_bot_mention")
+        if not tokens:
+            raise ChatOpsInvocationError("missing_command")
+        command_token = tokens.pop(0)
+        command_name = self.normalize_command_token(command_token)
+        arg_text = " ".join(tokens)
+        return command_name, arg_text
 
     async def send(self, tenant: TenantContext, message: ChatMessage) -> None:
         config = self._require_config(tenant)
@@ -296,10 +494,16 @@ def _validate_certificate_pin(response: Any, pins: Iterable[str]) -> None:
 
 
 __all__ = [
+    "ChatOpsInvocationError",
+    "ChatOpsCommandResolutionError",
     "ChatMessage",
     "ChatOpsConfig",
     "ChatOpsError",
     "ChatOpsRoute",
     "ChatOpsService",
+    "ChatOpsSlashCommand",
+    "ChatOpsSlashCommandInvocation",
+    "parse_slash_command_args",
     "SlackWebhookConfig",
+    "SlashCommandVisibility",
 ]
