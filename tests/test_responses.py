@@ -4,6 +4,7 @@ import datetime as dt
 
 import pytest
 
+from artemis.database import SecretRef
 from artemis.exceptions import HTTPError
 from artemis.models import (
     AdminUser,
@@ -12,6 +13,7 @@ from artemis.models import (
     MfaPurpose,
     SessionLevel,
     SessionToken,
+    TenantOidcProvider,
     TenantSecret,
     TenantUser,
 )
@@ -109,8 +111,17 @@ def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
         mfa_enforced=True,
         mfa_enrolled_at=dt.datetime.now(dt.timezone.utc),
     )
-    tenant_secret = TenantSecret(secret="tenant-secret")
-    app_secret = AppSecret(secret_value="value", salt="pepper")
+    tenant_secret = TenantSecret(secret=SecretRef(provider="vault", name="tenant"))
+    app_secret = AppSecret(secret=SecretRef(provider="vault", name="app"), salt="pepper")
+    oidc_provider = TenantOidcProvider(
+        issuer="https://issuer.example.com",
+        client_id="client",
+        client_secret=SecretRef(provider="vault", name="oidc"),
+        jwks_uri="https://issuer.example.com/jwks",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint="https://issuer.example.com/userinfo",
+    )
     mfa_code = MfaCode(
         user_id="user",
         code="123456",
@@ -119,7 +130,8 @@ def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
     )
     session = SessionToken(
         user_id="user",
-        token="token",
+        token_hash="deadbeef",
+        token_salt="feedface",
         expires_at=dt.datetime.now(dt.timezone.utc),
         level=SessionLevel.MFA,
     )
@@ -127,6 +139,7 @@ def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
         "user": tenant_user,
         "tenant_secret": tenant_secret,
         "app_secret": app_secret,
+        "oidc": oidc_provider,
         "mfa": mfa_code,
         "session": session,
     }
@@ -134,7 +147,9 @@ def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
     for field in {"hashed_password", "password_salt", "password_secret", "mfa_enforced", "mfa_enrolled_at"}:
         assert field not in data["user"]
     assert "secret" not in data["tenant_secret"]
-    assert "secret_value" not in data["app_secret"]
+    assert "secret" not in data["app_secret"]
     assert "salt" not in data["app_secret"]
+    assert "client_secret" not in data["oidc"]
     assert "code" not in data["mfa"]
-    assert "token" not in data["session"]
+    assert "token_hash" not in data["session"]
+    assert "token_salt" not in data["session"]

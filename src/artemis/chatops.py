@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import inspect
+import ssl
 from typing import Any, Awaitable, Callable, Iterable, Mapping
 from urllib.parse import urlparse
 
@@ -39,6 +41,8 @@ class SlackWebhookConfig(msgspec.Struct, frozen=True):
     username: str | None = None
     icon_emoji: str | None = None
     timeout: float = 5.0
+    allowed_hosts: tuple[str, ...] = ()
+    certificate_pins: tuple[str, ...] = ()
 
 
 class ChatOpsRoute(msgspec.Struct, frozen=True):
@@ -83,6 +87,17 @@ class SlackWebhookClient:
     def __init__(self, config: SlackWebhookConfig, *, transport: TransportCallable | None = None) -> None:
         self.config = config
         self._transport = transport or _default_transport
+        self._allowed_hosts = tuple(host.lower() for host in config.allowed_hosts)
+        parsed = urlparse(config.webhook_url)
+        scheme = (parsed.scheme or "").lower()
+        if scheme != "https":
+            raise ChatOpsError("Slack webhook URLs must use HTTPS")
+        host = (parsed.hostname or "").lower()
+        if not host:
+            raise ChatOpsError("Slack webhook URL must include a host")
+        if self._allowed_hosts and host not in self._allowed_hosts:
+            raise ChatOpsError(f"Slack webhook host '{host}' is not allowed")
+        self._host = host
 
     async def send(self, message: ChatMessage) -> None:
         payload = self._encode(message)
@@ -205,7 +220,11 @@ async def _default_transport(
 
     def _send() -> None:
         try:
-            with urllib.request.urlopen(request, timeout=config.timeout) as response:
+            context = ssl.create_default_context()
+            with urllib.request.urlopen(request, timeout=config.timeout, context=context) as response:
+                _ensure_tls_destination(response, config)
+                if config.certificate_pins:
+                    _validate_certificate_pin(response, config.certificate_pins)
                 status = getattr(response, "status", response.getcode())
                 if status >= 400:
                     raise ChatOpsError(
@@ -219,6 +238,35 @@ async def _default_transport(
             raise ChatOpsError(f"Failed to reach Slack webhook {config.webhook_url!r}: {exc.reason}") from exc
 
     await asyncio.to_thread(_send)
+
+
+def _ensure_tls_destination(response: Any, config: SlackWebhookConfig) -> None:
+    final_url = response.geturl()
+    parsed = urlparse(final_url)
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        raise ChatOpsError("Slack webhook redirected to a non-HTTPS endpoint")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise ChatOpsError("Slack webhook response missing destination host")
+    allowed = {value.lower() for value in config.allowed_hosts}
+    if allowed and host not in allowed:
+        raise ChatOpsError(f"Slack webhook resolved to disallowed host '{host}'")
+
+
+def _validate_certificate_pin(response: Any, pins: Iterable[str]) -> None:
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sslobj = getattr(raw, "_sslobj", None)
+    if sslobj is None:
+        raise ChatOpsError("TLS connection does not expose certificate for pinning")
+    try:
+        certificate = sslobj.getpeercert(True)
+    except Exception as exc:  # pragma: no cover - depends on ssl implementation
+        raise ChatOpsError("Unable to read TLS certificate for pinning") from exc
+    fingerprint = hashlib.sha256(certificate).hexdigest().lower()
+    normalized = {pin.lower() for pin in pins}
+    if fingerprint not in normalized:
+        raise ChatOpsError("Slack webhook certificate pin mismatch")
 
 
 __all__ = [

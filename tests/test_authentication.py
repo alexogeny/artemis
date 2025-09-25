@@ -3,12 +3,14 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+from typing import Iterable
 
 import pytest
 
 import artemis.authentication as authentication_module
 from artemis.authentication import (
     AuthenticationError,
+    AuthenticationRateLimiter,
     AuthenticationService,
     FederatedIdentityDirectory,
     MfaManager,
@@ -20,10 +22,12 @@ from artemis.authentication import (
     compose_admin_secret,
     compose_tenant_secret,
 )
+from artemis.database import SecretRef
 from artemis.id57 import generate_id57
 from artemis.models import (
     AdminUser,
     AppSecret,
+    Customer,
     FederatedProvider,
     MfaCode,
     MfaPurpose,
@@ -34,6 +38,7 @@ from artemis.models import (
     TenantSecret,
     TenantUser,
 )
+from tests.support import StaticSecretResolver
 
 
 def _b64url(data: bytes) -> str:
@@ -48,16 +53,74 @@ def _epoch(value: dt.datetime) -> int:
     return int(value.astimezone(dt.timezone.utc).timestamp())
 
 
+def _make_app_secret(now: dt.datetime, *, salt: str = "salt") -> tuple[AppSecret, SecretRef]:
+    ref = SecretRef(provider="vault", name=f"app::{generate_id57()}")
+    secret = AppSecret(
+        id=generate_id57(),
+        secret=ref,
+        salt=salt,
+        created_at=now,
+        updated_at=now,
+    )
+    return secret, ref
+
+
+def _make_tenant_secret(now: dt.datetime, *, purpose: str = "password") -> tuple[TenantSecret, SecretRef]:
+    ref = SecretRef(provider="vault", name=f"tenant::{generate_id57()}")
+    secret = TenantSecret(
+        id=generate_id57(),
+        secret=ref,
+        purpose=purpose,
+        created_at=now,
+        updated_at=now,
+    )
+    return secret, ref
+
+
+def _resolver_for(pairs: Iterable[tuple[SecretRef, str]]) -> StaticSecretResolver:
+    mapping = {(ref.provider, ref.name, ref.version): value for ref, value in pairs}
+    return StaticSecretResolver(mapping)
+
+
+def test_customer_secret_resolves_with_secret_ref() -> None:
+    secret_ref = SecretRef(provider="vault", name=f"customer::{generate_id57()}")
+    customer = Customer(
+        tenant="acme",
+        schema_name="tenant_acme",
+        billing_id="billing",
+        status="active",
+        tenant_secret=secret_ref,
+    )
+    resolver = _resolver_for([(secret_ref, "tenant-secret")])
+    assert customer.resolve_tenant_secret(resolver) == "tenant-secret"
+
+
+def test_tenant_oidc_provider_requires_client_secret_ref() -> None:
+    provider = TenantOidcProvider(
+        issuer="https://issuer.example.com",
+        client_id="client",
+        jwks_uri="https://issuer.example.com/jwks",
+        authorization_endpoint="https://issuer.example.com/auth",
+        token_endpoint="https://issuer.example.com/token",
+        userinfo_endpoint="https://issuer.example.com/userinfo",
+    )
+    resolver = _resolver_for([])
+    with pytest.raises(LookupError):
+        provider.resolve_client_secret(resolver)
+
+
 def _build_oidc_authenticator(
     *,
     now: dt.datetime,
     defaults: OidcValidationDefaults | None = None,
-) -> tuple[OidcAuthenticator, TenantOidcProvider, bytes]:
+) -> tuple[OidcAuthenticator, TenantOidcProvider, bytes, StaticSecretResolver]:
+    secret_value = "oidc-secret"
+    secret_ref = SecretRef(provider="vault", name=f"oidc::{generate_id57()}")
     provider = TenantOidcProvider(
         id=generate_id57(),
         issuer="https://issuer.example.com",
         client_id="client",
-        client_secret="oidc-secret",
+        client_secret=secret_ref,
         jwks_uri="https://issuer.example.com/jwks",
         authorization_endpoint="https://issuer.example.com/auth",
         token_endpoint="https://issuer.example.com/token",
@@ -67,7 +130,8 @@ def _build_oidc_authenticator(
         allowed_audiences=["client"],
         allowed_groups=["admins"],
     )
-    secret = provider.client_secret.encode()
+    resolver = _resolver_for([(secret_ref, secret_value)])
+    secret = secret_value.encode()
     jwks = {
         "keys": [
             {
@@ -88,8 +152,9 @@ def _build_oidc_authenticator(
             max_token_age_seconds=600,
         ),
         jwks_fetcher=lambda _: jwks,
+        secret_resolver=resolver,
     )
-    return authenticator, provider, secret
+    return authenticator, provider, secret, resolver
 
 
 def _issue_oidc_token(
@@ -115,9 +180,10 @@ def _issue_oidc_token(
 async def test_password_hashing_and_mfa_authentication() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
-    service = AuthenticationService(hasher)
-    app_secret = AppSecret(id=generate_id57(), secret_value="app", salt="salt", created_at=now)
-    tenant_secret = TenantSecret(id=generate_id57(), secret="tenant", created_at=now)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    service = AuthenticationService(hasher, secret_resolver=resolver)
     user_secret = "user-secret"
     hashed, salt = await service.hash_tenant_password(
         app_secret=app_secret,
@@ -162,7 +228,7 @@ async def test_password_hashing_and_mfa_authentication() -> None:
 
 def test_secret_composition_differs_between_scopes() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    app_secret = AppSecret(id=generate_id57(), secret_value="app", salt="salt", created_at=now)
+    app_secret, app_ref = _make_app_secret(now)
     admin = AdminUser(
         id=generate_id57(),
         email="admin@example.com",
@@ -171,7 +237,8 @@ def test_secret_composition_differs_between_scopes() -> None:
         updated_at=now,
         password_secret="admin",
     )
-    tenant_secret = TenantSecret(id=generate_id57(), secret="tenant", created_at=now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
     user = TenantUser(
         id=generate_id57(),
         email="user@example.com",
@@ -180,8 +247,8 @@ def test_secret_composition_differs_between_scopes() -> None:
         updated_at=now,
         password_secret="user",
     )
-    admin_secret = compose_admin_secret(app_secret, admin)
-    tenant_secret_value = compose_tenant_secret(app_secret, tenant_secret, user)
+    admin_secret = compose_admin_secret(app_secret, admin, resolver=resolver)
+    tenant_secret_value = compose_tenant_secret(app_secret, tenant_secret, user, resolver=resolver)
     assert admin_secret != tenant_secret_value
 
 
@@ -202,7 +269,7 @@ def test_passkey_manager_round_trip() -> None:
 
 def test_oidc_authenticator_validates_token() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
     issued_at = now - dt.timedelta(seconds=30)
     expires_at = now + dt.timedelta(minutes=5)
     claims = {
@@ -224,7 +291,7 @@ def test_oidc_authenticator_validates_token() -> None:
 
 def test_oidc_authenticator_hmac_fallback_uses_client_secret() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    base_authenticator, provider, _ = _build_oidc_authenticator(now=now)
+    base_authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
     authenticator = OidcAuthenticator(
         provider,
         defaults=base_authenticator.defaults,
@@ -238,6 +305,7 @@ def test_oidc_authenticator_hmac_fallback_uses_client_secret() -> None:
                 }
             ]
         },
+        secret_resolver=resolver,
     )
     claims = {
         "iss": provider.issuer,
@@ -247,19 +315,19 @@ def test_oidc_authenticator_hmac_fallback_uses_client_secret() -> None:
         "nbf": _epoch(now - dt.timedelta(seconds=30)),
         "exp": _epoch(now + dt.timedelta(minutes=5)),
     }
-    token = _issue_oidc_token(claims, provider.client_secret.encode(), kid=None)
+    token = _issue_oidc_token(claims, secret, kid=None)
     resolved = authenticator.validate(token, now=now)
     assert resolved["iss"] == provider.issuer
 
 
 def test_oidc_authenticator_hmac_fallback_requires_client_secret() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    base_authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    base_authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
     provider_without_secret = TenantOidcProvider(
         id=provider.id,
         issuer=provider.issuer,
         client_id=provider.client_id,
-        client_secret="",
+        client_secret=None,
         jwks_uri=provider.jwks_uri,
         authorization_endpoint=provider.authorization_endpoint,
         token_endpoint=provider.token_endpoint,
@@ -274,6 +342,7 @@ def test_oidc_authenticator_hmac_fallback_requires_client_secret() -> None:
         provider_without_secret,
         defaults=base_authenticator.defaults,
         jwks_fetcher=lambda _: {},
+        secret_resolver=resolver,
     )
     claims = {
         "iss": provider.issuer,
@@ -289,9 +358,99 @@ def test_oidc_authenticator_hmac_fallback_requires_client_secret() -> None:
     assert str(exc.value) == "unknown_jwk"
 
 
+def test_oidc_authenticator_requires_secret_resolver_for_client_secret() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {},
+    )
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret, kid=None)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "client_secret_unavailable"
+
+
+def test_oidc_authenticator_rejects_blank_client_secret() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
+    blank_ref = SecretRef(provider="vault", name=f"oidc::{generate_id57()}")
+    provider_with_blank = TenantOidcProvider(
+        id=provider.id,
+        issuer=provider.issuer,
+        client_id=provider.client_id,
+        client_secret=blank_ref,
+        jwks_uri=provider.jwks_uri,
+        authorization_endpoint=provider.authorization_endpoint,
+        token_endpoint=provider.token_endpoint,
+        userinfo_endpoint=provider.userinfo_endpoint,
+        created_at=provider.created_at,
+        updated_at=provider.updated_at,
+        allowed_audiences=list(provider.allowed_audiences),
+        allowed_groups=list(provider.allowed_groups),
+        enabled=provider.enabled,
+    )
+    resolver = _resolver_for([(blank_ref, "   ")])
+    authenticator = OidcAuthenticator(
+        provider_with_blank,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {},
+        secret_resolver=resolver,
+    )
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret, kid=None)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "client_secret_unavailable"
+
+
+def test_oidc_authenticator_reports_secret_resolution_failure() -> None:
+    now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    base_authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
+
+    class FailingResolver:
+        def resolve(self, secret: SecretRef) -> str:
+            raise RuntimeError("boom")
+
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: {},
+        secret_resolver=FailingResolver(),
+    )
+    claims = {
+        "iss": provider.issuer,
+        "aud": provider.client_id,
+        "groups": ["admins"],
+        "iat": _epoch(now - dt.timedelta(seconds=30)),
+        "nbf": _epoch(now - dt.timedelta(seconds=30)),
+        "exp": _epoch(now + dt.timedelta(minutes=5)),
+    }
+    token = _issue_oidc_token(claims, secret, kid=None)
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(token, now=now)
+    assert str(exc.value) == "client_secret_unavailable"
+
+
 def test_oidc_authenticator_client_secret_key_rejects_non_hmac() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, _, _ = _build_oidc_authenticator(now=now)
+    authenticator, _, _, _ = _build_oidc_authenticator(now=now)
     assert authenticator._client_secret_hmac_key("RS256") is None
 
 
@@ -352,8 +511,9 @@ def test_federated_identity_directory() -> None:
 async def test_hash_and_verify_admin_password() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
-    service = AuthenticationService(hasher)
-    app_secret = AppSecret(id=generate_id57(), secret_value="secret", salt="salt", created_at=now)
+    app_secret, app_ref = _make_app_secret(now)
+    resolver = _resolver_for([(app_ref, "secret")])
+    service = AuthenticationService(hasher, secret_resolver=resolver)
     hashed, salt = await service.hash_admin_password(app_secret=app_secret, user_secret="user", password="s3cret")
     admin = AdminUser(
         id=generate_id57(),
@@ -372,9 +532,10 @@ async def test_hash_and_verify_admin_password() -> None:
 async def test_authenticate_tenant_password_invalid_credentials() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
-    service = AuthenticationService(hasher)
-    app_secret = AppSecret(id=generate_id57(), secret_value="app", salt="salt", created_at=now)
-    tenant_secret = TenantSecret(id=generate_id57(), secret="tenant", created_at=now)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    service = AuthenticationService(hasher, secret_resolver=resolver)
     hashed, salt = await service.hash_tenant_password(
         app_secret=app_secret, tenant_secret=tenant_secret, user_secret="user", password="p@ss"
     )
@@ -399,9 +560,11 @@ async def test_authenticate_tenant_password_invalid_credentials() -> None:
 @pytest.mark.asyncio
 async def test_authenticate_tenant_password_requires_mfa_code() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    service = AuthenticationService(PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1))
-    app_secret = AppSecret(id=generate_id57(), secret_value="app", salt="salt", created_at=now)
-    tenant_secret = TenantSecret(id=generate_id57(), secret="tenant", created_at=now)
+    hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    service = AuthenticationService(hasher, secret_resolver=resolver)
     hashed, salt = await service.hash_tenant_password(
         app_secret=app_secret, tenant_secret=tenant_secret, user_secret="user", password="p@ss"
     )
@@ -429,9 +592,11 @@ async def test_authenticate_tenant_password_requires_mfa_code() -> None:
 @pytest.mark.asyncio
 async def test_authenticate_tenant_password_without_mfa_sets_password_level() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    service = AuthenticationService(PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1))
-    app_secret = AppSecret(id=generate_id57(), secret_value="app", salt="salt", created_at=now)
-    tenant_secret = TenantSecret(id=generate_id57(), secret="tenant", created_at=now)
+    hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    service = AuthenticationService(hasher, secret_resolver=resolver)
     hashed, salt = await service.hash_tenant_password(
         app_secret=app_secret,
         tenant_secret=tenant_secret,
@@ -460,9 +625,11 @@ async def test_authenticate_tenant_password_without_mfa_sets_password_level() ->
 @pytest.mark.asyncio
 async def test_authenticate_tenant_password_uses_matching_mfa_code() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    service = AuthenticationService(PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1))
-    app_secret = AppSecret(id=generate_id57(), secret_value="app", salt="salt", created_at=now)
-    tenant_secret = TenantSecret(id=generate_id57(), secret="tenant", created_at=now)
+    hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    service = AuthenticationService(hasher, secret_resolver=resolver)
     hashed, salt = await service.hash_tenant_password(
         app_secret=app_secret,
         tenant_secret=tenant_secret,
@@ -508,8 +675,152 @@ async def test_authenticate_tenant_password_uses_matching_mfa_code() -> None:
     assert session.level is SessionLevel.MFA
 
 
+@pytest.mark.asyncio
+async def test_authentication_rate_limiter_enforces_cooldown() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    rate_limiter = AuthenticationRateLimiter(
+        max_attempts=3,
+        base_cooldown=dt.timedelta(seconds=5),
+        max_cooldown=dt.timedelta(seconds=5),
+        lockout_period=dt.timedelta(minutes=5),
+        window=dt.timedelta(seconds=5),
+    )
+    service = AuthenticationService(
+        hasher,
+        secret_resolver=resolver,
+        rate_limiter=rate_limiter,
+    )
+    hashed, salt = await service.hash_tenant_password(
+        app_secret=app_secret,
+        tenant_secret=tenant_secret,
+        user_secret="user",
+        password="p@ss",
+    )
+    user = TenantUser(
+        id=generate_id57(),
+        email="user@example.com",
+        hashed_password=hashed,
+        password_salt=salt,
+        password_secret="user",
+        created_at=now,
+        updated_at=now,
+    )
+    with pytest.raises(AuthenticationError):
+        await service.authenticate_tenant_password(
+            user=user,
+            app_secret=app_secret,
+            tenant_secret=tenant_secret,
+            password="wrong",
+            now=now,
+            client_fingerprint="127.0.0.1",
+        )
+    with pytest.raises(AuthenticationError) as exc:
+        await service.authenticate_tenant_password(
+            user=user,
+            app_secret=app_secret,
+            tenant_secret=tenant_secret,
+            password="wrong",
+            now=now + dt.timedelta(seconds=1),
+            client_fingerprint="127.0.0.1",
+        )
+    assert str(exc.value) == "rate_limited"
+    with pytest.raises(AuthenticationError):
+        await service.authenticate_tenant_password(
+            user=user,
+            app_secret=app_secret,
+            tenant_secret=tenant_secret,
+            password="wrong",
+            now=now + dt.timedelta(seconds=6),
+            client_fingerprint="127.0.0.1",
+        )
+
+
+@pytest.mark.asyncio
+async def test_authentication_rate_limiter_locks_after_failures() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    hasher = PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1)
+    app_secret, app_ref = _make_app_secret(now)
+    tenant_secret, tenant_ref = _make_tenant_secret(now)
+    resolver = _resolver_for([(app_ref, "app"), (tenant_ref, "tenant")])
+    rate_limiter = AuthenticationRateLimiter(
+        max_attempts=2,
+        base_cooldown=dt.timedelta(seconds=1),
+        max_cooldown=dt.timedelta(seconds=1),
+        lockout_period=dt.timedelta(minutes=2),
+        window=dt.timedelta(seconds=30),
+    )
+    service = AuthenticationService(
+        hasher,
+        secret_resolver=resolver,
+        rate_limiter=rate_limiter,
+    )
+    hashed, salt = await service.hash_tenant_password(
+        app_secret=app_secret,
+        tenant_secret=tenant_secret,
+        user_secret="user",
+        password="p@ss",
+    )
+    user = TenantUser(
+        id=generate_id57(),
+        email="user@example.com",
+        hashed_password=hashed,
+        password_salt=salt,
+        password_secret="user",
+        created_at=now,
+        updated_at=now,
+    )
+    with pytest.raises(AuthenticationError):
+        await service.authenticate_tenant_password(
+            user=user,
+            app_secret=app_secret,
+            tenant_secret=tenant_secret,
+            password="wrong",
+            now=now,
+            client_fingerprint="127.0.0.1",
+        )
+    with pytest.raises(AuthenticationError):
+        await service.authenticate_tenant_password(
+            user=user,
+            app_secret=app_secret,
+            tenant_secret=tenant_secret,
+            password="wrong",
+            now=now + dt.timedelta(seconds=2),
+            client_fingerprint="127.0.0.1",
+        )
+    with pytest.raises(AuthenticationError) as exc:
+        await service.authenticate_tenant_password(
+            user=user,
+            app_secret=app_secret,
+            tenant_secret=tenant_secret,
+            password="wrong",
+            now=now + dt.timedelta(seconds=4),
+            client_fingerprint="127.0.0.1",
+        )
+    assert str(exc.value) == "account_locked"
+    future = now + dt.timedelta(minutes=3)
+    session = await service.authenticate_tenant_password(
+        user=user,
+        app_secret=app_secret,
+        tenant_secret=tenant_secret,
+        password="p@ss",
+        now=future,
+        client_fingerprint="127.0.0.1",
+    )
+    assert session.level is SessionLevel.PASSWORD_ONLY
+    assert session.id == session.record.id
+    assert session.expires_at == session.record.expires_at
+    assert session.revoked_at is None
+
 def test_passkey_authentication_failures() -> None:
-    service = AuthenticationService(PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1))
+    resolver = StaticSecretResolver({})
+    service = AuthenticationService(
+        PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1),
+        secret_resolver=resolver,
+    )
     manager = PasskeyManager()
     passkey = manager.register(user_id=generate_id57(), credential_id="cred", secret=b"secret", user_handle="handle")
     challenge = manager.challenge()
@@ -533,7 +844,11 @@ def test_passkey_authentication_failures() -> None:
 
 
 def test_passkey_authentication_success() -> None:
-    service = AuthenticationService(PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1))
+    resolver = StaticSecretResolver({})
+    service = AuthenticationService(
+        PasswordHasher(time_cost=2, memory_cost=8_192, parallelism=1),
+        secret_resolver=resolver,
+    )
     manager = PasskeyManager()
     now = dt.datetime.now(dt.timezone.utc)
     passkey = manager.register(
@@ -596,7 +911,7 @@ def test_mfa_manager_rejects_consumed_codes() -> None:
 
 def test_oidc_authenticator_error_paths() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
     base_claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -626,7 +941,7 @@ def test_oidc_authenticator_error_paths() -> None:
 
 def test_oidc_authenticator_rejects_expired_token() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -644,7 +959,7 @@ def test_oidc_authenticator_rejects_expired_token() -> None:
 
 def test_oidc_authenticator_rejects_not_yet_valid_token() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -667,7 +982,7 @@ def test_oidc_authenticator_rejects_replayed_token() -> None:
         default_token_ttl_seconds=600,
         max_token_age_seconds=60,
     )
-    authenticator, provider, secret = _build_oidc_authenticator(now=now, defaults=defaults)
+    authenticator, provider, secret, _ = _build_oidc_authenticator(now=now, defaults=defaults)
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -685,7 +1000,7 @@ def test_oidc_authenticator_rejects_replayed_token() -> None:
 
 def test_oidc_authenticator_rejects_invalid_token_structures() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, _ = _build_oidc_authenticator(now=now)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate("invalid", now=now)
     assert str(exc.value) == "invalid_token"
@@ -719,7 +1034,7 @@ def test_oidc_authenticator_rejects_invalid_token_structures() -> None:
 
 def test_oidc_authenticator_handles_header_anomalies() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, _secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, _secret, _ = _build_oidc_authenticator(now=now)
     payload = _b64url(json.dumps({"iss": provider.issuer}).encode())
 
     header = _b64url(json.dumps({"alg": 123}).encode())
@@ -737,7 +1052,7 @@ def test_oidc_authenticator_handles_header_anomalies() -> None:
 
 def test_oidc_authenticator_jwks_fetch_errors() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    _, provider, secret = _build_oidc_authenticator(now=now)
+    _, provider, secret, resolver = _build_oidc_authenticator(now=now)
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -749,25 +1064,45 @@ def test_oidc_authenticator_jwks_fetch_errors() -> None:
     }
     token = _issue_oidc_token(claims, secret)
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: [])
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: [],
+        secret_resolver=resolver,
+    )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": []})
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: {"keys": []},
+        secret_resolver=resolver,
+    )
     resolved = authenticator.validate(token, now=now)
     assert resolved["iss"] == provider.issuer
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {})
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: {},
+        secret_resolver=resolver,
+    )
     resolved = authenticator.validate(token, now=now)
     assert resolved["iss"] == provider.issuer
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": ["value"]})
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: {"keys": ["value"]},
+        secret_resolver=resolver,
+    )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: {"keys": "invalid"})
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: {"keys": "invalid"},
+        secret_resolver=resolver,
+    )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
@@ -775,7 +1110,7 @@ def test_oidc_authenticator_jwks_fetch_errors() -> None:
 
 def test_oidc_authenticator_key_resolution_errors() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    _, provider, secret = _build_oidc_authenticator(now=now)
+    _, provider, secret, resolver = _build_oidc_authenticator(now=now)
     base_claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -792,20 +1127,32 @@ def test_oidc_authenticator_key_resolution_errors() -> None:
             {"kty": "oct", "kid": "b", "k": _b64url(b"two")},
         ]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ambiguous)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_ambiguous,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, kid=None)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "ambiguous_jwk"
 
     jwks_single = {"keys": [{"kty": "oct", "kid": "primary", "k": _b64url(b"secret")}]}
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_single)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_single,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, kid="missing")
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "unknown_jwk"
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_single)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_single,
+        secret_resolver=resolver,
+    )
     authenticator._jwks_cache = []
     token = _issue_oidc_token(base_claims, b"secret", kid=None)
     resolved = authenticator.validate(token, now=now)
@@ -821,7 +1168,11 @@ def test_oidc_authenticator_key_resolution_errors() -> None:
             }
         ]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_mismatch)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_mismatch,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -837,7 +1188,11 @@ def test_oidc_authenticator_key_resolution_errors() -> None:
             }
         ]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_enc)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_enc,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -846,7 +1201,7 @@ def test_oidc_authenticator_key_resolution_errors() -> None:
 
 def test_oidc_authenticator_signature_edge_cases() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    _, provider, secret = _build_oidc_authenticator(now=now)
+    _, provider, secret, resolver = _build_oidc_authenticator(now=now)
     base_claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -860,7 +1215,11 @@ def test_oidc_authenticator_signature_edge_cases() -> None:
     jwks_oct = {
         "keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_oct)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_oct,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, alg="HS999")
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -874,27 +1233,43 @@ def test_oidc_authenticator_signature_edge_cases() -> None:
     assert str(exc.value) == "invalid_token_signature"
 
     jwks_no_secret = {"keys": [{"kty": "oct", "kid": "primary", "k": 123}]}
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_no_secret)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_no_secret,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
     jwks_bad_secret = {"keys": [{"kty": "oct", "kid": "primary", "k": "-!"}]}
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_bad_secret)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_bad_secret,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
     jwks_ec = {"keys": [{"kty": "EC", "kid": "primary"}]}
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ec)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_ec,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret)
     resolved = authenticator.validate(token, now=now)
     assert resolved["iss"] == provider.issuer
 
     jwks_ec_sig = {"keys": [{"kty": "EC", "kid": "primary", "alg": "ES256", "use": "sig"}]}
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_ec_sig)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_ec_sig,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, alg="ES256")
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -903,7 +1278,7 @@ def test_oidc_authenticator_signature_edge_cases() -> None:
 
 def test_oidc_authenticator_rsa_signature_paths() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    _, provider, secret = _build_oidc_authenticator(now=now)
+    _, provider, secret, resolver = _build_oidc_authenticator(now=now)
     base_claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -926,14 +1301,22 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
             }
         ]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_rsa)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_rsa,
+        secret_resolver=resolver,
+    )
     signature = b"\x00" * len(modulus)
     token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_token_signature"
 
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_rsa)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_rsa,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS1024", signature_bytes=signature)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -942,7 +1325,11 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
     jwks_bad_fields = {
         "keys": [{"kty": "RSA", "kid": "rsa", "n": None, "e": _b64url(exponent)}]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_bad_fields)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_bad_fields,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -951,7 +1338,11 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
     jwks_bad_base64 = {
         "keys": [{"kty": "RSA", "kid": "rsa", "n": "-!", "e": _b64url(exponent)}]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_bad_base64)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_bad_base64,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -960,7 +1351,11 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
     jwks_zero_modulus = {
         "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(b"\x00"), "e": _b64url(exponent)}]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_zero_modulus)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_zero_modulus,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature)
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -970,7 +1365,11 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
     jwks_small = {
         "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(small_modulus), "e": _b64url(exponent)}]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_small)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_small,
+        secret_resolver=resolver,
+    )
     token = _issue_oidc_token(
         base_claims,
         secret,
@@ -985,7 +1384,11 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
     jwks_large = {
         "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}]
     }
-    authenticator = OidcAuthenticator(provider, jwks_fetcher=lambda _: jwks_large)
+    authenticator = OidcAuthenticator(
+        provider,
+        jwks_fetcher=lambda _: jwks_large,
+        secret_resolver=resolver,
+    )
     signature_high = b"\xff" * len(modulus)
     token = _issue_oidc_token(base_claims, secret, kid="rsa", alg="RS256", signature_bytes=signature_high)
     with pytest.raises(AuthenticationError) as exc:
@@ -995,12 +1398,17 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
 
 def test_oidc_authenticator_rsa_valid_signature_branch() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    base_authenticator, provider, _ = _build_oidc_authenticator(now=now)
+    base_authenticator, provider, _, resolver = _build_oidc_authenticator(now=now)
     modulus = b"\x01" + b"\x00" * 63
     exponent = (1).to_bytes(1, "big")
     rsa_key = {"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}
     jwks = {"keys": [rsa_key]}
-    authenticator = OidcAuthenticator(provider, defaults=base_authenticator.defaults, jwks_fetcher=lambda _: jwks)
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: jwks,
+        secret_resolver=resolver,
+    )
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -1025,12 +1433,17 @@ def test_oidc_authenticator_rsa_valid_signature_branch() -> None:
 
 def test_oidc_authenticator_rsa_invalid_signature_branch() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    base_authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    base_authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
     modulus = b"\x01" + b"\x00" * 63
     exponent = (65537).to_bytes(3, "big")
     rsa_key = {"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}
     jwks = {"keys": [rsa_key]}
-    authenticator = OidcAuthenticator(provider, defaults=base_authenticator.defaults, jwks_fetcher=lambda _: jwks)
+    authenticator = OidcAuthenticator(
+        provider,
+        defaults=base_authenticator.defaults,
+        jwks_fetcher=lambda _: jwks,
+        secret_resolver=resolver,
+    )
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -1049,7 +1462,7 @@ def test_oidc_authenticator_rsa_invalid_signature_branch() -> None:
 
 def test_oidc_authenticator_validate_claims_with_ttl() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
     authenticator.defaults = OidcValidationDefaults(
         clock_skew_seconds=0,
         default_token_ttl_seconds=30,
@@ -1092,6 +1505,7 @@ def test_oidc_authenticator_validate_claims_with_ttl() -> None:
         provider_without_audience,
         defaults=authenticator.defaults,
         jwks_fetcher=lambda _: jwks,
+        secret_resolver=resolver,
     )
     authenticator_without_audience._validate_claims(valid_claims, expected_nonce=None, now=now)
 
@@ -1119,7 +1533,7 @@ def test_oidc_authenticator_validate_claims_with_ttl() -> None:
 
 def test_oidc_authenticator_claim_validation_edge_cases() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
     base_claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,
@@ -1212,6 +1626,7 @@ def test_oidc_authenticator_claim_validation_edge_cases() -> None:
         jwks_fetcher=lambda _: {
             "keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]
         },
+        secret_resolver=resolver,
     )
     missing_exp_claims = {
         "iss": provider.issuer,
@@ -1229,7 +1644,9 @@ def test_oidc_authenticator_claim_validation_edge_cases() -> None:
         default_token_ttl_seconds=60,
         max_token_age_seconds=None,
     )
-    authenticator_ttl, provider_ttl, secret_ttl = _build_oidc_authenticator(now=now, defaults=ttl_defaults)
+    authenticator_ttl, provider_ttl, secret_ttl, _ = _build_oidc_authenticator(
+        now=now, defaults=ttl_defaults
+    )
     ttl_claims = {
         "iss": provider_ttl.issuer,
         "aud": provider_ttl.client_id,
@@ -1250,7 +1667,7 @@ def test_oidc_authenticator_handles_naive_now() -> None:
         default_token_ttl_seconds=None,
         max_token_age_seconds=None,
     )
-    authenticator, provider, secret = _build_oidc_authenticator(now=now, defaults=defaults)
+    authenticator, provider, secret, _ = _build_oidc_authenticator(now=now, defaults=defaults)
     claims = {
         "iss": provider.issuer,
         "aud": provider.client_id,

@@ -45,7 +45,7 @@ class ObservabilityConfig(msgspec.Struct, frozen=True):
     opentelemetry_enabled: bool = True
     opentelemetry_tracer: str = "artemis"
     sentry_enabled: bool = True
-    sentry_record_breadcrumbs: bool = True
+    sentry_record_breadcrumbs: bool = False
     sentry_capture_exceptions: bool = True
     sentry_breadcrumb_category: str = "artemis"
     sentry_breadcrumb_level: str = "info"
@@ -479,8 +479,7 @@ class Observability:
         }
         if channel:
             breadcrumb_data["channel"] = channel
-        if host:
-            breadcrumb_data["webhook_host"] = host
+        breadcrumb_message = f"ChatOps message ({len(message.text)} chars)"
         return self._start(
             self.config.chatops.span_name,
             kind=self._client_span_kind,
@@ -491,7 +490,7 @@ class Observability:
                 self.config.chatops.datadog_metric_error,
                 self.config.chatops.datadog_metric_timing,
             ),
-            breadcrumb_message=message.text,
+            breadcrumb_message=breadcrumb_message,
             breadcrumb_data=breadcrumb_data,
             sentry_tags=sentry_tags,
             sentry_extra=sentry_extra,
