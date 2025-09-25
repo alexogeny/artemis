@@ -6,7 +6,19 @@ import hashlib
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Final, Iterable, Literal, Mapping, Sequence, cast
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Final,
+    Iterable,
+    Literal,
+    Mapping,
+    Protocol,
+    Sequence,
+    cast,
+)
 
 import rure
 from msgspec import Struct, convert, field, json, to_builtins
@@ -58,7 +70,20 @@ from .tenancy import TenantContext, TenantScope
 _DEV_ENVIRONMENTS: Final[set[str]] = {"development", "dev", "local", "test"}
 _DEV_DOMAIN_SUFFIXES: Final[tuple[str, ...]] = (".local", ".localhost", ".test")
 _DEV_DOMAINS: Final[set[str]] = {"localhost", "127.0.0.1"}
-_TENANT_SLUG_PATTERN: Final[rure.Regex] = rure.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+
+if TYPE_CHECKING:
+    class RureRegex(Protocol):
+        def is_match(self, value: str) -> bool:  # pragma: no cover - typing helper
+            ...
+
+
+else:  # pragma: no cover - runtime alias derived from compiled pattern
+    RureRegex = type(rure.compile("demo"))
+
+
+_TENANT_SLUG_PATTERN: Final[RureRegex] = cast(
+    "RureRegex", rure.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
+)
 
 
 class QuickstartSsoProvider(Struct, frozen=True):
@@ -691,7 +716,7 @@ class QuickstartChatOpsControlPlane:
         app: ArtemisApp,
         settings: QuickstartChatOpsSettings,
         *,
-        command_pattern: rure.Regex,
+        command_pattern: RureRegex,
     ) -> None:
         self._app = app
         self._settings = settings
@@ -866,7 +891,7 @@ class QuickstartAdminControlPlane:
         app: ArtemisApp,
         *,
         slug_normalizer: Callable[[str], str],
-        slug_pattern: rure.Regex,
+        slug_pattern: RureRegex,
         ensure_contexts: Callable[[Iterable[str]], Awaitable[None]],
         chatops: QuickstartChatOpsControlPlane,
         sync_allowed_tenants: Callable[[QuickstartAuthConfig], None],
@@ -1028,7 +1053,7 @@ class QuickstartAdminControlPlane:
             subject=subject,
             message=message,
         )
-        await orm.tenants.support_tickets.create(tenant=tenant, model=tenant_record)
+        await orm.tenants.support_tickets.create(tenant=tenant, data=tenant_record)
         await self._chatops.notify(
             "support_ticket_created",
             f"Support ticket '{created.id}' opened by {tenant.tenant}",

@@ -10,6 +10,7 @@ from typing import Iterable, Mapping, Sequence, cast
 
 import msgspec
 import pytest
+from msgspec import structs
 
 import artemis.quickstart as quickstart
 from artemis import AppConfig, ArtemisApp, PasskeyManager, SessionLevel, TestClient
@@ -72,7 +73,7 @@ from artemis.quickstart import (
     quickstart_migrations,
 )
 from artemis.requests import Request
-from artemis.responses import JSONResponse
+from artemis.responses import JSONResponse, Response
 from artemis.tenancy import TenantContext, TenantScope
 from tests.support import FakeConnection, FakePool
 
@@ -816,12 +817,12 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         return updated
 
     async def _tenant_support_create(
-        record: quickstart.QuickstartTenantSupportTicketRecord | None = None,
+        data: quickstart.QuickstartTenantSupportTicketRecord | None = None,
         *,
         tenant: TenantContext,
         model: quickstart.QuickstartTenantSupportTicketRecord | None = None,
     ) -> quickstart.QuickstartTenantSupportTicketRecord:
-        entry = model or record
+        entry = model or data
         assert entry is not None
         tenant_support_tickets[tenant.tenant][entry.admin_ticket_id] = entry
         return entry
@@ -1664,7 +1665,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
 
         create_binding = app.chatops_commands.binding_by_name("quickstart.chatops.create_tenant")
 
-        async def response_handler(context: ChatOpsCommandContext) -> JSONResponse:
+        async def response_handler(context: ChatOpsCommandContext) -> Response:
             return JSONResponse(
                 {
                     "status": "ok",
@@ -1749,7 +1750,12 @@ async def test_quickstart_admin_support_ticket_update_branches(
         async def get(
             self, *, filters: Mapping[str, object] | None = None, tenant: TenantContext | None = None
         ) -> QuickstartSupportTicketRecord | None:
-            return self.records.get(cast(str, filters.get("id")))
+            if not filters:
+                return None
+            ticket_id = cast(str | None, filters.get("id"))
+            if ticket_id is None:
+                return None
+            return self.records.get(ticket_id)
 
         async def update(
             self,
@@ -1758,7 +1764,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
             values: Mapping[str, object],
         ) -> QuickstartSupportTicketRecord:
             current = self.records[cast(str, filters["id"])]
-            updated = msgspec.structs.replace(current, **values)
+            updated = structs.replace(current, **values)
             self.records[current.id] = updated
             return updated
 
@@ -1774,7 +1780,10 @@ async def test_quickstart_admin_support_ticket_update_branches(
             tenant: TenantContext,
             filters: Mapping[str, object],
         ) -> QuickstartTenantSupportTicketRecord | None:
-            return self.records.get(cast(str, filters["admin_ticket_id"]))
+            ticket_id = cast(str | None, filters.get("admin_ticket_id"))
+            if ticket_id is None:
+                return None
+            return self.records.get(ticket_id)
 
         async def update(
             self,
@@ -1784,18 +1793,23 @@ async def test_quickstart_admin_support_ticket_update_branches(
             values: Mapping[str, object],
         ) -> QuickstartTenantSupportTicketRecord:
             current = self.records[cast(str, filters["admin_ticket_id"])]
-            updated = msgspec.structs.replace(current, **values)
+            updated = structs.replace(current, **values)
             self.records[current.admin_ticket_id] = updated
             return updated
 
-    stub_orm = SimpleNamespace(
-        admin=SimpleNamespace(
-            support_tickets=AdminSupportStore(),
-        ),
-        tenants=SimpleNamespace(
-            support_tickets=TenantSupportStore(),
+    stub_orm: ORM = cast(
+        ORM,
+        SimpleNamespace(
+            admin=SimpleNamespace(
+                support_tickets=AdminSupportStore(),
+            ),
+            tenants=SimpleNamespace(
+                support_tickets=TenantSupportStore(),
+            ),
         ),
     )
+
+    tenant_store = cast(TenantSupportStore, stub_orm.tenants.support_tickets)
 
     async def ensure_contexts(slugs: Iterable[str]) -> None:
         return None
@@ -1819,7 +1833,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
 
     assert updated.status == SupportTicketStatus.RESPONDED
     assert updated.updates[-1].note == "Investigating"
-    tenant_updated = stub_orm.tenants.support_tickets.records[ticket.id]
+    tenant_updated = tenant_store.records[ticket.id]
     assert tenant_updated.status == SupportTicketStatus.RESPONDED
     assert tenant_updated.updates[-1].note == "Investigating"
 
@@ -1832,7 +1846,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
     )
     assert updated_no_note.status == SupportTicketStatus.RESPONDED
 
-    stub_orm.tenants.support_tickets.records.pop(ticket.id)
+    tenant_store.records.pop(ticket.id)
     resolved_payload = QuickstartSupportTicketUpdateRequest(status="resolved", note=None)
     updated_missing = await admin_control.update_support_ticket(
         ticket.id,
@@ -3099,6 +3113,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     )
     with pytest.raises(ChatOpsCommandResolutionError) as missing_binding_exc:
         control.resolve_invocation(request, payload_missing_binding)
+    assert isinstance(missing_binding_exc.value, ChatOpsCommandResolutionError)
     assert missing_binding_exc.value.code == "unknown_command"
 
     control.configure(
@@ -3249,7 +3264,9 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         async def get(
             self, *, filters: Mapping[str, object] | None = None
         ) -> QuickstartSupportTicketRecord | None:
-            ticket_id = cast(str | None, (filters or {}).get("id"))
+            if not filters:
+                return None
+            ticket_id = cast(str | None, filters.get("id"))
             if ticket_id is None:
                 return None
             return self.records.get(ticket_id)
@@ -3262,7 +3279,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         ) -> QuickstartSupportTicketRecord:
             ticket_id = cast(str, filters["id"])
             record = self.records[ticket_id]
-            updated = msgspec.structs.replace(record, **values)
+            updated = structs.replace(record, **values)
             self.records[ticket_id] = updated
             return updated
 
@@ -3275,12 +3292,12 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
 
         async def create(
             self,
+            data: QuickstartTenantSupportTicketRecord,
             *,
             tenant: TenantContext,
-            model: QuickstartTenantSupportTicketRecord,
         ) -> QuickstartTenantSupportTicketRecord:
-            self.records[tenant.tenant][model.admin_ticket_id] = model
-            return model
+            self.records[tenant.tenant][data.admin_ticket_id] = data
+            return data
 
         async def get(
             self,
@@ -3300,7 +3317,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         ) -> QuickstartTenantSupportTicketRecord:
             ticket_id = cast(str, filters["admin_ticket_id"])
             record = self.records[tenant.tenant][ticket_id]
-            updated = msgspec.structs.replace(record, **values)
+            updated = structs.replace(record, **values)
             self.records[tenant.tenant][ticket_id] = updated
             return updated
 
@@ -3312,18 +3329,26 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         ) -> list[QuickstartTenantSupportTicketRecord]:
             return list(self.records[tenant.tenant].values())
 
-    stub_orm = SimpleNamespace(
-        admin=SimpleNamespace(
-            quickstart_tenants=StubTenantsStore(),
-            quickstart_trial_extensions=StubTrialExtensionsStore(),
-            support_tickets=StubSupportTicketsStore(),
-        ),
-        tenants=SimpleNamespace(
-            support_tickets=StubTenantSupportTicketsStore(),
+    stub_orm: ORM = cast(
+        ORM,
+        SimpleNamespace(
+            admin=SimpleNamespace(
+                quickstart_tenants=StubTenantsStore(),
+                quickstart_trial_extensions=StubTrialExtensionsStore(),
+                support_tickets=StubSupportTicketsStore(),
+            ),
+            tenants=SimpleNamespace(
+                support_tickets=StubTenantSupportTicketsStore(),
+            ),
         ),
     )
 
-    engine = StubAuthEngine()
+    raw_engine = StubAuthEngine()
+    engine = cast(QuickstartAuthEngine, raw_engine)
+
+    trial_store = cast(StubTrialExtensionsStore, stub_orm.admin.quickstart_trial_extensions)
+    admin_ticket_store = cast(StubSupportTicketsStore, stub_orm.admin.support_tickets)
+    tenant_ticket_store = cast(StubTenantSupportTicketsStore, stub_orm.tenants.support_tickets)
     ensure_calls: list[str] = []
 
     async def ensure_contexts(slugs: Iterable[str]) -> None:
@@ -3398,7 +3423,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
     )
     assert record.slug == "delta"
     assert "delta" in ensure_calls
-    assert engine.reloaded and engine.config.tenants[-1].slug == "delta"
+    assert raw_engine.reloaded and raw_engine.config.tenants[-1].slug == "delta"
     assert synced_configs and synced_configs[-1].tenants[-1].slug == "delta"
     assert events[-1][1].extra["slug"] == "delta"
 
@@ -3441,7 +3466,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
     )
     assert isinstance(extension, QuickstartTrialExtensionRecord)
     assert extension.note == "extend"
-    assert stub_orm.admin.quickstart_trial_extensions.records[-1] is extension
+    assert trial_store.records[-1] is extension
 
     tenant_context = TenantContext(
         tenant="delta",
@@ -3471,8 +3496,8 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         actor="delta-admin",
     )
     assert ticket.tenant_slug == "delta"
-    assert ticket.id in stub_orm.admin.support_tickets.records
-    assert ticket.id in stub_orm.tenants.support_tickets.records["delta"]
+    assert ticket.id in admin_ticket_store.records
+    assert ticket.id in tenant_ticket_store.records["delta"]
 
     metrics = await admin_control.tenant_metrics(stub_orm)
     assert metrics["support_tickets"]["open"] == 1
@@ -3498,7 +3523,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         actor="agent",
     )
     assert updated_ticket.status == SupportTicketStatus.RESPONDED
-    tenant_ticket = stub_orm.tenants.support_tickets.records["delta"][ticket.id]
+    tenant_ticket = tenant_ticket_store.records["delta"][ticket.id]
     assert tenant_ticket.status == SupportTicketStatus.RESPONDED
     assert tenant_ticket.updates[-1].note == "Investigating"
 

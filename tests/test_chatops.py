@@ -27,12 +27,12 @@ from artemis.chatops import (
     ChatOpsInvocationError,
     ChatOpsSlashCommand,
     SlackWebhookClient,
-    parse_slash_command_args,
     _default_transport,
     _ensure_tls_destination,
     _maybe_await,
     _validate_certificate_pin,
     _webhook_host,
+    parse_slash_command_args,
 )
 from artemis.serialization import json_decode
 from tests.observability_stubs import (
@@ -45,7 +45,9 @@ from tests.observability_stubs import (
 
 
 def test_chatops_parse_slash_command_args() -> None:
-    args = parse_slash_command_args('slug=alpha =ignored name="Alpha Beta" note=Trial flag extra="value" note2=" spaced "')
+    args = parse_slash_command_args(
+        'slug=alpha =ignored name="Alpha Beta" note=Trial flag extra="value" note2=" spaced "'
+    )
     assert args == {
         "slug": "alpha",
         "name": "Alpha Beta",
@@ -1090,6 +1092,7 @@ def test_chatops_slash_command_resolution_rules() -> None:
             workspace_id="T123",
             admin_workspace="T123",
         )
+    assert isinstance(admin_scope_error.value, ChatOpsCommandResolutionError)
     assert admin_scope_error.value.code == "admin_command"
 
     with pytest.raises(ChatOpsCommandResolutionError) as workspace_error:
@@ -1100,6 +1103,7 @@ def test_chatops_slash_command_resolution_rules() -> None:
             workspace_id="T999",
             admin_workspace="T123",
         )
+    assert isinstance(workspace_error.value, ChatOpsCommandResolutionError)
     assert workspace_error.value.code == "workspace_forbidden"
 
     resolved_public = service.resolve_slash_command(
@@ -1119,6 +1123,7 @@ def test_chatops_slash_command_resolution_rules() -> None:
             workspace_id="T123",
             admin_workspace="T123",
         )
+    assert isinstance(unknown_error.value, ChatOpsCommandResolutionError)
     assert unknown_error.value.code == "unknown_command"
 
     disabled_service = ChatOpsService(ChatOpsConfig(enabled=True))
@@ -1130,4 +1135,5 @@ def test_chatops_slash_command_resolution_rules() -> None:
             workspace_id="T123",
             admin_workspace="T123",
         )
+    assert isinstance(unconfigured_error.value, ChatOpsCommandResolutionError)
     assert unconfigured_error.value.code == "chatops_unconfigured"
