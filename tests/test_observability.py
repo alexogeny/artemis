@@ -140,6 +140,40 @@ async def test_observability_chatops_success_without_metrics(
     assert all(metric[0] != observability.config.chatops.datadog_metric_sent for metric in statsd.increments)
 
 
+def test_observability_chatops_start_without_host() -> None:
+    observability = Observability()
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+    message = ChatMessage(text="nohost")
+    config = SlackWebhookConfig(webhook_url="https:///token")
+
+    context = observability.on_chatops_send_start(tenant, message, config)
+    assert context is not None
+    assert all(not tag.startswith("webhook_host:") for tag in context.datadog_tags)
+
+
+def test_observability_chatops_error_with_span(monkeypatch: pytest.MonkeyPatch) -> None:
+    tracer = setup_stub_opentelemetry(monkeypatch)
+    hub = setup_stub_sentry(monkeypatch)
+    statsd = setup_stub_datadog(monkeypatch)
+    observability = Observability()
+
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+    message = ChatMessage(text="boom")
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token")
+
+    context = observability.on_chatops_send_start(tenant, message, config)
+    assert context is not None
+
+    error = RuntimeError("boom")
+    observability.on_chatops_send_error(context, error)
+
+    assert hub.captured[-1] is error
+    span = tracer.spans[-1]
+    assert span.attributes["chatops.result"] == "error"
+    metric, _, _ = statsd.increments[-1]
+    assert metric == observability.config.chatops.datadog_metric_error
+
+
 def test_observability_request_success_without_status(monkeypatch: pytest.MonkeyPatch) -> None:
     statsd = setup_stub_datadog(monkeypatch)
     observability = Observability()

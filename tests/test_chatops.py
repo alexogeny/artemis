@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import types
 from typing import Any
 
 import pytest
@@ -20,7 +22,14 @@ from artemis import (
     TenantScope,
     TestClient,
 )
-from artemis.chatops import _default_transport, _maybe_await, _webhook_host
+from artemis.chatops import (
+    SlackWebhookClient,
+    _default_transport,
+    _ensure_tls_destination,
+    _maybe_await,
+    _validate_certificate_pin,
+    _webhook_host,
+)
 from artemis.serialization import json_decode
 from tests.observability_stubs import (
     setup_stub_datadog,
@@ -221,7 +230,9 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
             default_channel="#ops",
         ),
     )
-    observability = Observability(ObservabilityConfig(datadog_tags=(("env", "test"),)))
+    observability = Observability(
+        ObservabilityConfig(datadog_tags=(("env", "test"),), sentry_record_breadcrumbs=True)
+    )
     service = ChatOpsService(config, transport=transport, observability=observability)
 
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
@@ -246,6 +257,10 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
     assert second_span.ended
 
     assert [crumb["data"]["tenant"] for crumb in hub.breadcrumbs] == ["acme", "admin"]
+    assert [crumb["message"] for crumb in hub.breadcrumbs] == [
+        "ChatOps message (12 chars)",
+        "ChatOps message (11 chars)",
+    ]
     assert hub.scopes[0].tags["chatops.scope"] == "tenant"
     assert hub.scopes[1].tags["chatops.scope"] == "admin"
     assert hub.captured == []
@@ -308,7 +323,7 @@ async def test_chatops_instrumentation_error(monkeypatch: pytest.MonkeyPatch) ->
 async def test_chatops_instrumentation_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
     config = ChatOpsConfig(
         enabled=True,
-        default=SlackWebhookConfig(webhook_url="https:///token"),
+        default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
 
     async def failing_transport(
@@ -343,7 +358,7 @@ async def test_chatops_instrumentation_datadog_only(monkeypatch: pytest.MonkeyPa
     statsd = setup_stub_datadog(monkeypatch)
     config = ChatOpsConfig(
         enabled=True,
-        default=SlackWebhookConfig(webhook_url="https:///token"),
+        default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
     observability = Observability(
         ObservabilityConfig(
@@ -362,7 +377,7 @@ async def test_chatops_instrumentation_datadog_only(monkeypatch: pytest.MonkeyPa
     tags = statsd.increments[0][2]
     assert "tenant:acme" in tags
     assert "channel" not in {tag.split(":", 1)[0] for tag in tags}
-    assert "webhook_host" not in {tag.split(":", 1)[0] for tag in tags}
+    assert "webhook_host:hooks.slack.com" in tags
     assert statsd.timings and statsd.timings[0][0] == observability.config.chatops.datadog_metric_timing
 
 
@@ -386,7 +401,7 @@ async def test_chatops_instrumentation_sentry_options(monkeypatch: pytest.Monkey
 
     config = ChatOpsConfig(
         enabled=True,
-        default=SlackWebhookConfig(webhook_url="https:///token"),
+        default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
     observability = Observability(
         ObservabilityConfig(
@@ -426,20 +441,24 @@ async def test_chatops_instrumentation_sentry_breadcrumbs_without_channel(
     hub = setup_stub_sentry(monkeypatch)
     config = ChatOpsConfig(
         enabled=True,
-        default=SlackWebhookConfig(webhook_url="https:///token"),
+        default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = Observability(
+        ObservabilityConfig(datadog_enabled=False, sentry_record_breadcrumbs=True)
+    )
     service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
-    await service.send(tenant, ChatMessage(text="breadcrumb"))
+    message = ChatMessage(text="breadcrumb")
+    await service.send(tenant, message)
 
     crumb = hub.breadcrumbs[-1]
+    assert crumb["message"] == f"ChatOps message ({len(message.text)} chars)"
     assert "channel" not in crumb["data"]
     assert "webhook_host" not in crumb["data"]
     span = tracer.spans[-1]
     assert "chatops.channel" not in span.attributes
-    assert "chatops.webhook.host" not in span.attributes
+    assert span.attributes["chatops.webhook.host"] == "hooks.slack.com"
 
 
 @pytest.mark.asyncio
@@ -517,6 +536,36 @@ def test_chatops_webhook_host_helper() -> None:
     assert _webhook_host("not-a-url") is None
 
 
+def test_slack_webhook_client_requires_https() -> None:
+    config = SlackWebhookConfig(webhook_url="http://hooks.slack.com/services/test")
+    with pytest.raises(ChatOpsError):
+        SlackWebhookClient(config)
+
+
+def test_slack_webhook_client_requires_host() -> None:
+    config = SlackWebhookConfig(webhook_url="https:///missing")
+    with pytest.raises(ChatOpsError):
+        SlackWebhookClient(config)
+
+
+def test_slack_webhook_client_validates_allowed_hosts() -> None:
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/test",
+        allowed_hosts=("example.com",),
+    )
+    with pytest.raises(ChatOpsError):
+        SlackWebhookClient(config)
+
+
+def test_slack_webhook_client_accepts_allowed_host() -> None:
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/test",
+        allowed_hosts=("hooks.slack.com",),
+    )
+    client = SlackWebhookClient(config)
+    assert client.config.allowed_hosts == ("hooks.slack.com",)
+
+
 @pytest.mark.asyncio
 async def test_chatops_minimal_payload() -> None:
     recorded: list[dict[str, Any]] = []
@@ -540,11 +589,15 @@ async def test_default_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     captured: list[tuple[str, float, dict[str, str]]] = []
 
     class DummyResponse:
-        def __init__(self, status: int) -> None:
+        def __init__(self, status: int, url: str) -> None:
             self.status = status
+            self._url = url
 
         def getcode(self) -> int:
             return self.status
+
+        def geturl(self) -> str:
+            return self._url
 
         def __enter__(self) -> "DummyResponse":
             return self
@@ -552,11 +605,15 @@ async def test_default_transport(monkeypatch: pytest.MonkeyPatch) -> None:
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float) -> DummyResponse:
-        captured.append((request.full_url, timeout, dict(request.headers)))
-        return DummyResponse(status=202)
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                captured.append((request.full_url, timeout, dict(request.headers)))
+                return DummyResponse(status=202, url=request.full_url)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(
         webhook_url="https://hooks.slack.com/services/default",
@@ -573,14 +630,54 @@ async def test_default_transport(monkeypatch: pytest.MonkeyPatch) -> None:
     assert {k.lower(): v for k, v in headers.items()} == {"content-type": "application/json"}
 
 
+def test_ensure_tls_destination_rejects_insecure_redirect() -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "http://malicious.example.com/hook"
+
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
+
+    with pytest.raises(ChatOpsError):
+        _ensure_tls_destination(DummyResponse(), config)
+
+
+def test_ensure_tls_destination_requires_host() -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https:///missing"
+
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
+
+    with pytest.raises(ChatOpsError):
+        _ensure_tls_destination(DummyResponse(), config)
+
+
+def test_ensure_tls_destination_rejects_disallowed_host() -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https://malicious.example.com/hook"
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        _ensure_tls_destination(DummyResponse(), config)
+
+
 @pytest.mark.asyncio
 async def test_default_transport_error_status(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyResponse:
-        def __init__(self, status: int) -> None:
+        def __init__(self, status: int, url: str) -> None:
             self.status = status
+            self._url = url
 
         def getcode(self) -> int:
             return self.status
+
+        def geturl(self) -> str:
+            return self._url
 
         def __enter__(self) -> "DummyResponse":
             return self
@@ -588,12 +685,320 @@ async def test_default_transport_error_status(monkeypatch: pytest.MonkeyPatch) -
         def __exit__(self, exc_type, exc, tb) -> bool:
             return False
 
-    def fake_urlopen(request, timeout: float) -> DummyResponse:
-        return DummyResponse(status=503)
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse(status=503, url=request.full_url)
 
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
 
     config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default", timeout=1.0)
 
     with pytest.raises(ChatOpsError):
         await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_redirect_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySSL:
+        def getpeercert(self, binary_form: bool = True) -> bytes:
+            return b""
+
+    class DummyResponse:
+        def __init__(self, url: str) -> None:
+            self.status = 200
+            self._url = url
+            self.fp = types.SimpleNamespace(
+                raw=types.SimpleNamespace(_sslobj=DummySSL()),
+            )
+
+        def getcode(self) -> int:
+            return self.status
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "https://malicious.example.com/hook",
+                )
+                return DummyResponse(url="https://malicious.example.com/hook")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_handles_missing_base_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySSL:
+        def getpeercert(self, binary_form: bool = True) -> bytes:
+            return b""
+
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.status = 200
+            self._url = "https://hooks.slack.com/services/default"
+            self.fp = types.SimpleNamespace(
+                raw=types.SimpleNamespace(_sslobj=DummySSL()),
+            )
+
+        def getcode(self) -> int:
+            return self.status
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse()
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+    monkeypatch.setattr("artemis.chatops._webhook_host", lambda url: None)
+
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
+
+    await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_redirect_even_if_host_allowed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> Any:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "https://hooks.slack.com/services/redirect",
+                )
+                pytest.fail("redirect_request should have raised")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_insecure_redirect(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> Any:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "http://malicious.example.com/hook",
+                )
+                pytest.fail("redirect_request should have raised")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_redirect_without_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_build_opener(*handlers: Any) -> Any:
+        redirect_handler = handlers[0]
+
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> Any:
+                redirect_handler.redirect_request(
+                    request,
+                    None,
+                    307,
+                    "Temporary Redirect",
+                    {},
+                    "https:///missing",
+                )
+                pytest.fail("redirect_request should have raised")
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        allowed_hosts=("hooks.slack.com",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_validates_certificate_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    cert_bytes = b"certificate"
+    fingerprint = hashlib.sha256(cert_bytes).hexdigest()
+
+    class DummySSL:
+        def getpeercert(self, binary_form: bool = True) -> bytes:
+            return cert_bytes
+
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.status = 200
+            self._url = "https://hooks.slack.com/services/default"
+            self.fp = types.SimpleNamespace(raw=types.SimpleNamespace(_sslobj=DummySSL()))
+
+        def getcode(self) -> int:
+            return self.status
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse()
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        certificate_pins=(fingerprint,),
+    )
+
+    await _default_transport(config, b"{}", {"content-type": "application/json"})
+
+
+@pytest.mark.asyncio
+async def test_default_transport_rejects_bad_certificate_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySSL:
+        def getpeercert(self, binary_form: bool = True) -> bytes:
+            return b"certificate"
+
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.status = 200
+            self._url = "https://hooks.slack.com/services/default"
+            self.fp = types.SimpleNamespace(raw=types.SimpleNamespace(_sslobj=DummySSL()))
+
+        def getcode(self) -> int:
+            return self.status
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type, exc, tb) -> bool:
+            return False
+
+    def fake_build_opener(*handlers: Any) -> Any:
+        class DummyOpener:
+            def open(self, request: Any, timeout: float, **_: Any) -> DummyResponse:
+                return DummyResponse()
+
+        return DummyOpener()
+
+    monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
+
+    config = SlackWebhookConfig(
+        webhook_url="https://hooks.slack.com/services/default",
+        certificate_pins=("deadbeef",),
+    )
+
+    with pytest.raises(ChatOpsError):
+        await _default_transport(config, b"{}", {"content-type": "application/json"})
+
+
+def test_validate_certificate_pin_requires_ssl_object() -> None:
+    class DummyResponse:
+        def __init__(self) -> None:
+            self.fp = types.SimpleNamespace(raw=None)
+
+    with pytest.raises(ChatOpsError):
+        _validate_certificate_pin(DummyResponse(), ("deadbeef",))
+
+
+def test_ensure_tls_destination_allows_base_host_without_explicit_allowlist() -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https://hooks.slack.com/services/default"
+
+    config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
+
+    _ensure_tls_destination(DummyResponse(), config)
+
+
+def test_ensure_tls_destination_allows_missing_base_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummyResponse:
+        def geturl(self) -> str:
+            return "https://hooks.slack.com/services/default"
+
+    monkeypatch.setattr("artemis.chatops._webhook_host", lambda url: None)
+
+    config = SlackWebhookConfig(webhook_url="https:///missing")
+
+    _ensure_tls_destination(DummyResponse(), config)

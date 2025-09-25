@@ -11,6 +11,7 @@ import hmac
 import json
 import secrets
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
+from dataclasses import dataclass
 from hashlib import sha256
 from typing import Any
 from xml.etree import ElementTree as ET
@@ -26,6 +27,7 @@ except Exception:  # pragma: no cover - optional dependency or build failure
 from argon2.low_level import Type as Argon2Type
 from argon2.low_level import hash_secret as argon2_hash_secret
 
+from .database import SecretResolver
 from .id57 import generate_id57
 from .models import (
     AdminUser,
@@ -45,8 +47,10 @@ from .models import (
 
 __all__ = [
     "AuthenticationError",
+    "AuthenticationRateLimiter",
     "AuthenticationService",
     "FederatedIdentityDirectory",
+    "IssuedSessionToken",
     "MfaManager",
     "OidcAuthenticator",
     "OidcValidationDefaults",
@@ -62,12 +66,130 @@ class AuthenticationError(RuntimeError):
     """Raised when authentication fails."""
 
 
-def compose_admin_secret(app_secret: AppSecret, user: AdminUser) -> str:
-    return "::".join(["admin", app_secret.secret_value, user.password_secret])
+def compose_admin_secret(
+    app_secret: AppSecret, user: AdminUser, *, resolver: SecretResolver
+) -> str:
+    secret_value = app_secret.resolve_secret(resolver)
+    return "::".join(["admin", secret_value, user.password_secret])
 
 
-def compose_tenant_secret(app_secret: AppSecret, tenant_secret: TenantSecret, user: TenantUser) -> str:
-    return "::".join(["tenant", app_secret.secret_value, tenant_secret.secret, user.password_secret])
+def compose_tenant_secret(
+    app_secret: AppSecret,
+    tenant_secret: TenantSecret,
+    user: TenantUser,
+    *,
+    resolver: SecretResolver,
+) -> str:
+    secret_value = app_secret.resolve_secret(resolver)
+    tenant_value = tenant_secret.resolve_secret(resolver)
+    return "::".join(["tenant", secret_value, tenant_value, user.password_secret])
+
+
+@dataclass(slots=True)
+class _RateLimitState:
+    failures: int = 0
+    last_failure: dt.datetime | None = None
+    locked_until: dt.datetime | None = None
+
+
+class AuthenticationRateLimiter:
+    """Track authentication failures and enforce lockouts/backoff."""
+
+    def __init__(
+        self,
+        *,
+        max_attempts: int = 5,
+        window: dt.timedelta = dt.timedelta(minutes=15),
+        lockout_period: dt.timedelta = dt.timedelta(minutes=15),
+        base_cooldown: dt.timedelta = dt.timedelta(seconds=1),
+        max_cooldown: dt.timedelta = dt.timedelta(seconds=30),
+    ) -> None:
+        self.max_attempts = max_attempts
+        self.window = window
+        self.lockout_period = lockout_period
+        self.base_cooldown = base_cooldown
+        self.max_cooldown = max_cooldown
+        self._states: dict[str, _RateLimitState] = {}
+        self._lock = asyncio.Lock()
+
+    async def enforce(self, keys: Iterable[str], now: dt.datetime) -> None:
+        """Ensure ``keys`` are allowed to attempt authentication."""
+
+        async with self._lock:
+            for key in keys:
+                state = self._states.get(key)
+                if state is None:
+                    continue
+                self._refresh_state(state, now)
+                if state.locked_until is not None and state.locked_until > now:
+                    raise AuthenticationError("account_locked")
+                if state.failures > 0 and state.last_failure is not None:
+                    cooldown = self._cooldown(state.failures)
+                    next_allowed = state.last_failure + cooldown
+                    if next_allowed > now:
+                        raise AuthenticationError("rate_limited")
+
+    async def record_failure(self, keys: Iterable[str], now: dt.datetime) -> None:
+        """Record a failed authentication attempt."""
+
+        async with self._lock:
+            for key in keys:
+                state = self._states.setdefault(key, _RateLimitState())
+                self._refresh_state(state, now)
+                state.failures += 1
+                state.last_failure = now
+                if state.failures >= self.max_attempts:
+                    state.locked_until = now + self.lockout_period
+                    state.failures = 0
+                    state.last_failure = None
+
+    async def record_success(self, keys: Iterable[str]) -> None:
+        """Reset throttling state after a successful authentication."""
+
+        async with self._lock:
+            for key in keys:
+                self._states.pop(key, None)
+
+    def _refresh_state(self, state: _RateLimitState, now: dt.datetime) -> None:
+        if state.locked_until is not None and state.locked_until <= now:
+            state.locked_until = None
+        if state.last_failure is not None and now - state.last_failure >= self.window:
+            state.failures = 0
+            state.last_failure = None
+
+    def _cooldown(self, failures: int) -> dt.timedelta:
+        scaled = self.base_cooldown * (2 ** max(failures - 1, 0))
+        return scaled if scaled <= self.max_cooldown else self.max_cooldown
+
+
+class IssuedSessionToken(Struct, frozen=True):
+    """Composite result containing persisted and client session data."""
+
+    token: str
+    record: SessionToken
+
+    @property
+    def id(self) -> str:
+        return self.record.id
+
+    @property
+    def user_id(self) -> str:
+        return self.record.user_id
+
+    @property
+    def level(self) -> SessionLevel:
+        return self.record.level
+
+    @property
+    def expires_at(self) -> dt.datetime:
+        return self.record.expires_at
+
+    @property
+    def revoked_at(self) -> dt.datetime | None:
+        return self.record.revoked_at
+
+
+_SESSION_TOKEN_PBKDF2_ITERATIONS = 120_000
 
 
 class PasswordHasher:
@@ -125,12 +247,23 @@ class PasswordHasher:
 class AuthenticationService:
     """High-level authentication helpers for Artemis applications."""
 
-    def __init__(self, password_hasher: PasswordHasher) -> None:
+    def __init__(
+        self,
+        password_hasher: PasswordHasher,
+        *,
+        secret_resolver: SecretResolver,
+        rate_limiter: AuthenticationRateLimiter | None = None,
+    ) -> None:
         self.password_hasher = password_hasher
+        self._secret_resolver = secret_resolver
+        self._rate_limiter = rate_limiter or AuthenticationRateLimiter()
 
-    async def hash_admin_password(self, *, app_secret: AppSecret, user_secret: str, password: str) -> tuple[str, str]:
+    async def hash_admin_password(
+        self, *, app_secret: AppSecret, user_secret: str, password: str
+    ) -> tuple[str, str]:
         salt = secrets.token_hex(16)
-        secret_key = "::".join(["admin", app_secret.secret_value, user_secret])
+        secret_value = app_secret.resolve_secret(self._secret_resolver)
+        secret_key = "::".join(["admin", secret_value, user_secret])
         hashed = await self.password_hasher.hash(password, secret_key=secret_key, salt=salt)
         return hashed, salt
 
@@ -143,12 +276,14 @@ class AuthenticationService:
         password: str,
     ) -> tuple[str, str]:
         salt = secrets.token_hex(16)
-        secret_key = "::".join(["tenant", app_secret.secret_value, tenant_secret.secret, user_secret])
+        app_value = app_secret.resolve_secret(self._secret_resolver)
+        tenant_value = tenant_secret.resolve_secret(self._secret_resolver)
+        secret_key = "::".join(["tenant", app_value, tenant_value, user_secret])
         hashed = await self.password_hasher.hash(password, secret_key=secret_key, salt=salt)
         return hashed, salt
 
     async def verify_admin_password(self, *, user: AdminUser, app_secret: AppSecret, password: str) -> bool:
-        secret = compose_admin_secret(app_secret, user)
+        secret = compose_admin_secret(app_secret, user, resolver=self._secret_resolver)
         return await self.password_hasher.verify(
             password, secret_key=secret, salt=user.password_salt, expected=user.hashed_password
         )
@@ -161,7 +296,9 @@ class AuthenticationService:
         tenant_secret: TenantSecret,
         password: str,
     ) -> bool:
-        secret = compose_tenant_secret(app_secret, tenant_secret, user)
+        secret = compose_tenant_secret(
+            app_secret, tenant_secret, user, resolver=self._secret_resolver
+        )
         return await self.password_hasher.verify(
             password, secret_key=secret, salt=user.password_salt, expected=user.hashed_password
         )
@@ -176,10 +313,16 @@ class AuthenticationService:
         mfa_codes: Iterable[MfaCode] | None = None,
         submitted_code: str | None = None,
         now: dt.datetime | None = None,
-    ) -> SessionToken:
+        client_fingerprint: str | None = None,
+    ) -> IssuedSessionToken:
+        timestamp = now or dt.datetime.now(dt.UTC)
+        keys = self._rate_limit_keys(user=user, tenant_secret=tenant_secret, client=client_fingerprint)
+        await self._rate_limiter.enforce(keys, timestamp)
+
         if not await self.verify_tenant_password(
             user=user, app_secret=app_secret, tenant_secret=tenant_secret, password=password
         ):
+            await self._rate_limiter.record_failure(keys, timestamp)
             raise AuthenticationError("invalid credentials")
 
         level = SessionLevel.PASSWORD_ONLY
@@ -192,11 +335,12 @@ class AuthenticationService:
                 user_id=user.id,
                 submitted=submitted_code,
                 purpose=MfaPurpose.SIGN_IN,
-                now=now,
+                now=timestamp,
             )
             level = SessionLevel.MFA
 
-        return self._issue_session_token(user_id=user.id, level=level)
+        await self._rate_limiter.record_success(keys)
+        return self._issue_session_token(user_id=user.id, level=level, issued_at=timestamp)
 
     def authenticate_with_passkey(
         self,
@@ -205,7 +349,7 @@ class AuthenticationService:
         challenge: str,
         signature: str,
         allow_user: TenantUser | AdminUser | None = None,
-    ) -> SessionToken:
+    ) -> IssuedSessionToken:
         manager = PasskeyManager()
         if not manager.verify(passkey=passkey, challenge=challenge, signature=signature):
             raise AuthenticationError("invalid_passkey")
@@ -213,16 +357,36 @@ class AuthenticationService:
             raise AuthenticationError("passkey_user_mismatch")
         return self._issue_session_token(user_id=passkey.user_id, level=SessionLevel.PASSKEY)
 
-    def _issue_session_token(self, *, user_id: str, level: SessionLevel) -> SessionToken:
-        now = dt.datetime.now(dt.UTC)
-        return SessionToken(
+    def _rate_limit_keys(
+        self, *, user: TenantUser, tenant_secret: TenantSecret, client: str | None
+    ) -> list[str]:
+        keys = [f"user:{user.id}", f"tenant:{tenant_secret.id}"]
+        if client:
+            keys.append(f"client:{client}")
+        return keys
+
+    def _issue_session_token(
+        self,
+        *,
+        user_id: str,
+        level: SessionLevel,
+        issued_at: dt.datetime | None = None,
+    ) -> IssuedSessionToken:
+        now = issued_at or dt.datetime.now(dt.UTC)
+        token = generate_id57()
+        salt = secrets.token_hex(16)
+        token_hash = _derive_session_token_hash(token, salt)
+        record = SessionToken(
             id=generate_id57(),
             user_id=user_id,
-            token=generate_id57(),
+            token_hash=token_hash,
+            token_salt=salt,
             created_at=now,
+            updated_at=now,
             expires_at=now + dt.timedelta(hours=1),
             level=level,
         )
+        return IssuedSessionToken(token=token, record=record)
 
 
 class MfaManager:
@@ -334,11 +498,13 @@ class OidcAuthenticator:
         *,
         defaults: OidcValidationDefaults | None = None,
         jwks_fetcher: Callable[[str], Mapping[str, Any]] | None = None,
+        secret_resolver: SecretResolver | None = None,
     ) -> None:
         self.provider = provider
         self.defaults = defaults or OidcValidationDefaults()
         self._jwks_fetcher = jwks_fetcher or _default_jwks_fetcher
         self._jwks_cache: list[Mapping[str, Any]] | None = None
+        self._secret_resolver = secret_resolver
 
     def validate(
         self,
@@ -445,12 +611,20 @@ class OidcAuthenticator:
     def _client_secret_hmac_key(self, alg: str) -> Mapping[str, Any] | None:
         if alg not in _HMAC_ALGORITHMS:
             return None
-        secret = self.provider.client_secret
-        if not secret:
+        secret_ref = self.provider.client_secret
+        if secret_ref is None:
             return None
+        if self._secret_resolver is None:
+            raise AuthenticationError("client_secret_unavailable")
+        try:
+            secret_value = self.provider.resolve_client_secret(self._secret_resolver)
+        except Exception as exc:
+            raise AuthenticationError("client_secret_unavailable") from exc
+        if not secret_value.strip():
+            raise AuthenticationError("client_secret_unavailable")
         return {
             "kty": "oct",
-            "k": _b64url_encode(secret.encode()),
+            "k": _b64url_encode(secret_value.encode()),
             "alg": alg,
             "use": "sig",
         }
@@ -763,6 +937,14 @@ def _b64url_encode(data: bytes) -> str:
 def _b64url_decode(data: str) -> bytes:
     padding = "=" * ((4 - len(data) % 4) % 4)
     return base64.urlsafe_b64decode(data + padding)
+
+
+def _derive_session_token_hash(token: str, salt_hex: str) -> str:
+    salt = bytes.fromhex(salt_hex)
+    derived = hashlib.pbkdf2_hmac(
+        "sha256", token.encode(), salt, _SESSION_TOKEN_PBKDF2_ITERATIONS
+    )
+    return derived.hex()
 
 
 def _derive_salt(secret_key: str, salt: str) -> bytes:

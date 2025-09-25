@@ -4,11 +4,16 @@ from __future__ import annotations
 
 import datetime as dt
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import msgspec
 
 from .orm import DatabaseModel, ModelScope, model
+
+if TYPE_CHECKING:  # pragma: no cover - used only for type checking
+    from .database import SecretRef, SecretResolver
+else:  # pragma: no cover - runtime import avoided in type checking
+    from .database import SecretRef
 
 
 class BillingStatus(str, Enum):
@@ -50,12 +55,17 @@ class Subscription(DatabaseModel):
     scope=ModelScope.ADMIN,
     table="app_secrets",
     exposed=False,
-    redacted_fields=("secret_value", "salt"),
+    redacted_fields=("secret", "salt"),
 )
 class AppSecret(DatabaseModel):
-    secret_value: str
+    secret: SecretRef
     salt: str
     rotated_at: dt.datetime | None = None
+
+    def resolve_secret(self, resolver: "SecretResolver") -> str:
+        """Resolve the external secret backing this record."""
+
+        return resolver.resolve(self.secret)
 
 
 @model(scope=ModelScope.ADMIN, table="customers", redacted_fields=("tenant_secret",))
@@ -64,8 +74,13 @@ class Customer(DatabaseModel):
     schema_name: str
     billing_id: str
     status: str
-    tenant_secret: str
+    tenant_secret: SecretRef
     contact_email: str | None = None
+
+    def resolve_tenant_secret(self, resolver: "SecretResolver") -> str:
+        """Resolve the external secret protecting this tenant."""
+
+        return resolver.resolve(self.tenant_secret)
 
 
 class RoleScope(str, Enum):
@@ -153,9 +168,14 @@ class AdminPasskey(DatabaseModel):
     redacted_fields=("secret",),
 )
 class TenantSecret(DatabaseModel):
-    secret: str
+    secret: SecretRef
     rotated_at: dt.datetime | None = None
     purpose: str = "password"
+
+    def resolve_secret(self, resolver: "SecretResolver") -> str:
+        """Resolve the external secret backing this tenant."""
+
+        return resolver.resolve(self.secret)
 
 
 @model(
@@ -208,11 +228,12 @@ class SessionLevel(str, Enum):
     scope=ModelScope.TENANT,
     table="session_tokens",
     exposed=False,
-    redacted_fields=("token",),
+    redacted_fields=("token_hash", "token_salt"),
 )
 class SessionToken(DatabaseModel):
     user_id: str
-    token: str
+    token_hash: str
+    token_salt: str
     expires_at: dt.datetime
     level: SessionLevel
     revoked_at: dt.datetime | None = None
@@ -270,18 +291,29 @@ class FederatedProvider(str, Enum):
     SAML = "saml"
 
 
-@model(scope=ModelScope.TENANT, table="oidc_providers")
+@model(
+    scope=ModelScope.TENANT,
+    table="oidc_providers",
+    redacted_fields=("client_secret",),
+)
 class TenantOidcProvider(DatabaseModel):
     issuer: str
     client_id: str
-    client_secret: str
     jwks_uri: str
     authorization_endpoint: str
     token_endpoint: str
     userinfo_endpoint: str
+    client_secret: SecretRef | None = None
     enabled: bool = True
     allowed_audiences: list[str] = msgspec.field(default_factory=list)
     allowed_groups: list[str] = msgspec.field(default_factory=list)
+
+    def resolve_client_secret(self, resolver: "SecretResolver") -> str:
+        """Resolve the client secret backing this provider."""
+
+        if self.client_secret is None:
+            raise LookupError("OIDC client secret not configured")
+        return resolver.resolve(self.client_secret)
 
 
 @model(scope=ModelScope.TENANT, table="saml_providers")

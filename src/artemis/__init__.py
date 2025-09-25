@@ -4,13 +4,17 @@ from .application import Artemis, ArtemisApp
 from .audit import AuditActor, AuditTrail, audit_context
 from .authentication import (
     AuthenticationError,
+    AuthenticationRateLimiter,
     AuthenticationService,
     FederatedIdentityDirectory,
+    IssuedSessionToken,
     MfaManager,
     OidcAuthenticator,
     PasskeyManager,
     PasswordHasher,
     SamlAuthenticator,
+    compose_admin_secret,
+    compose_tenant_secret,
 )
 from .chatops import (
     ChatMessage,
@@ -142,6 +146,7 @@ __all__ = [
     "AuditActor",
     "AuditTrail",
     "AuthenticationError",
+    "AuthenticationRateLimiter",
     "AuthenticationService",
     "BillingRecord",
     "BillingStatus",
@@ -167,6 +172,7 @@ __all__ = [
     "FederatedIdentityDirectory",
     "FederatedProvider",
     "HTTPError",
+    "IssuedSessionToken",
     "JSONResponse",
     "MfaCode",
     "MfaManager",
@@ -228,6 +234,8 @@ __all__ = [
     "bindings_from_admin",
     "bindings_from_users",
     "build_engine",
+    "compose_admin_secret",
+    "compose_tenant_secret",
     "create_table_for_model",
     "default_registry",
     "ensure_status",
