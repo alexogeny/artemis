@@ -626,6 +626,14 @@ class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
         async with self._lock:
             now = self._clock()
             flow = self._expect_flow(attempt.flow_token, tenant, now=now)
+            if flow.step is LoginStep.SSO:
+                if flow.fallback is not LoginStep.PASSKEY:
+                    raise HTTPError(Status.BAD_REQUEST, {"detail": "passkey_not_available"})
+                flow.step = LoginStep.PASSKEY
+                flow.fallback = self._fallback_after(LoginStep.PASSKEY, flow.user)
+                flow.challenge = self._passkey_manager.challenge()
+                flow.expires_at = now + self.flow_ttl_seconds
+                return self._render_flow(flow)
             if flow.step is not LoginStep.PASSKEY:
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "passkey_not_expected"})
             record = self._passkeys.get(attempt.credential_id)

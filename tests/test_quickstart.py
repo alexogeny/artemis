@@ -1178,6 +1178,40 @@ async def test_quickstart_engine_passkey_error_paths() -> None:
         )
     _assert_error_detail(exc, "passkey_not_expected")
 
+    config = QuickstartAuthConfig(
+        tenants=(
+            QuickstartTenant(
+                slug="zeta",
+                name="Zeta",
+                users=(
+                    QuickstartUser(
+                        id="usr_zeta",
+                        email="ops@zeta.test",
+                        password="zeta-password",
+                        sso=QuickstartSsoProvider(
+                            slug="okta",
+                            kind="saml",
+                            display_name="Okta",
+                            redirect_url="https://id.zeta.test/start",
+                        ),
+                    ),
+                ),
+            ),
+        ),
+        admin=DEFAULT_QUICKSTART_AUTH.admin,
+    )
+    engine = QuickstartAuthEngine(config)
+    zeta = _tenant("demo", "local.test", "zeta", TenantScope.TENANT)
+    start = await engine.start(zeta, email="ops@zeta.test")
+    assert start.next is LoginStep.SSO
+    assert start.fallback is LoginStep.PASSWORD
+    with pytest.raises(HTTPError) as exc:
+        await engine.passkey(
+            zeta,
+            PasskeyAttempt(flow_token=start.flow_token, credential_id="ignored", signature="sig"),
+        )
+    _assert_error_detail(exc, "passkey_not_available")
+
 
 @pytest.mark.asyncio
 async def test_quickstart_engine_password_paths() -> None:
@@ -1375,3 +1409,33 @@ async def test_quickstart_engine_sso_fallback_to_passkey() -> None:
     start = await engine.start(epsilon, email="ops@epsilon.test")
     assert start.next is LoginStep.SSO
     assert start.fallback is LoginStep.PASSKEY
+    flow = engine._flows[start.flow_token]
+    assert flow.challenge is None
+
+    prompt = await engine.passkey(
+        epsilon,
+        PasskeyAttempt(flow_token=start.flow_token, credential_id="unused", signature="request"),
+    )
+    assert prompt.next is LoginStep.PASSKEY
+    assert prompt.challenge is not None
+    assert prompt.fallback is None
+
+    manager = PasskeyManager()
+    user = config.tenants[0].users[0]
+    passkey_config = user.passkeys[0]
+    passkey = manager.register(
+        user_id=user.id,
+        credential_id=passkey_config.credential_id,
+        secret=passkey_config.secret.encode("utf-8"),
+        user_handle="demo",  # value unused by manager
+    )
+    signature = manager.sign(passkey=passkey, challenge=prompt.challenge)
+    success = await engine.passkey(
+        epsilon,
+        PasskeyAttempt(
+            flow_token=start.flow_token,
+            credential_id=passkey_config.credential_id,
+            signature=signature,
+        ),
+    )
+    assert success.next is LoginStep.SUCCESS
