@@ -12,8 +12,10 @@ import json
 import secrets
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
+from enum import Enum
 from hashlib import sha256
-from typing import Any
+from time import monotonic
+from typing import Any, Generic, Protocol, TypeVar
 from xml.etree import ElementTree as ET
 
 from msgspec import Struct, structs
@@ -28,6 +30,8 @@ from argon2.low_level import Type as Argon2Type
 from argon2.low_level import hash_secret as argon2_hash_secret
 
 from .database import SecretResolver
+from .exceptions import HTTPError
+from .http import Status
 from .id57 import generate_id57
 from .models import (
     AdminUser,
@@ -44,13 +48,21 @@ from .models import (
     TenantSecret,
     TenantUser,
 )
+from .tenancy import TenantContext, TenantScope
 
 __all__ = [
     "AuthenticationError",
+    "AuthenticationFlowEngine",
+    "AuthenticationFlowPasskey",
+    "AuthenticationFlowResponse",
+    "AuthenticationFlowSession",
+    "AuthenticationFlowUser",
+    "AuthenticationLoginRecord",
     "AuthenticationRateLimiter",
     "AuthenticationService",
     "FederatedIdentityDirectory",
     "IssuedSessionToken",
+    "LoginStep",
     "MfaManager",
     "OidcAuthenticator",
     "OidcValidationDefaults",
@@ -478,6 +490,315 @@ class PasskeyManager:
     def verify(self, *, passkey: Passkey, challenge: str, signature: str) -> bool:
         expected = self.sign(passkey=passkey, challenge=challenge)
         return hmac.compare_digest(signature, expected)
+
+
+class AuthenticationFlowPasskey(Protocol):
+    """Minimal passkey contract for authentication flows."""
+
+    credential_id: str
+    secret: str
+
+
+class AuthenticationFlowUser(Protocol):
+    """Minimal user contract for staged authentication flows."""
+
+    id: str
+    email: str
+    password: str | None
+    passkeys: Iterable[AuthenticationFlowPasskey]
+    mfa_code: str | None
+    sso: object | None
+
+
+LoginUserT = TypeVar("LoginUserT", bound=AuthenticationFlowUser)
+SessionT = TypeVar("SessionT")
+
+
+@dataclass(slots=True)
+class AuthenticationLoginRecord(Generic[LoginUserT]):
+    """Mapping tying a login user to a tenant scope."""
+
+    scope: TenantScope
+    tenant: str
+    user: LoginUserT
+
+
+class LoginStep(str, Enum):
+    """Next action required by the authentication flow."""
+
+    SSO = "sso"
+    PASSKEY = "passkey"
+    PASSWORD = "password"
+    MFA = "mfa"
+    SUCCESS = "success"
+
+
+class AuthenticationFlowSession(Struct, frozen=True):
+    """Session metadata issued after a successful authentication flow."""
+
+    token: str
+    user_id: str
+    scope: TenantScope
+    level: SessionLevel
+    expires_in: int
+
+
+class AuthenticationFlowResponse(Struct, frozen=True):
+    """Structured response describing the state of an authentication flow."""
+
+    flow_token: str
+    next: LoginStep
+    fallback: LoginStep | None = None
+    challenge: str | None = None
+    credential_ids: tuple[str, ...] = ()
+    provider: object | None = None
+    session: object | None = None
+
+
+@dataclass(slots=True)
+class _LoginFlow(Generic[LoginUserT]):
+    """Mutable in-memory login flow state."""
+
+    id: str
+    tenant: str
+    scope: TenantScope
+    user: LoginUserT
+    step: LoginStep
+    fallback: LoginStep | None
+    challenge: str | None = None
+    level: SessionLevel | None = None
+    expires_at: float = 0.0
+    attempts: int = 0
+
+
+class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
+    """Reusable orchestration for staged authentication flows."""
+
+    def __init__(
+        self,
+        *,
+        flow_ttl_seconds: int = 600,
+        session_ttl_seconds: int = 3600,
+        max_attempts: int = 5,
+        passkey_manager: PasskeyManager | None = None,
+        clock: Callable[[], float] | None = None,
+    ) -> None:
+        self.flow_ttl_seconds = flow_ttl_seconds
+        self.session_ttl_seconds = session_ttl_seconds
+        self.max_attempts = max_attempts
+        self._passkey_manager = passkey_manager or PasskeyManager()
+        self._flows: MutableMapping[str, _LoginFlow[LoginUserT]] = {}
+        self._users: dict[tuple[TenantScope, str, str], LoginUserT] = {}
+        self._passkeys: dict[str, tuple[str, str]] = {}
+        self._lock = asyncio.Lock()
+        self._clock = clock or monotonic
+
+    async def start(self, tenant: TenantContext, *, email: str) -> AuthenticationFlowResponse:
+        """Begin a login flow for ``email`` within ``tenant``."""
+
+        if tenant.scope is TenantScope.PUBLIC:
+            raise HTTPError(Status.NOT_FOUND, {"detail": "login_not_available"})
+        user = self._lookup_user(tenant.scope, tenant.tenant, email)
+        async with self._lock:
+            now = self._clock()
+            self._prune_expired(now)
+            flow_id = generate_id57()
+            first_step, fallback = self._next_step(user)
+            challenge = None
+            if first_step is LoginStep.PASSKEY:
+                challenge = self._passkey_manager.challenge()
+            flow = _LoginFlow(
+                id=flow_id,
+                tenant=tenant.tenant,
+                scope=tenant.scope,
+                user=user,
+                step=first_step,
+                fallback=fallback,
+                challenge=challenge,
+                expires_at=now + self.flow_ttl_seconds,
+            )
+            self._flows[flow_id] = flow
+            return self._render_flow(flow)
+
+    async def passkey(self, tenant: TenantContext, attempt: Any) -> AuthenticationFlowResponse:
+        """Verify a passkey assertion for ``attempt``."""
+
+        async with self._lock:
+            now = self._clock()
+            flow = self._expect_flow(attempt.flow_token, tenant, now=now)
+            if flow.step is LoginStep.SSO:
+                if flow.fallback is not LoginStep.PASSKEY:
+                    raise HTTPError(Status.BAD_REQUEST, {"detail": "passkey_not_available"})
+                flow.step = LoginStep.PASSKEY
+                flow.fallback = self._fallback_after(LoginStep.PASSKEY, flow.user)
+                flow.challenge = self._passkey_manager.challenge()
+                flow.expires_at = now + self.flow_ttl_seconds
+                return self._render_flow(flow)
+            if flow.step is not LoginStep.PASSKEY:
+                raise HTTPError(Status.BAD_REQUEST, {"detail": "passkey_not_expected"})
+            record = self._passkeys.get(attempt.credential_id)
+            if record is None or record[0] != getattr(flow.user, "id"):
+                self._register_failure(flow)
+                raise HTTPError(Status.UNAUTHORIZED, {"detail": "unknown_passkey"})
+            challenge = flow.challenge
+            if not challenge:
+                raise HTTPError(Status.BAD_REQUEST, {"detail": "missing_challenge"})
+            passkey = self._passkey_manager.register(
+                user_id=getattr(flow.user, "id"),
+                credential_id=attempt.credential_id,
+                secret=record[1].encode("utf-8"),
+                user_handle=f"{getattr(flow.user, 'id')}:{flow.tenant}",
+            )
+            if not self._passkey_manager.verify(
+                passkey=passkey, challenge=challenge, signature=attempt.signature
+            ):
+                self._register_failure(flow)
+                raise HTTPError(Status.UNAUTHORIZED, {"detail": "invalid_passkey"})
+            self._reset_attempts(flow)
+            return self._complete_primary(flow, SessionLevel.PASSKEY)
+
+    async def password(self, tenant: TenantContext, attempt: Any) -> AuthenticationFlowResponse:
+        """Verify a password submission."""
+
+        async with self._lock:
+            now = self._clock()
+            flow = self._expect_flow(attempt.flow_token, tenant, now=now)
+            if flow.step not in {LoginStep.PASSWORD, LoginStep.SSO, LoginStep.PASSKEY}:
+                raise HTTPError(Status.BAD_REQUEST, {"detail": "password_not_expected"})
+            if flow.step is LoginStep.PASSKEY:
+                if flow.fallback is not LoginStep.PASSWORD:
+                    raise HTTPError(Status.BAD_REQUEST, {"detail": "password_not_available"})
+                flow.step = LoginStep.PASSWORD
+                flow.challenge = None
+                flow.expires_at = now + self.flow_ttl_seconds
+            user_password = getattr(flow.user, "password", None)
+            if user_password is None or user_password != attempt.password:
+                self._register_failure(flow)
+                raise HTTPError(Status.UNAUTHORIZED, {"detail": "invalid_password"})
+            self._reset_attempts(flow)
+            return self._complete_primary(flow, SessionLevel.PASSWORD_ONLY)
+
+    async def mfa(self, tenant: TenantContext, attempt: Any) -> AuthenticationFlowResponse:
+        """Verify the MFA code for ``attempt``."""
+
+        async with self._lock:
+            now = self._clock()
+            flow = self._expect_flow(attempt.flow_token, tenant, now=now)
+            if flow.step is not LoginStep.MFA:
+                raise HTTPError(Status.BAD_REQUEST, {"detail": "mfa_not_expected"})
+            if flow.level is None:
+                raise HTTPError(Status.BAD_REQUEST, {"detail": "primary_not_verified"})
+            user_code = getattr(flow.user, "mfa_code", None)
+            if user_code is None or user_code != attempt.code:
+                self._register_failure(flow)
+                raise HTTPError(Status.UNAUTHORIZED, {"detail": "invalid_mfa"})
+            self._reset_attempts(flow)
+            return self._finish(flow, SessionLevel.MFA)
+
+    def reset(self, records: Iterable[AuthenticationLoginRecord[LoginUserT]]) -> None:
+        """Replace indexed users and clear flow state."""
+
+        self._flows.clear()
+        self._users.clear()
+        self._passkeys.clear()
+        for record in records:
+            key = (record.scope, record.tenant, record.user.email.lower())
+            self._users[key] = record.user
+            for passkey in getattr(record.user, "passkeys", ()):
+                credential_id = getattr(passkey, "credential_id", None)
+                secret = getattr(passkey, "secret", None)
+                if credential_id and secret is not None:  # pragma: no branch
+                    self._passkeys[credential_id] = (getattr(record.user, "id"), secret)
+
+    def _complete_primary(self, flow: _LoginFlow[LoginUserT], level: SessionLevel) -> AuthenticationFlowResponse:
+        if getattr(flow.user, "mfa_code", None):
+            flow.step = LoginStep.MFA
+            flow.level = level
+            flow.expires_at = self._clock() + self.flow_ttl_seconds
+            return self._render_flow(flow)
+        return self._finish(flow, level)
+
+    def _finish(self, flow: _LoginFlow[LoginUserT], level: SessionLevel) -> AuthenticationFlowResponse:
+        session = self._issue_session(flow, level)
+        self._flows.pop(flow.id, None)
+        flow.step = LoginStep.SUCCESS
+        return AuthenticationFlowResponse(
+            flow_token=flow.id,
+            next=LoginStep.SUCCESS,
+            session=session,
+        )
+
+    def _render_flow(self, flow: _LoginFlow[LoginUserT]) -> AuthenticationFlowResponse:
+        if flow.step is LoginStep.SUCCESS:
+            raise HTTPError(Status.BAD_REQUEST, {"detail": "flow_completed"})
+        payload: dict[str, object] = {}
+        if flow.step is LoginStep.PASSKEY:
+            payload["challenge"] = flow.challenge
+            payload["credential_ids"] = tuple(
+                getattr(passkey, "credential_id")
+                for passkey in getattr(flow.user, "passkeys", ())
+            )
+        provider = getattr(flow.user, "sso", None) if flow.step is LoginStep.SSO else None
+        return AuthenticationFlowResponse(
+            flow_token=flow.id,
+            next=flow.step,
+            fallback=flow.fallback,
+            challenge=payload.get("challenge"),
+            credential_ids=payload.get("credential_ids", ()),
+            provider=provider,
+        )
+
+    def _expect_flow(self, token: str, tenant: TenantContext, *, now: float) -> _LoginFlow[LoginUserT]:
+        flow = self._flows.get(token)
+        if flow is None or flow.scope is not tenant.scope or flow.tenant != tenant.tenant:
+            raise HTTPError(Status.NOT_FOUND, {"detail": "unknown_flow"})
+        if flow.expires_at <= now:
+            self._flows.pop(flow.id, None)
+            raise HTTPError(Status.GONE, {"detail": "flow_expired"})
+        return flow
+
+    def _lookup_user(self, scope: TenantScope, tenant: str, email: str) -> LoginUserT:
+        key = (scope, tenant, email.lower())
+        user = self._users.get(key)
+        if user is None:
+            raise HTTPError(Status.NOT_FOUND, {"detail": "unknown_user"})
+        return user
+
+    def _next_step(self, user: LoginUserT) -> tuple[LoginStep, LoginStep | None]:
+        if getattr(user, "sso", None) is not None:
+            return LoginStep.SSO, self._fallback_after(LoginStep.SSO, user)
+        if getattr(user, "passkeys", None):
+            return LoginStep.PASSKEY, self._fallback_after(LoginStep.PASSKEY, user)
+        if getattr(user, "password", None) is not None:
+            return LoginStep.PASSWORD, None
+        raise HTTPError(Status.BAD_REQUEST, {"detail": "no_authenticators"})
+
+    def _fallback_after(self, step: LoginStep, user: LoginUserT) -> LoginStep | None:
+        has_passkeys = bool(getattr(user, "passkeys", ()))
+        has_password = getattr(user, "password", None) is not None
+        if step is LoginStep.SSO and has_passkeys:
+            return LoginStep.PASSKEY
+        if step in {LoginStep.SSO, LoginStep.PASSKEY} and has_password:
+            return LoginStep.PASSWORD
+        return None
+
+    def _prune_expired(self, now: float) -> None:
+        expired = [token for token, flow in self._flows.items() if flow.expires_at <= now]
+        for token in expired:
+            self._flows.pop(token, None)
+
+    def _register_failure(self, flow: _LoginFlow[LoginUserT]) -> None:
+        flow.attempts += 1
+        if flow.attempts >= self.max_attempts:
+            self._flows.pop(flow.id, None)
+            raise HTTPError(Status.TOO_MANY_REQUESTS, {"detail": "flow_locked"})
+
+    @staticmethod
+    def _reset_attempts(flow: _LoginFlow[LoginUserT]) -> None:
+        flow.attempts = 0
+
+    def _issue_session(self, flow: _LoginFlow[LoginUserT], level: SessionLevel) -> SessionT:
+        raise NotImplementedError  # pragma: no cover
 
 
 class OidcValidationDefaults(Struct, frozen=True):
