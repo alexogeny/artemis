@@ -269,7 +269,7 @@ def test_passkey_manager_round_trip() -> None:
 
 def test_oidc_authenticator_validates_token() -> None:
     now = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
-    authenticator, provider, secret, resolver = _build_oidc_authenticator(now=now)
+    authenticator, provider, secret, _resolver = _build_oidc_authenticator(now=now)
     issued_at = now - dt.timedelta(seconds=30)
     expires_at = now + dt.timedelta(minutes=5)
     claims = {

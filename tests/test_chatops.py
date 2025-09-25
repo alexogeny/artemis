@@ -702,11 +702,17 @@ async def test_default_transport_error_status(monkeypatch: pytest.MonkeyPatch) -
 
 @pytest.mark.asyncio
 async def test_default_transport_rejects_redirect_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySSL:
+        def getpeercert(self, binary_form: bool = True) -> bytes:
+            return b""
+
     class DummyResponse:
         def __init__(self, url: str) -> None:
             self.status = 200
             self._url = url
-            self.fp = types.SimpleNamespace(raw=types.SimpleNamespace(_sslobj=types.SimpleNamespace(getpeercert=lambda binary_form=True: b"")))
+            self.fp = types.SimpleNamespace(
+                raw=types.SimpleNamespace(_sslobj=DummySSL()),
+            )
 
         def getcode(self) -> int:
             return self.status
@@ -750,11 +756,17 @@ async def test_default_transport_rejects_redirect_host(monkeypatch: pytest.Monke
 
 @pytest.mark.asyncio
 async def test_default_transport_handles_missing_base_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    class DummySSL:
+        def getpeercert(self, binary_form: bool = True) -> bytes:
+            return b""
+
     class DummyResponse:
         def __init__(self) -> None:
             self.status = 200
             self._url = "https://hooks.slack.com/services/default"
-            self.fp = types.SimpleNamespace(raw=types.SimpleNamespace(_sslobj=types.SimpleNamespace(getpeercert=lambda binary_form=True: b"")))
+            self.fp = types.SimpleNamespace(
+                raw=types.SimpleNamespace(_sslobj=DummySSL()),
+            )
 
         def getcode(self) -> int:
             return self.status
