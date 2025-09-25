@@ -1620,6 +1620,48 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert refresh_commands.status == Status.OK
         commands_payload = json.loads(refresh_commands.body.decode())["slash_commands"]
 
+        disable_integration = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": commands_payload,
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+                "webhook": None,
+                "enabled": False,
+            },
+        )
+        assert disable_integration.status == Status.OK
+
+        disabled_invocation = await client.post(
+            "/__artemis/chatops/slash",
+            tenant=admin,
+            json={
+                "command": "/quickstart-create-tenant",
+                "text": "slug=omega name=Omega",
+                "user_id": "U123",
+                "user_name": "demo",
+                "workspace_id": "T123",
+            },
+        )
+        assert disabled_invocation.status == Status.FORBIDDEN
+        disabled_payload = json.loads(disabled_invocation.body.decode())
+        assert disabled_payload["error"]["detail"]["detail"] == "chatops_disabled"
+
+        reenable_integration = await client.post(
+            "/__artemis/admin/chatops",
+            tenant=admin,
+            json={
+                **base_update,
+                "slash_commands": commands_payload,
+                "bot_user_id": "U999",
+                "admin_workspace": "T123",
+            },
+        )
+        assert reenable_integration.status == Status.OK
+        commands_payload = json.loads(reenable_integration.body.decode())["slash_commands"]
+
         create_binding = app.chatops_commands.binding_by_name("quickstart.chatops.create_tenant")
 
         async def response_handler(context: ChatOpsCommandContext) -> JSONResponse:

@@ -1581,6 +1581,10 @@ def attach_quickstart(
             request: Request,
             payload: QuickstartSlashCommandInvocation,
         ) -> Response:
+            settings = chatops_control.settings
+            if not settings.enabled or settings.webhook is None:
+                detail = "chatops_disabled" if not settings.enabled else "chatops_unconfigured"
+                raise HTTPError(Status.FORBIDDEN, {"detail": detail})
             try:
                 binding, args, actor = chatops_control.resolve_invocation(request, payload)
             except ChatOpsInvocationError as exc:
