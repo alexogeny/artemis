@@ -95,6 +95,61 @@ class TenantSupportTicket(DatabaseModel):
     updates: tuple[SupportTicketUpdate, ...] = msgspec.field(default_factory=tuple)
 
 
+@model(scope=ModelScope.TENANT, table="dashboard_tiles")
+class DashboardTile(DatabaseModel):
+    """Dashboard tile persisted for a workspace."""
+
+    workspace_id: str
+    title: str
+    layout: dict[str, Any]
+    description: str | None = None
+    data_sources: tuple[str, ...] = msgspec.field(default_factory=tuple)
+    ai_insights_enabled: bool = False
+    metadata: dict[str, Any] = msgspec.field(default_factory=dict)
+
+
+@model(scope=ModelScope.TENANT, table="dashboard_tile_permissions")
+class DashboardTilePermission(DatabaseModel):
+    """Explicit permissions attached to a dashboard tile."""
+
+    tile_id: str
+    roles: tuple[str, ...] = msgspec.field(default_factory=tuple)
+    users: tuple[str, ...] = msgspec.field(default_factory=tuple)
+
+
+@model(scope=ModelScope.TENANT, table="workspace_permission_sets")
+class WorkspacePermissionSet(DatabaseModel):
+    """Custom permission sets defined within a workspace."""
+
+    workspace_id: str
+    name: str
+    permissions: tuple[str, ...] = msgspec.field(default_factory=tuple)
+    description: str | None = None
+    role_id: str | None = None
+
+
+@model(scope=ModelScope.TENANT, table="workspace_role_assignments")
+class WorkspaceRoleAssignment(DatabaseModel):
+    """Assignment of a workspace role to a single user."""
+
+    workspace_id: str
+    role_id: str
+    user_id: str
+    assigned_at: dt.datetime
+
+
+@model(scope=ModelScope.TENANT, table="permission_delegations")
+class WorkspacePermissionDelegation(DatabaseModel):
+    """Time-bound delegation between workspace principals."""
+
+    workspace_id: str
+    from_user_id: str
+    to_user_id: str
+    starts_at: dt.datetime
+    ends_at: dt.datetime
+    scopes: tuple[str, ...] = msgspec.field(default_factory=tuple)
+
+
 @model(
     scope=ModelScope.ADMIN,
     table="app_secrets",
@@ -436,4 +491,5 @@ __all__ = [
     "TenantSupportTicket",
     "TenantUser",
     "UserRole",
+    "WorkspacePermissionDelegation",
 ]
