@@ -402,11 +402,12 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
     )
     clock = TickingClock(dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc))
     service = QuickstartDelegationService(orm, clock=clock.now)  # type: ignore[arg-type]
+    grantor_principal = CedarEntity(type="User", id="grantor")
 
     with pytest.raises(HTTPError) as window_error:
         await service.grant(
             tenant=tenant_alpha,
-            principal=None,
+            principal=grantor_principal,
             payload=DelegationGrant(
                 from_user_id="grantor",
                 to_user_id="delegate",
@@ -462,7 +463,7 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
     with pytest.raises(HTTPError) as scope_error:
         await service.grant(
             tenant=tenant_alpha,
-            principal=None,
+            principal=grantor_principal,
             payload=DelegationGrant(
                 from_user_id="grantor",
                 to_user_id="delegate",
@@ -479,7 +480,7 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
     end = clock.now() + dt.timedelta(hours=1)
     first = await service.grant(
         tenant=tenant_alpha,
-        principal=None,
+        principal=grantor_principal,
         payload=DelegationGrant(
             from_user_id="grantor",
             to_user_id="delegate",
@@ -493,7 +494,7 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
 
     extended = await service.grant(
         tenant=tenant_alpha,
-        principal=None,
+        principal=grantor_principal,
         payload=DelegationGrant(
             from_user_id="grantor",
             to_user_id="delegate",
@@ -593,7 +594,7 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
     clock.value = clock.now() + dt.timedelta(hours=3)
     await service.revoke(
         tenant=tenant_alpha,
-        principal=None,
+        principal=grantor_principal,
         delegation_id=first.id,
     )
 
@@ -609,11 +610,99 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
     with pytest.raises(HTTPError) as missing_delegate:
         await service.revoke(
             tenant=tenant_alpha,
-            principal=None,
+            principal=grantor_principal,
             delegation_id="missing",
         )
     assert isinstance(missing_delegate.value, HTTPError)
     assert missing_delegate.value.detail["detail"] == "delegation_missing"
+
+
+@pytest.mark.asyncio
+async def test_delegation_service_enforces_actor_authorization(
+    tenant_alpha: TenantContext,
+) -> None:
+    delegations = InMemoryTable(WorkspacePermissionDelegation)
+    permission_sets = InMemoryTable(WorkspacePermissionSet)
+    assignments = InMemoryTable(WorkspaceRoleAssignment)
+    orm = FakeORM(
+        tenants={
+            "permission_delegations": delegations,
+            "workspace_permission_sets": permission_sets,
+            "workspace_role_assignments": assignments,
+        },
+        admin={},
+    )
+    clock = TickingClock(dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc))
+    service = QuickstartDelegationService(orm, clock=clock.now)  # type: ignore[arg-type]
+
+    await permission_sets.create(
+        WorkspacePermissionSet(
+            workspace_id=tenant_alpha.tenant,
+            name="ops",
+            permissions=("tiles:view",),
+            role_id="role-ops",
+        ),
+        tenant=tenant_alpha,
+    )
+    await assignments.create(
+        WorkspaceRoleAssignment(
+            workspace_id=tenant_alpha.tenant,
+            role_id="role-ops",
+            user_id="grantor",
+            assigned_at=clock.now(),
+        ),
+        tenant=tenant_alpha,
+    )
+
+    def make_payload() -> DelegationGrant:
+        start = clock.now()
+        return DelegationGrant(
+            from_user_id="grantor",
+            to_user_id="delegate",
+            scopes=("tiles:view",),
+            workspace_id=tenant_alpha.tenant,
+            starts_at=start,
+            ends_at=start + dt.timedelta(hours=1),
+        )
+
+    intruder = CedarEntity(type="User", id="intruder")
+    with pytest.raises(HTTPError) as unauthorized_grant:
+        await service.grant(
+            tenant=tenant_alpha,
+            principal=intruder,
+            payload=make_payload(),
+        )
+    assert unauthorized_grant.value.detail["detail"] == "delegation_forbidden"
+
+    grantor = CedarEntity(type="User", id="grantor")
+    granted = await service.grant(
+        tenant=tenant_alpha,
+        principal=grantor,
+        payload=make_payload(),
+    )
+
+    with pytest.raises(HTTPError) as unauthorized_revoke:
+        await service.revoke(
+            tenant=tenant_alpha,
+            principal=intruder,
+            delegation_id=granted.id,
+        )
+    assert unauthorized_revoke.value.detail["detail"] == "delegation_forbidden"
+
+    delegate = CedarEntity(type="User", id="delegate")
+    await service.revoke(
+        tenant=tenant_alpha,
+        principal=delegate,
+        delegation_id=granted.id,
+    )
+
+    clock.value = clock.now() + dt.timedelta(hours=2)
+    admin = CedarEntity(type="AdminUser", id="admin", attributes={"tenant": tenant_alpha.tenant})
+    await service.grant(
+        tenant=tenant_alpha,
+        principal=admin,
+        payload=make_payload(),
+    )
 
 
 @pytest.mark.asyncio

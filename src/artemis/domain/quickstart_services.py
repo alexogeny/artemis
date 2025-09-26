@@ -21,7 +21,7 @@ from ..models import (
     WorkspaceRoleAssignment,
 )
 from ..orm import ORM
-from ..rbac import CedarEffect, CedarEngine, CedarPolicy, CedarReference
+from ..rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
 from ..tenancy import TenantContext, TenantScope
 from .services import (
     AuditLogEntry,
@@ -337,6 +337,21 @@ class QuickstartDelegationService(DelegationService):
         self._orm = orm
         self._clock = _Clock(now=clock or _utcnow)
 
+    @staticmethod
+    def _principal_matches_user(principal: CedarEntity | None, user_id: str) -> bool:
+        return (
+            isinstance(principal, CedarEntity)
+            and principal.type == "User"
+            and principal.id == user_id
+        )
+
+    @staticmethod
+    def _principal_is_admin(principal: CedarEntity | None, tenant: TenantContext) -> bool:
+        if not isinstance(principal, CedarEntity) or principal.type != "AdminUser":
+            return False
+        assigned = principal.attribute("tenant")
+        return assigned in (None, tenant.tenant, "*")
+
     async def grant(
         self,
         *,
@@ -347,6 +362,11 @@ class QuickstartDelegationService(DelegationService):
         target = _tenant_for_workspace(tenant, payload.workspace_id)
         if payload.starts_at >= payload.ends_at:
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_window"})
+        if not (
+            self._principal_matches_user(principal, payload.from_user_id)
+            or self._principal_is_admin(principal, target)
+        ):
+            raise HTTPError(Status.FORBIDDEN, {"detail": "delegation_forbidden"})
         grantor_scopes = set(
             await self.resolve_effective_permissions(
                 tenant=target,
@@ -413,13 +433,24 @@ class QuickstartDelegationService(DelegationService):
         now = self._clock.now()
         if tenant.scope is not TenantScope.TENANT:
             raise HTTPError(Status.FORBIDDEN, {"detail": "tenant_required"})
-        updated = await self._orm.tenants.permission_delegations.update(
+        manager = self._orm.tenants.permission_delegations
+        existing = await manager.get(tenant=tenant, filters={"id": delegation_id})
+        if existing is None:
+            raise HTTPError(Status.NOT_FOUND, {"detail": "delegation_missing"})
+        target = _tenant_for_workspace(tenant, existing.workspace_id)
+        if not (
+            self._principal_matches_user(principal, existing.from_user_id)
+            or self._principal_matches_user(principal, existing.to_user_id)
+            or self._principal_is_admin(principal, target)
+        ):
+            raise HTTPError(Status.FORBIDDEN, {"detail": "delegation_forbidden"})
+        if existing.ends_at <= now:
+            return
+        await manager.update(
             {"ends_at": now},
             tenant=tenant,
             filters={"id": delegation_id},
         )
-        if not updated:
-            raise HTTPError(Status.NOT_FOUND, {"detail": "delegation_missing"})
 
     async def list_active(
         self,
