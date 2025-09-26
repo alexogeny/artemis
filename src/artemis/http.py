@@ -21,6 +21,7 @@ class Status(IntEnum):
     GONE = 410
     TOO_MANY_REQUESTS = 429
     INTERNAL_SERVER_ERROR = 500
+    NOT_IMPLEMENTED = 501
 
 
 def ensure_status(status: int | Status) -> int:

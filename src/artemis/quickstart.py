@@ -47,22 +47,53 @@ from .chatops import (
 )
 from .codegen import generate_typescript_client
 from .database import Database, _quote_identifier
+from .domain.quickstart_services import (
+    QuickstartAuditService,
+    QuickstartDelegationService,
+    QuickstartRbacService,
+    QuickstartTileService,
+    build_cedar_engine,
+)
+from .domain.services import (
+    AuditLogExportQuery,
+    AuditService,
+    DelegationGrant,
+    DelegationService,
+    PermissionSetCreate,
+    RbacService,
+    RoleAssignment,
+    TileCreate,
+    TilePermissions,
+    TileService,
+    TileUpdate,
+)
 from .exceptions import HTTPError
 from .http import Status
 from .id57 import generate_id57
 from .migrations import Migration, MigrationRunner, MigrationScope, create_table_for_model
 from .models import (
+    AdminAuditLogEntry,
+    AdminRoleAssignment,
     BillingRecord,
     BillingStatus,
+    DashboardTile,
+    DashboardTilePermission,
+    Permission,
+    Role,
     SessionLevel,
     SupportTicket,
     SupportTicketKind,
     SupportTicketStatus,
     SupportTicketUpdate,
+    TenantAuditLogEntry,
     TenantSupportTicket,
+    WorkspacePermissionDelegation,
+    WorkspacePermissionSet,
+    WorkspaceRoleAssignment,
 )
 from .openapi import generate_openapi
 from .orm import ORM, DatabaseModel, ModelScope, model
+from .rbac import CedarEngine
 from .requests import Request
 from .responses import JSONResponse, Response
 from .tenancy import TenantContext, TenantScope
@@ -203,6 +234,17 @@ class QuickstartChatOpsSettings(Struct, frozen=True):
     )
     bot_user_id: str | None = None
     admin_workspace: str | None = None
+
+
+class QuickstartAuditLogQuery(Struct, frozen=True, omit_defaults=True):
+    """Query parameters used by audit log routes."""
+
+    actor: str | None = None
+    action: str | None = None
+    entity: str | None = None
+    from_time: datetime | None = field(name="from", default=None)
+    to_time: datetime | None = field(name="to", default=None)
+    format: Literal["csv", "json"] | None = None
 
 
 class QuickstartSlashCommandInvocation(Struct, frozen=True):
@@ -361,11 +403,15 @@ def quickstart_migrations() -> tuple[Migration, ...]:
             name="quickstart_admin_tables",
             scope=MigrationScope.ADMIN,
             operations=(
+                create_table_for_model(AdminAuditLogEntry),
                 create_table_for_model(BillingRecord),
                 create_table_for_model(QuickstartTenantRecord),
                 create_table_for_model(QuickstartAdminUserRecord),
                 create_table_for_model(QuickstartSeedStateRecord),
                 create_table_for_model(QuickstartTrialExtensionRecord),
+                create_table_for_model(Role),
+                create_table_for_model(Permission),
+                create_table_for_model(AdminRoleAssignment),
                 create_table_for_model(SupportTicket),
             ),
         ),
@@ -375,6 +421,12 @@ def quickstart_migrations() -> tuple[Migration, ...]:
             operations=(
                 create_table_for_model(QuickstartTenantUserRecord),
                 create_table_for_model(TenantSupportTicket),
+                create_table_for_model(TenantAuditLogEntry),
+                create_table_for_model(DashboardTile),
+                create_table_for_model(DashboardTilePermission),
+                create_table_for_model(WorkspacePermissionSet),
+                create_table_for_model(WorkspaceRoleAssignment),
+                create_table_for_model(WorkspacePermissionDelegation),
             ),
         ),
     )
@@ -1182,6 +1234,16 @@ def attach_quickstart(
         f"{normalized}/admin/chatops" if normalized else "/admin/chatops"
     )
     chatops_slash_path = f"{normalized}/chatops/slash" if normalized else "/chatops/slash"
+    workspaces_path = f"{normalized}/workspaces" if normalized else "/workspaces"
+    tiles_collection_path = f"{workspaces_path}/{{wsId}}/tiles"
+    tile_item_path = f"{tiles_collection_path}/{{tileId}}"
+    tile_permissions_path = f"{tile_item_path}/permissions"
+    rbac_permission_sets_path = f"{workspaces_path}/{{wsId}}/rbac/permission-sets"
+    rbac_role_assign_path = f"{workspaces_path}/{{wsId}}/rbac/roles/{{roleId}}/assign"
+    delegations_path = f"{normalized}/delegations" if normalized else "/delegations"
+    delegation_item_path = f"{delegations_path}/{{delegationId}}"
+    audit_logs_path = f"{workspaces_path}/{{wsId}}/audit-logs"
+    audit_logs_export_path = f"{audit_logs_path}/export"
 
     env_auth_config = load_quickstart_auth_from_env()
     seed_hint = auth_config or env_auth_config or DEFAULT_QUICKSTART_AUTH
@@ -1231,6 +1293,37 @@ def attach_quickstart(
         repository = QuickstartRepository(
             orm, site=app.config.site, domain=app.config.domain
         )
+
+        tile_domain = QuickstartTileService(orm)
+        rbac_domain = QuickstartRbacService(orm)
+        delegation_domain = QuickstartDelegationService(orm)
+        audit_domain = QuickstartAuditService(orm)
+
+        app.dependencies.provide(TileService, lambda: tile_domain)
+        app.dependencies.provide(RbacService, lambda: rbac_domain)
+        app.dependencies.provide(DelegationService, lambda: delegation_domain)
+        app.dependencies.provide(AuditService, lambda: audit_domain)
+
+        async def _cedar_engine_dependency(request: Request) -> CedarEngine:
+            tenant_ctx = request.tenant
+            if tenant_ctx.scope is TenantScope.TENANT:
+                return await build_cedar_engine(orm, tenant=tenant_ctx)
+            if tenant_ctx.scope is TenantScope.ADMIN:
+                workspace_id = request.path_params.get("wsId")
+                if workspace_id:
+                    target = TenantContext(
+                        tenant=workspace_id,
+                        site=tenant_ctx.site,
+                        domain=tenant_ctx.domain,
+                        scope=TenantScope.TENANT,
+                    )
+                    try:
+                        return await build_cedar_engine(orm, tenant=target)
+                    except HTTPError:
+                        return CedarEngine(())
+            return CedarEngine(())
+
+        app.dependencies.provide(CedarEngine, _cedar_engine_dependency)
 
         async def _ensure_contexts_for(slugs: Iterable[str]) -> None:
             missing = sorted(set(slugs) - tenants_map.keys())
@@ -1446,6 +1539,195 @@ def attach_quickstart(
             }
 
 
+        @app.post(tiles_collection_path, name="quickstart_tiles_create")
+        async def quickstart_tiles_create(
+            request: Request,
+            wsId: str,
+            payload: TileCreate,
+            service: TileService,
+        ) -> Response:
+            result = await service.create_tile(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                principal=request.principal,
+                payload=payload,
+            )
+            return JSONResponse(to_builtins(result), status=int(Status.CREATED))
+
+        @app.route(tile_item_path, methods=("PATCH",), name="quickstart_tiles_update")
+        async def quickstart_tiles_update(
+            request: Request,
+            wsId: str,
+            tileId: str,
+            payload: TileUpdate,
+            service: TileService,
+        ) -> Response:
+            result = await service.update_tile(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                tile_id=tileId,
+                principal=request.principal,
+                payload=payload,
+            )
+            return JSONResponse(to_builtins(result))
+
+        @app.route(tile_item_path, methods=("DELETE",), name="quickstart_tiles_delete")
+        async def quickstart_tiles_delete(
+            request: Request,
+            wsId: str,
+            tileId: str,
+            service: TileService,
+        ) -> Response:
+            await service.delete_tile(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                tile_id=tileId,
+                principal=request.principal,
+            )
+            return Response(status=int(Status.NO_CONTENT))
+
+        @app.route(
+            tile_permissions_path,
+            methods=("PUT",),
+            name="quickstart_tiles_permissions",
+        )
+        async def quickstart_tiles_permissions(
+            request: Request,
+            wsId: str,
+            tileId: str,
+            payload: TilePermissions,
+            service: TileService,
+        ) -> Response:
+            result = await service.set_permissions(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                tile_id=tileId,
+                principal=request.principal,
+                permissions=payload,
+            )
+            return JSONResponse(to_builtins(result))
+
+        @app.post(
+            rbac_permission_sets_path,
+            name="quickstart_rbac_permission_sets_create",
+        )
+        async def quickstart_rbac_permission_sets_create(
+            request: Request,
+            wsId: str,
+            payload: PermissionSetCreate,
+            service: RbacService,
+        ) -> Response:
+            _require_admin(request)
+            result = await service.create_permission_set(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                principal=request.principal,
+                payload=payload,
+            )
+            return JSONResponse(to_builtins(result), status=int(Status.CREATED))
+
+        @app.post(rbac_role_assign_path, name="quickstart_rbac_assign_role")
+        async def quickstart_rbac_assign_role(
+            request: Request,
+            wsId: str,
+            roleId: str,
+            payload: RoleAssignment,
+            service: RbacService,
+        ) -> Response:
+            _require_admin(request)
+            result = await service.assign_role(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                role_id=roleId,
+                principal=request.principal,
+                payload=payload,
+            )
+            return JSONResponse(to_builtins(result))
+
+        @app.post(delegations_path, name="quickstart_delegations_grant")
+        async def quickstart_delegations_grant(
+            request: Request,
+            payload: DelegationGrant,
+            service: DelegationService,
+        ) -> Response:
+            if request.tenant.scope is not TenantScope.TENANT:
+                raise HTTPError(Status.FORBIDDEN, {"detail": "tenant_required"})
+            delegation = await service.grant(
+                tenant=request.tenant,
+                principal=request.principal,
+                payload=payload,
+            )
+            return JSONResponse(to_builtins(delegation), status=int(Status.CREATED))
+
+        @app.route(
+            delegation_item_path,
+            methods=("DELETE",),
+            name="quickstart_delegations_revoke",
+        )
+        async def quickstart_delegations_revoke(
+            request: Request,
+            delegationId: str,
+            service: DelegationService,
+        ) -> Response:
+            if request.tenant.scope is not TenantScope.TENANT:
+                raise HTTPError(Status.FORBIDDEN, {"detail": "tenant_required"})
+            await service.revoke(
+                tenant=request.tenant,
+                principal=request.principal,
+                delegation_id=delegationId,
+            )
+            return Response(status=int(Status.NO_CONTENT))
+
+        @app.get(audit_logs_path, name="quickstart_audit_logs")
+        async def quickstart_audit_logs(
+            request: Request,
+            wsId: str,
+            service: AuditService,
+        ) -> Response:
+            _require_admin(request)
+            query = request.query(QuickstartAuditLogQuery)
+            page = await service.read(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                principal=request.principal,
+                actor=query.actor,
+                action=query.action,
+                entity=query.entity,
+                from_time=query.from_time,
+                to_time=query.to_time,
+            )
+            return JSONResponse(to_builtins(page))
+
+        @app.get(audit_logs_export_path, name="quickstart_audit_logs_export")
+        async def quickstart_audit_logs_export(
+            request: Request,
+            wsId: str,
+            service: AuditService,
+        ) -> Response:
+            _require_admin(request)
+            query = request.query(QuickstartAuditLogQuery)
+            export = await service.export(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                principal=request.principal,
+                query=AuditLogExportQuery(format=query.format or "json"),
+                actor=query.actor,
+                action=query.action,
+                entity=query.entity,
+                from_time=query.from_time,
+                to_time=query.to_time,
+            )
+            headers: list[tuple[str, str]] = [("content-type", export.content_type)]
+            if export.filename:
+                headers.append(
+                    (
+                        "content-disposition",
+                        f'attachment; filename="{export.filename}"',
+                    )
+                )
+            return Response(status=int(Status.OK), headers=tuple(headers), body=export.body)
+
+
         @app.get(billing_path, name="quickstart_admin_billing")
         async def quickstart_admin_billing(request: Request, orm: ORM) -> Response:
             _require_admin(request)
@@ -1576,9 +1858,12 @@ def attach_quickstart(
             return JSONResponse(to_builtins(record), status=201)
 
         @app.get(chatops_settings_path, name="quickstart_admin_chatops_settings")
-        async def quickstart_get_chatops_settings(request: Request) -> Response:
+        async def quickstart_admin_chatops_settings(
+            request: Request,
+        ) -> Response:
             _require_admin(request)
-            return JSONResponse(chatops_control.serialize_settings())
+            settings = chatops_control.serialize_settings()
+            return JSONResponse(settings)
 
         @app.post(chatops_settings_path, name="quickstart_admin_update_chatops_settings")
         async def quickstart_update_chatops_settings(
@@ -1635,6 +1920,27 @@ def attach_quickstart(
             if isinstance(result, Response):
                 return result
             return JSONResponse(result)
+
+    providers = getattr(app.dependencies, "_providers", {})
+
+    def _missing_dependency_factory(dependency: type[Any]) -> Callable[[], Any]:
+        def _missing_dependency() -> Any:  # pragma: no cover - defensive wiring path
+            raise HTTPError(
+                Status.NOT_IMPLEMENTED,
+                {
+                    "detail": "dependency_unavailable",
+                    "dependency": dependency.__name__,
+                },
+            )
+
+        return _missing_dependency
+
+    for dependency in (TileService, RbacService, DelegationService, AuditService):
+        if dependency not in providers:
+            app.dependencies.provide(dependency, _missing_dependency_factory(dependency))
+
+    if CedarEngine not in providers:
+        app.dependencies.provide(CedarEngine, lambda: CedarEngine(()))
 
     @app.get(ping_path, name="quickstart_ping")
     async def quickstart_ping() -> str:

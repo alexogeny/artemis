@@ -27,6 +27,20 @@ from artemis.chatops import (
     SlackWebhookConfig,
 )
 from artemis.database import Database, DatabaseConfig, PoolConfig
+from artemis.domain.services import (
+    AuditLogEntry,
+    AuditLogExport,
+    AuditLogPage,
+    AuditService,
+    DelegationRecord,
+    DelegationService,
+    PermissionSetRecord,
+    RbacService,
+    RoleAssignmentResult,
+    TilePermissions,
+    TileRecord,
+    TileService,
+)
 from artemis.exceptions import HTTPError
 from artemis.http import Status
 from artemis.migrations import MigrationRunner
@@ -72,6 +86,7 @@ from artemis.quickstart import (
     load_quickstart_auth_from_env,
     quickstart_migrations,
 )
+from artemis.rbac import CedarEngine
 from artemis.requests import Request
 from artemis.responses import JSONResponse, Response
 from artemis.tenancy import TenantContext, TenantScope
@@ -373,11 +388,12 @@ async def test_quickstart_migrations_create_tables() -> None:
     statements = [sql for kind, sql, *_ in connection.calls if kind == "execute"]
     assert any("CREATE TABLE" in sql and "quickstart_tenants" in sql for sql in statements)
     assert any("CREATE TABLE" in sql and "quickstart_users" in sql for sql in statements)
-    assert any("CREATE TABLE" in sql and "\"billing\"" in sql for sql in statements)
-    assert any(
-        "CREATE TABLE" in sql and "quickstart_trial_extensions" in sql
-        for sql in statements
-    )
+    assert any("CREATE TABLE" in sql and '"billing"' in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "quickstart_trial_extensions" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "dashboard_tiles" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "dashboard_tile_permissions" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "workspace_permission_sets" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "workspace_role_assignments" in sql for sql in statements)
 
 
 @pytest.mark.asyncio
@@ -543,10 +559,12 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
     await orm.admin.quickstart_tenants.create(beta_record)
 
     async with TestClient(app) as client:
-        connection.queue_result([
-            msgspec.to_builtins(acme_record),
-            msgspec.to_builtins(beta_record),
-        ])
+        connection.queue_result(
+            [
+                msgspec.to_builtins(acme_record),
+                msgspec.to_builtins(beta_record),
+            ]
+        )
         admin_response = await client.get(
             "/__artemis/tenants",
             tenant=app.config.admin_subdomain,
@@ -574,6 +592,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
             created_at=dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc),
             updated_at=dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc),
         )
+
         async def _stub_create(
             data: Mapping[str, object] | QuickstartTenantRecord,
             *,
@@ -765,9 +784,9 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
     )
 
     admin_support_tickets: dict[str, quickstart.QuickstartSupportTicketRecord] = {}
-    tenant_support_tickets: defaultdict[
-        str, dict[str, quickstart.QuickstartTenantSupportTicketRecord]
-    ] = defaultdict(dict)
+    tenant_support_tickets: defaultdict[str, dict[str, quickstart.QuickstartTenantSupportTicketRecord]] = defaultdict(
+        dict
+    )
 
     async def _admin_support_create(
         record: quickstart.QuickstartSupportTicketRecord,
@@ -925,10 +944,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         updated_payload = json.loads(update_response.body.decode())
         assert updated_payload["enabled"] is True
         assert updated_payload["notifications"]["tenant_created"] == "#tenants"
-        assert any(
-            command["action"] == "create_tenant"
-            for command in updated_payload["slash_commands"]
-        )
+        assert any(command["action"] == "create_tenant" for command in updated_payload["slash_commands"])
         assert all(command["visibility"] == "admin" for command in updated_payload["slash_commands"])
         assert {command["name"] for command in updated_payload["slash_commands"]} == {
             "create-tenant",
@@ -994,10 +1010,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         billing_message = chatops_service.sent[1][1]
         assert billing_message.channel == "#billing"
         assert created_record.customer_id in billing_message.text
-        assert not any(
-            message.extra.get("event") == "subscription_past_due"
-            for _, message in chatops_service.sent
-        )
+        assert not any(message.extra.get("event") == "subscription_past_due" for _, message in chatops_service.sent)
 
         active_record = BillingRecord(
             id="billing_active",
@@ -2037,9 +2050,7 @@ async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
             state_manager.updated.append(values)
             if state_manager.state is not None:
                 fingerprint = cast(str, values.get("fingerprint", state_manager.state.fingerprint))
-                state_manager.state = types.SimpleNamespace(
-                    id=state_manager.state.id, fingerprint=fingerprint
-                )
+                state_manager.state = types.SimpleNamespace(id=state_manager.state.id, fingerprint=fingerprint)
             return []
 
     class RecordingManager:
@@ -2385,9 +2396,7 @@ async def test_quickstart_repository_returns_none_when_empty() -> None:
             quickstart_tenants=ListManager(),
             quickstart_admin_users=ListManager(),
         ),
-        tenants=types.SimpleNamespace(
-            quickstart_users=types.SimpleNamespace(list=lambda **_: [])
-        ),
+        tenants=types.SimpleNamespace(quickstart_users=types.SimpleNamespace(list=lambda **_: [])),
     )
     repository = QuickstartRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
     assert await repository.load() is None
@@ -2609,6 +2618,8 @@ async def test_attach_quickstart_uses_repository_config(monkeypatch: pytest.Monk
     assert isinstance(reload_config, QuickstartAuthConfig)
     assert reload_config.tenants[0].slug == "gamma"
     assert any("gamma" in entry for entry in calls.get("schemas", []))
+
+
 # ------------------------------------------------------------------------------------------- engine unit tests
 
 
@@ -2737,9 +2748,7 @@ async def test_quickstart_engine_password_paths() -> None:
 
     # Password fallback from passkey
     start = await engine.start(beta, email="ops@beta.test")
-    response = await engine.password(
-        beta, PasswordAttempt(flow_token=start.flow_token, password="beta-password")
-    )
+    response = await engine.password(beta, PasswordAttempt(flow_token=start.flow_token, password="beta-password"))
     assert response.next is LoginStep.MFA
 
     # Invalid password
@@ -3242,9 +3251,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         def __init__(self) -> None:
             self.records: list[QuickstartTrialExtensionRecord] = []
 
-        async def create(
-            self, record: QuickstartTrialExtensionRecord
-        ) -> QuickstartTrialExtensionRecord:
+        async def create(self, record: QuickstartTrialExtensionRecord) -> QuickstartTrialExtensionRecord:
             self.records.append(record)
             return record
 
@@ -3255,15 +3262,11 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         def __init__(self) -> None:
             self.records: dict[str, QuickstartSupportTicketRecord] = {}
 
-        async def create(
-            self, record: QuickstartSupportTicketRecord
-        ) -> QuickstartSupportTicketRecord:
+        async def create(self, record: QuickstartSupportTicketRecord) -> QuickstartSupportTicketRecord:
             self.records[record.id] = record
             return record
 
-        async def get(
-            self, *, filters: Mapping[str, object] | None = None
-        ) -> QuickstartSupportTicketRecord | None:
+        async def get(self, *, filters: Mapping[str, object] | None = None) -> QuickstartSupportTicketRecord | None:
             if not filters:
                 return None
             ticket_id = cast(str | None, filters.get("id"))
@@ -3529,3 +3532,500 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
 
     metrics_after = await admin_control.tenant_metrics(stub_orm)
     assert metrics_after["support_tickets"]["total"] == 1
+
+
+class StubTileService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def create_tile(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        principal,
+        payload,
+    ) -> TileRecord:
+        self.calls.append(
+            (
+                "create",
+                {
+                    "tenant": tenant.tenant,
+                    "workspace": workspace_id,
+                    "principal": None if principal is None else principal.id,
+                    "title": payload.title,
+                },
+            )
+        )
+        return TileRecord(
+            id="tile-created",
+            workspace_id=workspace_id,
+            title=payload.title,
+            layout=payload.layout,
+            description=payload.description,
+            data_sources=payload.data_sources,
+            ai_insights_enabled=payload.ai_insights_enabled,
+        )
+
+    async def update_tile(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        tile_id: str,
+        principal,
+        payload,
+    ) -> TileRecord:
+        self.calls.append(
+            (
+                "update",
+                {
+                    "workspace": workspace_id,
+                    "tile": tile_id,
+                    "payload": msgspec.to_builtins(payload),
+                },
+            )
+        )
+        return TileRecord(
+            id=tile_id,
+            workspace_id=workspace_id,
+            title=payload.title or "updated",
+            layout=payload.layout or {"kind": "chart"},
+        )
+
+    async def delete_tile(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        tile_id: str,
+        principal,
+    ) -> None:
+        self.calls.append(("delete", {"workspace": workspace_id, "tile": tile_id}))
+
+    async def set_permissions(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        tile_id: str,
+        principal,
+        permissions,
+    ) -> TilePermissions:
+        self.calls.append(("permissions", {"workspace": workspace_id, "tile": tile_id}))
+        return permissions
+
+
+class StubRbacService:
+    def __init__(self) -> None:
+        self.permission_sets: list[dict[str, object]] = []
+        self.assignments: list[dict[str, object]] = []
+
+    async def create_permission_set(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        principal,
+        payload,
+    ) -> PermissionSetRecord:
+        self.permission_sets.append({"workspace": workspace_id, "payload": msgspec.to_builtins(payload)})
+        return PermissionSetRecord(
+            id="ps-1",
+            workspace_id=workspace_id,
+            name=payload.name,
+            permissions=payload.permissions,
+            role_id="role-ps-1",
+            description=payload.description,
+        )
+
+    async def assign_role(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        role_id: str,
+        principal,
+        payload,
+    ) -> RoleAssignmentResult:
+        self.assignments.append(
+            {
+                "workspace": workspace_id,
+                "role": role_id,
+                "users": payload.user_ids,
+            }
+        )
+        return RoleAssignmentResult(
+            role_id=role_id,
+            workspace_id=workspace_id,
+            assigned_user_ids=payload.user_ids,
+        )
+
+
+class StubDelegationService:
+    def __init__(self) -> None:
+        self.grants: list[dict[str, object]] = []
+        self.revocations: list[str] = []
+
+    async def grant(self, *, tenant, principal, payload) -> DelegationRecord:
+        self.grants.append(
+            {
+                "scopes": payload.scopes,
+                "from": payload.from_user_id,
+                "workspace": payload.workspace_id,
+            }
+        )
+        return DelegationRecord(
+            id="del-1",
+            from_user_id=payload.from_user_id,
+            to_user_id=payload.to_user_id,
+            scopes=payload.scopes,
+            workspace_id=payload.workspace_id,
+            starts_at=payload.starts_at,
+            ends_at=payload.ends_at,
+            created_by=principal.id if principal else "system",
+        )
+
+    async def revoke(self, *, tenant, principal, delegation_id: str) -> None:
+        self.revocations.append(delegation_id)
+
+
+class StubAuditService:
+    def __init__(self) -> None:
+        self.read_calls: list[dict[str, object]] = []
+        self.export_calls: list[dict[str, object]] = []
+
+    async def read(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        principal,
+        actor: str | None = None,
+        action: str | None = None,
+        entity: str | None = None,
+        from_time: dt.datetime | None = None,
+        to_time: dt.datetime | None = None,
+    ) -> AuditLogPage:
+        self.read_calls.append(
+            {
+                "workspace": workspace_id,
+                "actor": actor,
+                "action": action,
+                "from": from_time,
+                "to": to_time,
+            }
+        )
+        return AuditLogPage(
+            entries=(
+                AuditLogEntry(
+                    id="aud-1",
+                    timestamp=dt.datetime.now(dt.timezone.utc),
+                    actor=actor or "demo",
+                    action=action or "view",
+                    entity_type="tile",
+                    entity_id="tile-1",
+                ),
+            ),
+        )
+
+    async def export(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        principal,
+        query,
+        actor: str | None = None,
+        action: str | None = None,
+        entity: str | None = None,
+        from_time: dt.datetime | None = None,
+        to_time: dt.datetime | None = None,
+    ) -> AuditLogExport:
+        self.export_calls.append(
+            {
+                "workspace": workspace_id,
+                "format": query.format,
+                "actor": actor,
+            }
+        )
+        content_type = "text/csv" if query.format == "csv" else "application/json"
+        body = b"id,action\naud-1,view" if query.format == "csv" else b"[]"
+        return AuditLogExport(
+            content_type=content_type,
+            body=body,
+            filename=f"audit.{query.format}" if query.format == "csv" else None,
+        )
+
+
+def _build_quickstart_app(monkeypatch: pytest.MonkeyPatch) -> ArtemisApp:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(site="demo", domain="local.test", allowed_tenants=("acme",), database=db_config)
+    app = ArtemisApp(config=config, database=database)
+
+    async def _noop_apply(
+        self: quickstart.QuickstartSeeder,
+        config: quickstart.QuickstartAuthConfig,
+        *,
+        tenants: Mapping[str, TenantContext],
+    ) -> bool:
+        return False
+
+    async def _noop_run_all(
+        self: quickstart.MigrationRunner,
+        *,
+        tenants: Sequence[TenantContext],
+    ) -> None:
+        return None
+
+    async def _noop_ensure(
+        database: Database,
+        tenants: Sequence[TenantContext],
+    ) -> None:
+        return None
+
+    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
+    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
+    monkeypatch.setattr(quickstart, "ensure_tenant_schemas", _noop_ensure)
+    app.dependencies.provide(TileService, lambda: object())
+    attach_quickstart(app)
+    return app
+
+
+@pytest.mark.asyncio
+async def test_quickstart_tile_routes_delegate_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    stub = StubTileService()
+    app.dependencies.provide(TileService, lambda: stub)
+
+    async with TestClient(app) as client:
+        create = await client.post(
+            "/__artemis/workspaces/ws-1/tiles",
+            tenant="acme",
+            json={"title": "Sales", "layout": {"type": "chart"}},
+        )
+        assert create.status == Status.CREATED
+        update = await client.request(
+            "PATCH",
+            "/__artemis/workspaces/ws-1/tiles/tile-1",
+            tenant="acme",
+            json={"description": "Updated"},
+        )
+        assert update.status == 200
+        delete = await client.request(
+            "DELETE",
+            "/__artemis/workspaces/ws-1/tiles/tile-1",
+            tenant="acme",
+        )
+        assert delete.status == Status.NO_CONTENT
+        permissions = await client.request(
+            "PUT",
+            "/__artemis/workspaces/ws-1/tiles/tile-1/permissions",
+            tenant="acme",
+            json={"roles": ["viewer"], "users": ["user-1"]},
+        )
+        assert permissions.status == 200
+        assert stub.calls[0][0] == "create"
+        assert stub.calls[1][0] == "update"
+        assert stub.calls[2][0] == "delete"
+        assert stub.calls[3][0] == "permissions"
+
+
+@pytest.mark.asyncio
+async def test_quickstart_rbac_routes_require_admin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    stub = StubRbacService()
+    app.dependencies.provide(RbacService, lambda: stub)
+
+    async with TestClient(app) as client:
+        forbidden = await client.post(
+            "/__artemis/workspaces/ws-1/rbac/permission-sets",
+            tenant="acme",
+            json={"name": "ops", "permissions": ["tiles:read"]},
+        )
+        assert forbidden.status == Status.FORBIDDEN
+
+        created = await client.post(
+            "/__artemis/workspaces/ws-1/rbac/permission-sets",
+            tenant=app.config.admin_subdomain,
+            json={"name": "ops", "permissions": ["tiles:read"]},
+        )
+        assert created.status == Status.CREATED
+        assigned = await client.post(
+            "/__artemis/workspaces/ws-1/rbac/roles/role-ps-1/assign",
+            tenant=app.config.admin_subdomain,
+            json={"userIds": ["user-1"]},
+        )
+        assert assigned.status == 200
+        assert stub.permission_sets
+        assert stub.assignments
+
+
+@pytest.mark.asyncio
+async def test_quickstart_delegation_routes_delegate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    stub = StubDelegationService()
+    app.dependencies.provide(DelegationService, lambda: stub)
+
+    start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    end = dt.datetime(2024, 1, 2, tzinfo=dt.timezone.utc)
+
+    async with TestClient(app) as client:
+        admin_forbidden = await client.post(
+            "/__artemis/delegations",
+            tenant=app.config.admin_subdomain,
+            json={
+                "workspaceId": "ws-1",
+                "fromUserId": "user-1",
+                "toUserId": "user-2",
+                "scopes": ["tiles:read"],
+                "startsAt": start.isoformat(),
+                "endsAt": end.isoformat(),
+            },
+        )
+        assert admin_forbidden.status == Status.FORBIDDEN
+
+        grant = await client.post(
+            "/__artemis/delegations",
+            tenant="acme",
+            json={
+                "workspaceId": "ws-1",
+                "fromUserId": "user-1",
+                "toUserId": "user-2",
+                "scopes": ["tiles:read"],
+                "startsAt": start.isoformat(),
+                "endsAt": end.isoformat(),
+            },
+        )
+        assert grant.status == Status.CREATED
+        admin_delete = await client.request(
+            "DELETE",
+            "/__artemis/delegations/del-1",
+            tenant=app.config.admin_subdomain,
+        )
+        assert admin_delete.status == Status.FORBIDDEN
+        revoke = await client.request(
+            "DELETE",
+            "/__artemis/delegations/del-1",
+            tenant="acme",
+        )
+        assert revoke.status == Status.NO_CONTENT
+        assert stub.grants
+        assert stub.revocations == ["del-1"]
+
+
+@pytest.mark.asyncio
+async def test_quickstart_cedar_dependency_handles_missing_workspace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def stub_build(
+        orm: quickstart.ORM, *, tenant: TenantContext, at: dt.datetime | None = None
+    ) -> CedarEngine:
+        if tenant.scope is TenantScope.TENANT and tenant.tenant == "acme":
+            return CedarEngine(())
+        raise HTTPError(Status.NOT_FOUND, {"detail": "missing"})
+
+    monkeypatch.setattr(quickstart, "build_cedar_engine", stub_build)
+    app = _build_quickstart_app(monkeypatch)
+
+    tenant_request = Request(
+        method="GET",
+        path="/__artemis/workspaces/acme/tiles",
+        tenant=TenantContext(
+            tenant="acme",
+            site=app.config.site,
+            domain=app.config.domain,
+            scope=TenantScope.TENANT,
+        ),
+        path_params={"wsId": "acme"},
+    )
+    tenant_scope = app.dependencies.scope(tenant_request)
+    tenant_engine = await tenant_scope.get(CedarEngine)
+    assert isinstance(tenant_engine, CedarEngine)
+
+    admin_request = Request(
+        method="GET",
+        path="/__artemis/workspaces/ws-1/rbac/permission-sets",
+        tenant=TenantContext(
+            tenant=app.config.admin_subdomain,
+            site=app.config.site,
+            domain=app.config.domain,
+            scope=TenantScope.ADMIN,
+        ),
+        path_params={"wsId": "ws-1"},
+    )
+    admin_scope = app.dependencies.scope(admin_request)
+    empty_engine = await admin_scope.get(CedarEngine)
+    assert isinstance(empty_engine, CedarEngine)
+    assert not empty_engine.policies()
+
+    admin_missing = Request(
+        method="GET",
+        path="/__artemis/diagnostics",
+        tenant=TenantContext(
+            tenant=app.config.admin_subdomain,
+            site=app.config.site,
+            domain=app.config.domain,
+            scope=TenantScope.ADMIN,
+        ),
+    )
+    admin_missing_engine = await app.dependencies.scope(admin_missing).get(CedarEngine)
+    assert isinstance(admin_missing_engine, CedarEngine)
+    assert not admin_missing_engine.policies()
+
+    public_request = Request(
+        method="GET",
+        path="/__artemis/ping",
+        tenant=TenantContext(
+            tenant="public",
+            site=app.config.site,
+            domain=app.config.domain,
+            scope=TenantScope.PUBLIC,
+        ),
+    )
+    public_engine = await app.dependencies.scope(public_request).get(CedarEngine)
+    assert isinstance(public_engine, CedarEngine)
+    assert not public_engine.policies()
+
+
+@pytest.mark.asyncio
+async def test_quickstart_audit_routes_delegate_to_service(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    stub = StubAuditService()
+    app.dependencies.provide(AuditService, lambda: stub)
+
+    async with TestClient(app) as client:
+        logs = await client.get(
+            "/__artemis/workspaces/ws-1/audit-logs",
+            tenant=app.config.admin_subdomain,
+            query={"actor": "admin", "from": "2024-01-01T00:00:00Z"},
+        )
+        assert logs.status == 200
+        export = await client.get(
+            "/__artemis/workspaces/ws-1/audit-logs/export",
+            tenant=app.config.admin_subdomain,
+            query={"format": "csv"},
+        )
+        assert export.status == 200
+        header_map = dict(export.headers)
+        assert header_map["content-type"] == "text/csv"
+        assert stub.read_calls
+        assert stub.export_calls[0]["format"] == "csv"
+        export_json = await client.get(
+            "/__artemis/workspaces/ws-1/audit-logs/export",
+            tenant=app.config.admin_subdomain,
+        )
+        assert export_json.status == 200
+        json_headers = dict(export_json.headers)
+        assert "content-disposition" not in json_headers
