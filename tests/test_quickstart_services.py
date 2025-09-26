@@ -620,6 +620,7 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
 @pytest.mark.asyncio
 async def test_delegation_service_enforces_actor_authorization(
     tenant_alpha: TenantContext,
+    admin_ctx: TenantContext,
 ) -> None:
     delegations = InMemoryTable(WorkspacePermissionDelegation)
     permission_sets = InMemoryTable(WorkspacePermissionSet)
@@ -674,6 +675,14 @@ async def test_delegation_service_enforces_actor_authorization(
         )
     assert unauthorized_grant.value.detail["detail"] == "delegation_forbidden"
 
+    with pytest.raises(HTTPError) as wrong_scope:
+        await service.grant(
+            tenant=admin_ctx,
+            principal=CedarEntity(type="User", id="grantor"),
+            payload=make_payload(),
+        )
+    assert wrong_scope.value.detail["detail"] == "tenant_required"
+
     grantor = CedarEntity(type="User", id="grantor")
     granted = await service.grant(
         tenant=tenant_alpha,
@@ -695,6 +704,14 @@ async def test_delegation_service_enforces_actor_authorization(
         principal=delegate,
         delegation_id=granted.id,
     )
+
+    with pytest.raises(HTTPError) as admin_scope_revoke:
+        await service.revoke(
+            tenant=admin_ctx,
+            principal=delegate,
+            delegation_id=granted.id,
+        )
+    assert admin_scope_revoke.value.detail["detail"] == "tenant_required"
 
     clock.value = clock.now() + dt.timedelta(hours=2)
     admin = CedarEntity(type="AdminUser", id="admin", attributes={"tenant": tenant_alpha.tenant})

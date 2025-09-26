@@ -359,6 +359,8 @@ class QuickstartDelegationService(DelegationService):
         principal,
         payload: DelegationGrant,
     ) -> DelegationRecord:
+        if tenant.scope is not TenantScope.TENANT:
+            raise HTTPError(Status.FORBIDDEN, {"detail": "tenant_required"})
         target = _tenant_for_workspace(tenant, payload.workspace_id)
         if payload.starts_at >= payload.ends_at:
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_window"})
@@ -448,7 +450,7 @@ class QuickstartDelegationService(DelegationService):
             return
         await manager.update(
             {"ends_at": now},
-            tenant=tenant,
+            tenant=target,
             filters={"id": delegation_id},
         )
 
