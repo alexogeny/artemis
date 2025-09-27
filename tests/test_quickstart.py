@@ -6,7 +6,7 @@ import types
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, Mapping, Sequence, cast
+from typing import Any, Callable, Iterable, Mapping, Sequence, cast
 
 import msgspec
 import pytest
@@ -89,7 +89,7 @@ from artemis.quickstart import (
 from artemis.rbac import CedarEngine
 from artemis.requests import Request
 from artemis.responses import JSONResponse, Response
-from artemis.tenancy import TenantContext, TenantScope
+from artemis.tenancy import TenantContext, TenantResolutionError, TenantScope
 from tests.support import FakeConnection, FakePool
 
 
@@ -149,6 +149,51 @@ def test_attach_quickstart_updates_allowed_tenants_from_config() -> None:
     attach_quickstart(app, auth_config=config)
 
     assert "gamma" in app.tenant_resolver.allowed_tenants
+
+
+@pytest.mark.asyncio
+async def test_attach_quickstart_removes_obsolete_allowed_tenants(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured_syncs: list[Callable[[QuickstartAuthConfig], None]] = []
+    original_admin_control = quickstart.QuickstartAdminControlPlane
+
+    class CapturingQuickstartAdminControlPlane(original_admin_control):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:  # type: ignore[override]
+            captured_syncs.append(kwargs["sync_allowed_tenants"])
+            super().__init__(*args, **kwargs)
+
+    monkeypatch.setattr(quickstart, "QuickstartAdminControlPlane", CapturingQuickstartAdminControlPlane)
+
+    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=()))
+    initial_config = QuickstartAuthConfig(
+        tenants=(
+            QuickstartTenant(slug="gamma", name="Gamma Corp", users=()),
+            QuickstartTenant(slug="omega", name="Omega LLC", users=()),
+        ),
+        admin=DEFAULT_QUICKSTART_AUTH.admin,
+    )
+
+    attach_quickstart(app, auth_config=initial_config)
+
+    assert captured_syncs, "sync_allowed_tenants hook should be captured"
+    sync_allowed_tenants = captured_syncs[-1]
+
+    assert app.tenant_resolver.allowed_tenants == {"gamma", "omega"}
+
+    engine_factory = app.dependencies._providers[QuickstartAuthEngine]
+    engine = engine_factory()
+
+    updated_config = QuickstartAuthConfig(
+        tenants=(QuickstartTenant(slug="gamma", name="Gamma Corp", users=()),),
+        admin=DEFAULT_QUICKSTART_AUTH.admin,
+    )
+
+    await engine.reload(updated_config)
+    sync_allowed_tenants(updated_config)
+
+    assert app.tenant_resolver.allowed_tenants == {"gamma"}
+
+    with pytest.raises(TenantResolutionError):
+        app.tenant_resolver.resolve("omega.demo.local.test")
 
 
 @pytest.mark.asyncio

@@ -1215,9 +1215,11 @@ def attach_quickstart(
 
     def _sync_allowed_tenants(config: QuickstartAuthConfig) -> None:
         resolver = app.tenant_resolver
-        resolver.allowed_tenants.update(tenant.slug for tenant in config.tenants)
-        resolver.allowed_tenants.discard(app.config.admin_subdomain)
-        resolver.allowed_tenants.discard(app.config.marketing_tenant)
+        allowed = set(app.config.allowed_tenants or ())
+        allowed.update(tenant.slug for tenant in config.tenants)
+        allowed.discard(app.config.admin_subdomain)
+        allowed.discard(app.config.marketing_tenant)
+        resolver.allowed_tenants = allowed
 
     _sync_allowed_tenants(seed_hint)
 
