@@ -1116,6 +1116,13 @@ class QuickstartAdminControlPlane:
                 "updated_by": actor,
             },
         )
+        if isinstance(updated, Sequence):
+            updated_record = cast(
+                QuickstartSupportTicketRecord,
+                updated[0] if updated else record,
+            )
+        else:
+            updated_record = cast(QuickstartSupportTicketRecord, updated)
         tenant_context = self._app.tenant_resolver.context_for(record.tenant_slug, TenantScope.TENANT)
         tenant_record = await orm.tenants.support_tickets.get(
             tenant=tenant_context,
@@ -1150,7 +1157,7 @@ class QuickstartAdminControlPlane:
                 "note": payload.note,
             },
         )
-        return cast(QuickstartSupportTicketRecord, updated)
+        return updated_record
 
 
 def attach_quickstart(
