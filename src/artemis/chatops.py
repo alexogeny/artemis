@@ -7,8 +7,7 @@ import hashlib
 import inspect
 import shlex
 import ssl
-from typing import Any, Awaitable, Callable, Iterable, Mapping, Protocol, Sequence
-from typing import Literal, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Iterable, Literal, Mapping, Protocol, Sequence
 from urllib.parse import urlparse
 
 import msgspec
@@ -301,11 +300,7 @@ class ChatOpsService:
                 if command.visibility == "admin":
                     if tenant.scope is not TenantScope.ADMIN:
                         raise ChatOpsCommandResolutionError("admin_command")
-                    if (
-                        admin_workspace is None
-                        or workspace_id is None
-                        or workspace_id != admin_workspace
-                    ):
+                    if admin_workspace is None or workspace_id is None or workspace_id != admin_workspace:
                         raise ChatOpsCommandResolutionError("workspace_forbidden")
                 else:
                     if tenant.scope is not TenantScope.ADMIN and not self.is_configured(tenant):
@@ -494,16 +489,16 @@ def _validate_certificate_pin(response: Any, pins: Iterable[str]) -> None:
 
 
 __all__ = [
-    "ChatOpsInvocationError",
-    "ChatOpsCommandResolutionError",
     "ChatMessage",
+    "ChatOpsCommandResolutionError",
     "ChatOpsConfig",
     "ChatOpsError",
+    "ChatOpsInvocationError",
     "ChatOpsRoute",
     "ChatOpsService",
     "ChatOpsSlashCommand",
     "ChatOpsSlashCommandInvocation",
-    "parse_slash_command_args",
     "SlackWebhookConfig",
     "SlashCommandVisibility",
+    "parse_slash_command_args",
 ]

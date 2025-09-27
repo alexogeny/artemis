@@ -278,9 +278,7 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
             default_channel="#ops",
         ),
     )
-    observability = Observability(
-        ObservabilityConfig(datadog_tags=(("env", "test"),), sentry_record_breadcrumbs=True)
-    )
+    observability = Observability(ObservabilityConfig(datadog_tags=(("env", "test"),), sentry_record_breadcrumbs=True))
     service = ChatOpsService(config, transport=transport, observability=observability)
 
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
@@ -491,9 +489,7 @@ async def test_chatops_instrumentation_sentry_breadcrumbs_without_channel(
         enabled=True,
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
-    observability = Observability(
-        ObservabilityConfig(datadog_enabled=False, sentry_record_breadcrumbs=True)
-    )
+    observability = Observability(ObservabilityConfig(datadog_enabled=False, sentry_record_breadcrumbs=True))
     service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 

@@ -339,11 +339,7 @@ class QuickstartDelegationService(DelegationService):
 
     @staticmethod
     def _principal_matches_user(principal: CedarEntity | None, user_id: str) -> bool:
-        return (
-            isinstance(principal, CedarEntity)
-            and principal.type == "User"
-            and principal.id == user_id
-        )
+        return isinstance(principal, CedarEntity) and principal.type == "User" and principal.id == user_id
 
     @staticmethod
     def _principal_is_admin(principal: CedarEntity | None, tenant: TenantContext) -> bool:
@@ -365,8 +361,7 @@ class QuickstartDelegationService(DelegationService):
         if payload.starts_at >= payload.ends_at:
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_window"})
         if not (
-            self._principal_matches_user(principal, payload.from_user_id)
-            or self._principal_is_admin(principal, target)
+            self._principal_matches_user(principal, payload.from_user_id) or self._principal_is_admin(principal, target)
         ):
             raise HTTPError(Status.FORBIDDEN, {"detail": "delegation_forbidden"})
         grantor_scopes = set(
@@ -475,11 +470,7 @@ class QuickstartDelegationService(DelegationService):
             tenant=target,
             filters=filters or None,
         )
-        return tuple(
-            self._to_record(item)
-            for item in entries
-            if item.starts_at <= now <= item.ends_at
-        )
+        return tuple(self._to_record(item) for item in entries if item.starts_at <= now <= item.ends_at)
 
     async def resolve_effective_permissions(
         self,
@@ -498,9 +489,7 @@ class QuickstartDelegationService(DelegationService):
         )
         assignments = await self._orm.tenants.workspace_role_assignments.list(
             tenant=target,
-            filters={"workspace_id": workspace_id, "user_id": user_id}
-            if workspace_id
-            else {"user_id": user_id},
+            filters={"workspace_id": workspace_id, "user_id": user_id} if workspace_id else {"user_id": user_id},
         )
         permission_map = {record.role_id: record for record in sets}
         scopes: set[str] = set()

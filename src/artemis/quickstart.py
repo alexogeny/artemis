@@ -103,6 +103,7 @@ _DEV_DOMAIN_SUFFIXES: Final[tuple[str, ...]] = (".local", ".localhost", ".test")
 _DEV_DOMAINS: Final[set[str]] = {"localhost", "127.0.0.1"}
 
 if TYPE_CHECKING:
+
     class RureRegex(Protocol):
         def is_match(self, value: str) -> bool:  # pragma: no cover - typing helper
             ...
@@ -112,9 +113,7 @@ else:  # pragma: no cover - runtime alias derived from compiled pattern
     RureRegex = type(rure.compile("demo"))
 
 
-_TENANT_SLUG_PATTERN: Final[RureRegex] = cast(
-    "RureRegex", rure.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
-)
+_TENANT_SLUG_PATTERN: Final[RureRegex] = cast("RureRegex", rure.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"))
 
 
 class QuickstartSsoProvider(Struct, frozen=True):
@@ -226,12 +225,8 @@ class QuickstartChatOpsSettings(Struct, frozen=True):
 
     enabled: bool = False
     webhook: SlackWebhookConfig | None = None
-    notifications: QuickstartChatOpsNotificationChannels = field(
-        default_factory=QuickstartChatOpsNotificationChannels
-    )
-    slash_commands: tuple[QuickstartSlashCommand, ...] = field(
-        default_factory=_default_slash_commands
-    )
+    notifications: QuickstartChatOpsNotificationChannels = field(default_factory=QuickstartChatOpsNotificationChannels)
+    slash_commands: tuple[QuickstartSlashCommand, ...] = field(default_factory=_default_slash_commands)
     bot_user_id: str | None = None
     admin_workspace: str | None = None
 
@@ -435,15 +430,10 @@ def quickstart_migrations() -> tuple[Migration, ...]:
 async def ensure_tenant_schemas(database: Database, tenants: Sequence[TenantContext]) -> None:
     """Create tenant schemas for the quickstart if they do not already exist."""
 
-    schemas = {
-        database.config.schema_for_tenant(tenant)
-        for tenant in tenants
-    }
+    schemas = {database.config.schema_for_tenant(tenant) for tenant in tenants}
     async with database.connection(schema=database.config.admin_schema) as connection:
         for schema in sorted(schemas):
-            await connection.execute(
-                f"CREATE SCHEMA IF NOT EXISTS {_quote_identifier(schema)}"
-            )
+            await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_quote_identifier(schema)}")
 
 
 class QuickstartSeeder:
@@ -483,14 +473,10 @@ class QuickstartSeeder:
         tenant_manager = self._orm.admin.quickstart_tenants
         await tenant_manager.delete(filters=None)
         for tenant in config.tenants:
-            await tenant_manager.create(
-                QuickstartTenantRecord(slug=tenant.slug, name=tenant.name)
-            )
+            await tenant_manager.create(QuickstartTenantRecord(slug=tenant.slug, name=tenant.name))
             context = tenants.get(tenant.slug)
             if context is None:
-                raise RuntimeError(
-                    f"Tenant '{tenant.slug}' is missing from the quickstart tenant mapping"
-                )
+                raise RuntimeError(f"Tenant '{tenant.slug}' is missing from the quickstart tenant mapping")
             user_manager = self._orm.tenants.quickstart_users
             await user_manager.delete(tenant=context, filters=None)
             for user in tenant.users:
@@ -535,9 +521,7 @@ class QuickstartSeeder:
         )
 
     @staticmethod
-    def _passkeys_to_records(
-        passkeys: tuple[QuickstartPasskey, ...]
-    ) -> tuple[QuickstartPasskeyRecord, ...]:
+    def _passkeys_to_records(passkeys: tuple[QuickstartPasskey, ...]) -> tuple[QuickstartPasskeyRecord, ...]:
         return tuple(
             QuickstartPasskeyRecord(
                 credential_id=item.credential_id,
@@ -574,9 +558,7 @@ class QuickstartRepository:
                 domain=self._domain,
                 scope=TenantScope.TENANT,
             )
-            users = await self._orm.tenants.quickstart_users.list(
-                tenant=context, order_by=("email",)
-            )
+            users = await self._orm.tenants.quickstart_users.list(tenant=context, order_by=("email",))
             tenant_configs.append(
                 QuickstartTenant(
                     slug=tenant.slug,
@@ -616,9 +598,7 @@ class QuickstartRepository:
         )
 
     @staticmethod
-    def _records_to_passkeys(
-        records: tuple[QuickstartPasskeyRecord, ...]
-    ) -> tuple[QuickstartPasskey, ...]:
+    def _records_to_passkeys(records: tuple[QuickstartPasskeyRecord, ...]) -> tuple[QuickstartPasskey, ...]:
         return tuple(
             QuickstartPasskey(
                 credential_id=record.credential_id,
@@ -636,18 +616,14 @@ def _read_env_blob(name: str, env: Mapping[str, str]) -> str | None:
         try:
             return Path(path).read_text(encoding="utf-8")
         except FileNotFoundError as exc:  # pragma: no cover - validated in integration tests
-            raise RuntimeError(
-                f"Quickstart configuration file at '{path}' not found"
-            ) from exc
+            raise RuntimeError(f"Quickstart configuration file at '{path}' not found") from exc
     value = env.get(name)
     if value:
         return value
     return None
 
 
-def load_quickstart_auth_from_env(
-    *, env: Mapping[str, str] | None = None
-) -> QuickstartAuthConfig | None:
+def load_quickstart_auth_from_env(*, env: Mapping[str, str] | None = None) -> QuickstartAuthConfig | None:
     """Decode :class:`QuickstartAuthConfig` material from environment variables."""
 
     source = _read_env_blob("ARTEMIS_QUICKSTART_AUTH", env or os.environ)
@@ -822,9 +798,7 @@ class QuickstartChatOpsControlPlane:
             aliases=tuple(normalized_aliases),
         )
 
-    def normalize_commands(
-        self, commands: Iterable[QuickstartSlashCommand]
-    ) -> tuple[QuickstartSlashCommand, ...]:
+    def normalize_commands(self, commands: Iterable[QuickstartSlashCommand]) -> tuple[QuickstartSlashCommand, ...]:
         normalized: list[QuickstartSlashCommand] = []
         seen: set[str] = set()
         for command in commands:
@@ -840,9 +814,7 @@ class QuickstartChatOpsControlPlane:
         payload = dict(to_builtins(self._settings))
         if self._settings.admin_workspace is None:
             payload["slash_commands"] = [
-                command
-                for command in payload.get("slash_commands", [])
-                if command.get("visibility") != "admin"
+                command for command in payload.get("slash_commands", []) if command.get("visibility") != "admin"
             ]
         return payload
 
@@ -978,9 +950,7 @@ class QuickstartAdminControlPlane:
         if existing is not None:
             raise HTTPError(409, {"detail": "tenant_exists"})
         await self._ensure_contexts([normalized_slug])
-        record = await orm.admin.quickstart_tenants.create(
-            {"slug": normalized_slug, "name": cleaned_name}
-        )
+        record = await orm.admin.quickstart_tenants.create({"slug": normalized_slug, "name": cleaned_name})
         tenants_config = [tenant for tenant in engine.config.tenants if tenant.slug != normalized_slug]
         tenants_config.append(QuickstartTenant(slug=normalized_slug, name=cleaned_name, users=()))
         updated_config = QuickstartAuthConfig(
@@ -1072,9 +1042,7 @@ class QuickstartAdminControlPlane:
             },
             "support": {
                 "total": len(tickets),
-                "open": sum(
-                    1 for ticket in tickets if ticket.status != SupportTicketStatus.RESOLVED
-                ),
+                "open": sum(1 for ticket in tickets if ticket.status != SupportTicketStatus.RESOLVED),
             },
             "allowed_tenants": sorted(self._app.tenant_resolver.allowed_tenants),
         }
@@ -1183,6 +1151,8 @@ class QuickstartAdminControlPlane:
             },
         )
         return cast(QuickstartSupportTicketRecord, updated)
+
+
 def attach_quickstart(
     app: ArtemisApp,
     *,
@@ -1215,24 +1185,12 @@ def attach_quickstart(
     mfa_path = f"{normalized}/auth/login/mfa" if normalized else "/auth/login/mfa"
     billing_path = f"{normalized}/admin/billing" if normalized else "/admin/billing"
     metrics_path = f"{normalized}/admin/metrics" if normalized else "/admin/metrics"
-    diagnostics_path = (
-        f"{normalized}/admin/diagnostics" if normalized else "/admin/diagnostics"
-    )
-    support_admin_path = (
-        f"{normalized}/admin/support/tickets"
-        if normalized
-        else "/admin/support/tickets"
-    )
-    support_admin_ticket_path = (
-        f"{support_admin_path}/{{ticket_id}}"
-    )
-    support_tenant_path = (
-        f"{normalized}/support/tickets" if normalized else "/support/tickets"
-    )
+    diagnostics_path = f"{normalized}/admin/diagnostics" if normalized else "/admin/diagnostics"
+    support_admin_path = f"{normalized}/admin/support/tickets" if normalized else "/admin/support/tickets"
+    support_admin_ticket_path = f"{support_admin_path}/{{ticket_id}}"
+    support_tenant_path = f"{normalized}/support/tickets" if normalized else "/support/tickets"
     tenants_path = f"{normalized}/tenants" if normalized else "/tenants"
-    chatops_settings_path = (
-        f"{normalized}/admin/chatops" if normalized else "/admin/chatops"
-    )
+    chatops_settings_path = f"{normalized}/admin/chatops" if normalized else "/admin/chatops"
     chatops_slash_path = f"{normalized}/chatops/slash" if normalized else "/chatops/slash"
     workspaces_path = f"{normalized}/workspaces" if normalized else "/workspaces"
     tiles_collection_path = f"{workspaces_path}/{{wsId}}/tiles"
@@ -1265,11 +1223,7 @@ def attach_quickstart(
         initial_chatops_config = app.chatops.config
         initial_chatops_settings = QuickstartChatOpsSettings(
             enabled=initial_chatops_config.enabled,
-            webhook=(
-                initial_chatops_config.default
-                if initial_chatops_config.enabled
-                else None
-            ),
+            webhook=(initial_chatops_config.default if initial_chatops_config.enabled else None),
         )
         tenant_slugs = set(app.config.allowed_tenants)
         tenant_slugs.update(tenant.slug for tenant in seed_hint.tenants)
@@ -1290,9 +1244,7 @@ def attach_quickstart(
             tenant_provider=lambda: list(tenants_map.values()),
         )
         seeder = QuickstartSeeder(orm)
-        repository = QuickstartRepository(
-            orm, site=app.config.site, domain=app.config.domain
-        )
+        repository = QuickstartRepository(orm, site=app.config.site, domain=app.config.domain)
 
         tile_domain = QuickstartTileService(orm)
         rbac_domain = QuickstartRbacService(orm)
@@ -1344,23 +1296,17 @@ def attach_quickstart(
             source_config = auth_config or env_auth_config
             if source_config is not None:
                 config_to_load = source_config
-                await _ensure_contexts_for(
-                    tenant.slug for tenant in config_to_load.tenants
-                )
+                await _ensure_contexts_for(tenant.slug for tenant in config_to_load.tenants)
                 await seeder.apply(config_to_load, tenants=tenants_map)
             else:
                 loaded = await repository.load()
                 if loaded is None:
                     config_to_load = DEFAULT_QUICKSTART_AUTH
-                    await _ensure_contexts_for(
-                        tenant.slug for tenant in config_to_load.tenants
-                    )
+                    await _ensure_contexts_for(tenant.slug for tenant in config_to_load.tenants)
                     await seeder.apply(config_to_load, tenants=tenants_map)
                 else:
                     config_to_load = loaded
-                    await _ensure_contexts_for(
-                        tenant.slug for tenant in config_to_load.tenants
-                    )
+                    await _ensure_contexts_for(tenant.slug for tenant in config_to_load.tenants)
             await engine.reload(config_to_load)
             _sync_allowed_tenants(config_to_load)
 
@@ -1392,9 +1338,7 @@ def attach_quickstart(
         chatops_control.register_action_binding("create_tenant", "quickstart.chatops.create_tenant")
         chatops_control.register_action_binding("extend_trial", "quickstart.chatops.extend_trial")
         chatops_control.register_action_binding("tenant_metrics", "quickstart.chatops.tenant_metrics")
-        chatops_control.register_action_binding(
-            "system_diagnostics", "quickstart.chatops.system_diagnostics"
-        )
+        chatops_control.register_action_binding("system_diagnostics", "quickstart.chatops.system_diagnostics")
         chatops_control.register_action_binding("ticket_update", "quickstart.chatops.ticket_update")
 
         @app.chatops_command(
@@ -1522,9 +1466,7 @@ def attach_quickstart(
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "missing_arguments"})
             if status_arg not in {"open", "responded", "resolved"}:
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_status"})
-            update_payload = QuickstartSupportTicketUpdateRequest(
-                status=status_arg, note=context.args.get("note")
-            )
+            update_payload = QuickstartSupportTicketUpdateRequest(status=status_arg, note=context.args.get("note"))
             orm = await context.dependencies.get(ORM)
             ticket = await admin_control.update_support_ticket(
                 ticket_id,
@@ -1537,7 +1479,6 @@ def attach_quickstart(
                 "action": "ticket_update",
                 "ticket": to_builtins(ticket),
             }
-
 
         @app.post(tiles_collection_path, name="quickstart_tiles_create")
         async def quickstart_tiles_create(
@@ -1727,7 +1668,6 @@ def attach_quickstart(
                 )
             return Response(status=int(Status.OK), headers=tuple(headers), body=export.body)
 
-
         @app.get(billing_path, name="quickstart_admin_billing")
         async def quickstart_admin_billing(request: Request, orm: ORM) -> Response:
             _require_admin(request)
@@ -1832,9 +1772,7 @@ def attach_quickstart(
             if request.tenant.scope is TenantScope.ADMIN:
                 records = await orm.admin.quickstart_tenants.list(order_by=("slug",))
             else:
-                record = await orm.admin.quickstart_tenants.get(
-                    filters={"slug": request.tenant.tenant}
-                )
+                record = await orm.admin.quickstart_tenants.get(filters={"slug": request.tenant.tenant})
                 records = [] if record is None else [record]
             return JSONResponse(tuple(to_builtins(record) for record in records))
 
@@ -1982,9 +1920,7 @@ def attach_quickstart(
         return JSONResponse(result)
 
     @app.post(mfa_path, name="quickstart_login_mfa")
-    async def quickstart_login_mfa(
-        request: Request, payload: MfaAttempt, engine: QuickstartAuthEngine
-    ) -> Response:
+    async def quickstart_login_mfa(request: Request, payload: MfaAttempt, engine: QuickstartAuthEngine) -> Response:
         result = await engine.mfa(request.tenant, payload)
         return JSONResponse(result)
 

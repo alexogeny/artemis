@@ -251,9 +251,7 @@ class ORM:
 
     def _ensure_exposed(self, info: ModelInfo[Any]) -> None:
         if not info.exposed:
-            raise PermissionError(
-                f"Model {info.model.__name__} is restricted and cannot be accessed via the ORM"
-            )
+            raise PermissionError(f"Model {info.model.__name__} is restricted and cannot be accessed via the ORM")
 
     async def _insert(self, info: ModelInfo[M], instance: M, tenant: TenantContext | None) -> M:
         payload = msgspec.to_builtins(instance)
@@ -505,9 +503,7 @@ class _Namespace:
         except KeyError:
             info = self._orm.registry.get_by_accessor(self._scope, item)
             if not info.exposed:
-                raise AttributeError(
-                    f"Model accessor '{item}' in scope '{self._scope}' is restricted"
-                )
+                raise AttributeError(f"Model accessor '{item}' in scope '{self._scope}' is restricted")
             manager = ModelManager(self._orm, info)
             self._cache[item] = manager
             return manager

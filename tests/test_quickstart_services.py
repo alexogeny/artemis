@@ -83,9 +83,7 @@ class InMemoryTable:
         limit: int | None = None,
     ) -> list[Any]:
         bucket = [
-            record
-            for record in self._storage.get(self._bucket_key(tenant), ())
-            if self._matches(record, filters)
+            record for record in self._storage.get(self._bucket_key(tenant), ()) if self._matches(record, filters)
         ]
         if order_by:
             field, *rest = next(iter(order_by)).split()
@@ -902,8 +900,7 @@ async def test_build_cedar_engine_includes_assignments_and_delegations(
     policies = list(engine.policies())
     assert len(policies) == 3
     assert any(
-        policy.principal == CedarReference("User", "delegate") and "tiles:view" in policy.actions
-        for policy in policies
+        policy.principal == CedarReference("User", "delegate") and "tiles:view" in policy.actions for policy in policies
     )
     analyst = CedarEntity(type="User", id="analyst")
     resource = CedarEntity(type="workspace", id=tenant_alpha.tenant)

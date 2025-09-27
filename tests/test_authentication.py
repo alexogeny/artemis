@@ -815,6 +815,7 @@ async def test_authentication_rate_limiter_locks_after_failures() -> None:
     assert session.expires_at == session.record.expires_at
     assert session.revoked_at is None
 
+
 def test_passkey_authentication_failures() -> None:
     resolver = StaticSecretResolver({})
     service = AuthenticationService(
@@ -1014,18 +1015,14 @@ def test_oidc_authenticator_rejects_invalid_token_structures() -> None:
 
     header = _b64url(json.dumps({"alg": "HS256"}).encode())
     payload = _b64url(b"not-json")
-    signature_invalid_json = _b64url(
-        hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest()
-    )
+    signature_invalid_json = _b64url(hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest())
     token = f"{header}.{payload}.{signature_invalid_json}"
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_token"
 
     payload = _b64url(json.dumps(["not", "mapping"]).encode())
-    signature_invalid_mapping = _b64url(
-        hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest()
-    )
+    signature_invalid_mapping = _b64url(hmac.new(secret, f"{header}.{payload}".encode(), hashlib.sha256).digest())
     token = f"{header}.{payload}.{signature_invalid_mapping}"
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(token, now=now)
@@ -1212,9 +1209,7 @@ def test_oidc_authenticator_signature_edge_cases() -> None:
         "exp": _epoch(now + dt.timedelta(minutes=5)),
     }
 
-    jwks_oct = {
-        "keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]
-    }
+    jwks_oct = {"keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]}
     authenticator = OidcAuthenticator(
         provider,
         jwks_fetcher=lambda _: jwks_oct,
@@ -1322,9 +1317,7 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "unsupported_algorithm"
 
-    jwks_bad_fields = {
-        "keys": [{"kty": "RSA", "kid": "rsa", "n": None, "e": _b64url(exponent)}]
-    }
+    jwks_bad_fields = {"keys": [{"kty": "RSA", "kid": "rsa", "n": None, "e": _b64url(exponent)}]}
     authenticator = OidcAuthenticator(
         provider,
         jwks_fetcher=lambda _: jwks_bad_fields,
@@ -1335,9 +1328,7 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
-    jwks_bad_base64 = {
-        "keys": [{"kty": "RSA", "kid": "rsa", "n": "-!", "e": _b64url(exponent)}]
-    }
+    jwks_bad_base64 = {"keys": [{"kty": "RSA", "kid": "rsa", "n": "-!", "e": _b64url(exponent)}]}
     authenticator = OidcAuthenticator(
         provider,
         jwks_fetcher=lambda _: jwks_bad_base64,
@@ -1348,9 +1339,7 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
-    jwks_zero_modulus = {
-        "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(b"\x00"), "e": _b64url(exponent)}]
-    }
+    jwks_zero_modulus = {"keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(b"\x00"), "e": _b64url(exponent)}]}
     authenticator = OidcAuthenticator(
         provider,
         jwks_fetcher=lambda _: jwks_zero_modulus,
@@ -1362,9 +1351,7 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
     assert str(exc.value) == "invalid_jwks"
 
     small_modulus = b"\x01" * 16
-    jwks_small = {
-        "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(small_modulus), "e": _b64url(exponent)}]
-    }
+    jwks_small = {"keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(small_modulus), "e": _b64url(exponent)}]}
     authenticator = OidcAuthenticator(
         provider,
         jwks_fetcher=lambda _: jwks_small,
@@ -1381,9 +1368,7 @@ def test_oidc_authenticator_rsa_signature_paths() -> None:
         authenticator.validate(token, now=now)
     assert str(exc.value) == "invalid_jwks"
 
-    jwks_large = {
-        "keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}]
-    }
+    jwks_large = {"keys": [{"kty": "RSA", "kid": "rsa", "n": _b64url(modulus), "e": _b64url(exponent)}]}
     authenticator = OidcAuthenticator(
         provider,
         jwks_fetcher=lambda _: jwks_large,
@@ -1623,9 +1608,7 @@ def test_oidc_authenticator_claim_validation_edge_cases() -> None:
     authenticator_no_iat = OidcAuthenticator(
         provider,
         defaults=defaults,
-        jwks_fetcher=lambda _: {
-            "keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]
-        },
+        jwks_fetcher=lambda _: {"keys": [{"kty": "oct", "kid": "primary", "k": _b64url(secret)}]},
         secret_resolver=resolver,
     )
     missing_exp_claims = {
@@ -1644,9 +1627,7 @@ def test_oidc_authenticator_claim_validation_edge_cases() -> None:
         default_token_ttl_seconds=60,
         max_token_age_seconds=None,
     )
-    authenticator_ttl, provider_ttl, secret_ttl, _ = _build_oidc_authenticator(
-        now=now, defaults=ttl_defaults
-    )
+    authenticator_ttl, provider_ttl, secret_ttl, _ = _build_oidc_authenticator(now=now, defaults=ttl_defaults)
     ttl_claims = {
         "iss": provider_ttl.issuer,
         "aud": provider_ttl.client_id,
@@ -1736,6 +1717,7 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._default_jwks_fetcher("https://example.com/jwks")
     assert str(exc.value) == "jwks_fetch_failed"
+
 
 def test_saml_authenticator_error_paths() -> None:
     now = dt.datetime.now(dt.timezone.utc)
@@ -1997,9 +1979,7 @@ def test_saml_authenticator_allows_missing_temporal_attributes() -> None:
     )
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(
-        hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest()
-    )
+    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     assertion = (
         "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
         "<Subject>"
@@ -2028,9 +2008,7 @@ def test_saml_authenticator_rejects_future_subject_confirmation() -> None:
     )
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(
-        hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest()
-    )
+    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     conditions_not_before = _saml_instant(now - dt.timedelta(minutes=5))
     conditions_not_on_or_after = _saml_instant(now + dt.timedelta(minutes=5))
     confirmation_not_before = _saml_instant(now + dt.timedelta(minutes=5))

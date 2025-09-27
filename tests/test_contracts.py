@@ -104,5 +104,3 @@ async def test_request_response_recording() -> None:
         assert response.status == 200
         await client.post("/items", tenant="acme", json={"name": "Sample"}, label="create_item")
     recorder.finalize()
-
-

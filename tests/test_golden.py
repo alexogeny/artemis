@@ -35,20 +35,18 @@ def test_golden_ensure_writes_when_approved(tmp_path: Path, monkeypatch: pytest.
 
 def test_golden_detects_differences(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "value.json"
-    path.write_text("{\n  \"value\": 1\n}\n")
+    path.write_text('{\n  "value": 1\n}\n')
     golden = GoldenFile(path)
     monkeypatch.delenv("ARTEMIS_APPROVE_GOLDEN", raising=False)
     with pytest.raises(AssertionError) as excinfo:
         golden.ensure({"value": 2})
     message = str(excinfo.value)
     assert "Set ARTEMIS_APPROVE_GOLDEN=1 to approve updates." in message
-    assert "-  \"value\": 1" in message
-    assert "+  \"value\": 2" in message
+    assert '-  "value": 1' in message
+    assert '+  "value": 2' in message
 
 
-def test_request_response_recorder_serializes_payloads(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_request_response_recorder_serializes_payloads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "recordings.json"
     golden = GoldenFile(path)
     monkeypatch.setenv("ARTEMIS_APPROVE_GOLDEN", "1")

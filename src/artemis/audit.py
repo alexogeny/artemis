@@ -41,9 +41,7 @@ class AuditContext:
     actor: AuditActor | None
 
 
-_AUDIT_CONTEXT: ContextVar[AuditContext | None] = ContextVar[AuditContext | None](
-    "artemis_audit_context", default=None
-)
+_AUDIT_CONTEXT: ContextVar[AuditContext | None] = ContextVar[AuditContext | None]("artemis_audit_context", default=None)
 
 
 @asynccontextmanager

@@ -140,9 +140,7 @@ async def test_admin_route_requires_admin_scope(app: ArtemisApp) -> None:
         forbidden = await client.get("/admin/tenants", tenant="acme")
         assert forbidden.status == 403
         payload = json_decode(forbidden.body)
-        assert payload == {
-            "error": {"status": 403, "reason": "Forbidden", "detail": "admin scope required"}
-        }
+        assert payload == {"error": {"status": 403, "reason": "Forbidden", "detail": "admin scope required"}}
 
 
 @pytest.mark.asyncio

@@ -78,9 +78,7 @@ class AuthenticationError(RuntimeError):
     """Raised when authentication fails."""
 
 
-def compose_admin_secret(
-    app_secret: AppSecret, user: AdminUser, *, resolver: SecretResolver
-) -> str:
+def compose_admin_secret(app_secret: AppSecret, user: AdminUser, *, resolver: SecretResolver) -> str:
     secret_value = app_secret.resolve_secret(resolver)
     return "::".join(["admin", secret_value, user.password_secret])
 
@@ -270,9 +268,7 @@ class AuthenticationService:
         self._secret_resolver = secret_resolver
         self._rate_limiter = rate_limiter or AuthenticationRateLimiter()
 
-    async def hash_admin_password(
-        self, *, app_secret: AppSecret, user_secret: str, password: str
-    ) -> tuple[str, str]:
+    async def hash_admin_password(self, *, app_secret: AppSecret, user_secret: str, password: str) -> tuple[str, str]:
         salt = secrets.token_hex(16)
         secret_value = app_secret.resolve_secret(self._secret_resolver)
         secret_key = "::".join(["admin", secret_value, user_secret])
@@ -308,9 +304,7 @@ class AuthenticationService:
         tenant_secret: TenantSecret,
         password: str,
     ) -> bool:
-        secret = compose_tenant_secret(
-            app_secret, tenant_secret, user, resolver=self._secret_resolver
-        )
+        secret = compose_tenant_secret(app_secret, tenant_secret, user, resolver=self._secret_resolver)
         return await self.password_hasher.verify(
             password, secret_key=secret, salt=user.password_salt, expected=user.hashed_password
         )
@@ -369,9 +363,7 @@ class AuthenticationService:
             raise AuthenticationError("passkey_user_mismatch")
         return self._issue_session_token(user_id=passkey.user_id, level=SessionLevel.PASSKEY)
 
-    def _rate_limit_keys(
-        self, *, user: TenantUser, tenant_secret: TenantSecret, client: str | None
-    ) -> list[str]:
+    def _rate_limit_keys(self, *, user: TenantUser, tenant_secret: TenantSecret, client: str | None) -> list[str]:
         keys = [f"user:{user.id}", f"tenant:{tenant_secret.id}"]
         if client:
             keys.append(f"client:{client}")
@@ -649,9 +641,7 @@ class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
                 secret=record[1].encode("utf-8"),
                 user_handle=f"{getattr(flow.user, 'id')}:{flow.tenant}",
             )
-            if not self._passkey_manager.verify(
-                passkey=passkey, challenge=challenge, signature=attempt.signature
-            ):
+            if not self._passkey_manager.verify(passkey=passkey, challenge=challenge, signature=attempt.signature):
                 self._register_failure(flow)
                 raise HTTPError(Status.UNAUTHORIZED, {"detail": "invalid_passkey"})
             self._reset_attempts(flow)
@@ -735,8 +725,7 @@ class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
         if flow.step is LoginStep.PASSKEY:
             payload["challenge"] = flow.challenge
             payload["credential_ids"] = tuple(
-                getattr(passkey, "credential_id")
-                for passkey in getattr(flow.user, "passkeys", ())
+                getattr(passkey, "credential_id") for passkey in getattr(flow.user, "passkeys", ())
             )
         provider = getattr(flow.user, "sso", None) if flow.step is LoginStep.SSO else None
         return AuthenticationFlowResponse(
@@ -1199,9 +1188,7 @@ class SamlAuthenticator:
                 if now - skew >= not_on_or_after:
                     raise AuthenticationError("assertion_expired")
 
-        for data in tree.findall(
-            ".//saml2:SubjectConfirmation/saml2:SubjectConfirmationData", namespaces=ns
-        ):
+        for data in tree.findall(".//saml2:SubjectConfirmation/saml2:SubjectConfirmationData", namespaces=ns):
             data_not_before = data.get("NotBefore")
             if data_not_before:
                 not_before = parse_instant(data_not_before)
@@ -1262,9 +1249,7 @@ def _b64url_decode(data: str) -> bytes:
 
 def _derive_session_token_hash(token: str, salt_hex: str) -> str:
     salt = bytes.fromhex(salt_hex)
-    derived = hashlib.pbkdf2_hmac(
-        "sha256", token.encode(), salt, _SESSION_TOKEN_PBKDF2_ITERATIONS
-    )
+    derived = hashlib.pbkdf2_hmac("sha256", token.encode(), salt, _SESSION_TOKEN_PBKDF2_ITERATIONS)
     return derived.hex()
 
 

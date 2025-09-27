@@ -35,8 +35,7 @@ class SecretRef(msgspec.Struct, frozen=True, omit_defaults=True):
 class SecretResolver(Protocol):
     """Resolve secret references into concrete values."""
 
-    def resolve(self, secret: SecretRef) -> str:
-        ...
+    def resolve(self, secret: SecretRef) -> str: ...
 
 
 class SecretValue(msgspec.Struct, frozen=True, omit_defaults=True):
