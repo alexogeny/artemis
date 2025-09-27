@@ -1871,6 +1871,149 @@ async def test_quickstart_admin_support_ticket_update_branches(
 
 
 @pytest.mark.asyncio
+async def test_quickstart_admin_support_ticket_update_sequence_response(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    database = Database(db_config, pool=pool)
+    config = AppConfig(
+        site="demo",
+        domain="local.test",
+        allowed_tenants=("acme",),
+        database=db_config,
+    )
+    app = ArtemisApp(config=config, database=database)
+
+    settings = QuickstartChatOpsSettings(
+        enabled=True,
+        webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
+    )
+    chatops_control = QuickstartChatOpsControlPlane(
+        app,
+        settings,
+        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+    )
+
+    async def noop_send(self: ChatOpsService, tenant: TenantContext, message: ChatMessage) -> None:
+        return None
+
+    monkeypatch.setattr(ChatOpsService, "send", noop_send, raising=False)
+    chatops_control.configure(settings)
+
+    ticket = QuickstartSupportTicketRecord(
+        tenant_slug="acme",
+        kind=SupportTicketKind.ISSUE,
+        subject="Login",
+        message="Cannot login",
+    )
+
+    class ListReturningAdminSupportStore:
+        def __init__(self) -> None:
+            self.records: dict[str, QuickstartSupportTicketRecord] = {ticket.id: ticket}
+
+        async def get(
+            self,
+            *,
+            filters: Mapping[str, object] | None = None,
+            tenant: TenantContext | None = None,
+        ) -> QuickstartSupportTicketRecord | None:
+            if not filters:
+                return None
+            ticket_id = cast(str | None, filters.get("id"))
+            if ticket_id is None:
+                return None
+            return self.records.get(ticket_id)
+
+        async def update(
+            self,
+            *,
+            filters: Mapping[str, object],
+            values: Mapping[str, object],
+        ) -> list[QuickstartSupportTicketRecord]:
+            current = self.records[cast(str, filters["id"])]
+            updated = structs.replace(current, **values)
+            self.records[current.id] = updated
+            return [updated]
+
+    tenant_ticket = QuickstartTenantSupportTicketRecord(
+        admin_ticket_id=ticket.id,
+        kind=SupportTicketKind.ISSUE,
+        subject=ticket.subject,
+        message=ticket.message,
+    )
+
+    class TenantSupportStore:
+        def __init__(self) -> None:
+            self.records: dict[str, QuickstartTenantSupportTicketRecord] = {
+                tenant_ticket.admin_ticket_id: tenant_ticket
+            }
+
+        async def get(
+            self,
+            *,
+            tenant: TenantContext,
+            filters: Mapping[str, object],
+        ) -> QuickstartTenantSupportTicketRecord | None:
+            ticket_id = cast(str | None, filters.get("admin_ticket_id"))
+            if ticket_id is None:
+                return None
+            return self.records.get(ticket_id)
+
+        async def update(
+            self,
+            *,
+            tenant: TenantContext,
+            filters: Mapping[str, object],
+            values: Mapping[str, object],
+        ) -> QuickstartTenantSupportTicketRecord:
+            current = self.records[cast(str, filters["admin_ticket_id"])]
+            updated = structs.replace(current, **values)
+            self.records[current.admin_ticket_id] = updated
+            return updated
+
+    tenant_store = TenantSupportStore()
+
+    stub_orm: ORM = cast(
+        ORM,
+        SimpleNamespace(
+            admin=SimpleNamespace(
+                support_tickets=ListReturningAdminSupportStore(),
+            ),
+            tenants=SimpleNamespace(
+                support_tickets=tenant_store,
+            ),
+        ),
+    )
+
+    async def ensure_contexts(slugs: Iterable[str]) -> None:
+        return None
+
+    admin_control = QuickstartAdminControlPlane(
+        app,
+        slug_normalizer=lambda raw: raw.strip().lower(),
+        slug_pattern=quickstart._TENANT_SLUG_PATTERN,
+        ensure_contexts=ensure_contexts,
+        chatops=chatops_control,
+        sync_allowed_tenants=lambda config: None,
+    )
+
+    update_payload = QuickstartSupportTicketUpdateRequest(status="responded", note="Investigating")
+    updated = await admin_control.update_support_ticket(
+        ticket.id,
+        update_payload,
+        orm=stub_orm,
+        actor="agent",
+    )
+
+    assert isinstance(updated, QuickstartSupportTicketRecord)
+    assert updated.status == SupportTicketStatus.RESPONDED
+    tenant_updated = tenant_store.records[ticket.id]
+    assert tenant_updated.status == SupportTicketStatus.RESPONDED
+
+
+@pytest.mark.asyncio
 async def test_quickstart_seeder_persists_config() -> None:
     class RecordingManager:
         def __init__(self) -> None:
