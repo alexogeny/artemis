@@ -125,6 +125,7 @@ class EventStream:
             async def runner() -> None:
                 outcome = await executor.run(func, *args, mode=mode, **kwargs)
                 await self._emit_from_result(outcome)
+
             task = loop.create_task(runner())
         self._background.add(task)
         task.add_done_callback(self._background.discard)

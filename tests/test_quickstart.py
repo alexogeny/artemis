@@ -3927,9 +3927,7 @@ async def test_quickstart_delegation_routes_delegate(
 async def test_quickstart_cedar_dependency_handles_missing_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def stub_build(
-        orm: quickstart.ORM, *, tenant: TenantContext, at: dt.datetime | None = None
-    ) -> CedarEngine:
+    async def stub_build(orm: quickstart.ORM, *, tenant: TenantContext, at: dt.datetime | None = None) -> CedarEngine:
         if tenant.scope is TenantScope.TENANT and tenant.tenant == "acme":
             return CedarEngine(())
         raise HTTPError(Status.NOT_FOUND, {"detail": "missing"})

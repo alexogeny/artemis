@@ -35,9 +35,7 @@ class GoldenFile:
             return
         diff = self._diff(existing or "", rendered)
         hint = self._approval_env[0] if self._approval_env else "ARTEMIS_APPROVE_GOLDEN"
-        message = (
-            f"Golden file {self.path} is out of date. Set {hint}=1 to approve updates.\n{diff}".rstrip()
-        )
+        message = f"Golden file {self.path} is out of date. Set {hint}=1 to approve updates.\n{diff}".rstrip()
         raise AssertionError(message)
 
     def _should_approve(self) -> bool:

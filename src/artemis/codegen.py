@@ -257,9 +257,7 @@ class _TypeScriptEmitter:
             "}",
         ]
 
-    def _operation_metadata(
-        self, path: str, method: str, operation: Mapping[str, Any]
-    ) -> _OperationMetadata:
+    def _operation_metadata(self, path: str, method: str, operation: Mapping[str, Any]) -> _OperationMetadata:
         name = _sanitize_operation_id(operation.get("operationId", f"{method.lower()}_{path}"))
         type_base = _type_name_from_path(path, method)
         input_type = f"{type_base}Input"

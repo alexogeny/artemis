@@ -29,11 +29,7 @@ def _sanitize_for_json(value: Any) -> Any:
         info = getattr(value, "__model_info__", None)
         redacted = getattr(info, "redacted_fields", frozenset()) if info is not None else frozenset()
         payload = structs.asdict(value)
-        return {
-            key: _sanitize_for_json(val)
-            for key, val in payload.items()
-            if key not in redacted
-        }
+        return {key: _sanitize_for_json(val) for key, val in payload.items() if key not in redacted}
     if isinstance(value, dict):
         return {key: _sanitize_for_json(val) for key, val in value.items()}
     if isinstance(value, (list, tuple, set, frozenset)):

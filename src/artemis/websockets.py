@@ -170,6 +170,7 @@ class WebSocket:
             async def runner() -> None:
                 outcome = await self._executor.run(func, *args, mode=mode, **kwargs)
                 await self._send_from_result(outcome)
+
             task = loop.create_task(runner())
         self._background.add(task)
         task.add_done_callback(self._background.discard)

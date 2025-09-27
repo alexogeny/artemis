@@ -62,11 +62,7 @@ def _build_spec() -> dict[str, Any]:
                     "responses": {
                         "201": {
                             "description": "Created",
-                            "content": {
-                                "application/json": {
-                                    "schema": {"$ref": "#/components/schemas/Widget"}
-                                }
-                            },
+                            "content": {"application/json": {"schema": {"$ref": "#/components/schemas/Widget"}}},
                         }
                     },
                 }
@@ -80,9 +76,7 @@ def _build_spec() -> dict[str, Any]:
             "/other": {
                 "patch": {
                     "operationId": "!special-case!",
-                    "requestBody": {
-                        "content": {"application/x-custom": {"schema": {"type": "string"}}}
-                    },
+                    "requestBody": {"content": {"application/x-custom": {"schema": {"type": "string"}}}},
                     "responses": {
                         "202": {
                             "description": "Accepted",
@@ -99,9 +93,9 @@ def test_generate_typescript_client_emits_strict_types() -> None:
     spec = _build_spec()
     source = generate_typescript_client(spec)
     assert "export interface Widget {" in source
-    assert "export type OnlyEnum = \"alpha\" | \"beta\" | 3;" in source
+    assert 'export type OnlyEnum = "alpha" | "beta" | 3;' in source
     assert "export type MaybeNumber = number | null;" in source
-    assert "export type LiteralValue = {\"kind\": \"literal\"};" in source
+    assert 'export type LiteralValue = {"kind": "literal"};' in source
     assert "export type MultiType = string | null;" in source
     assert "export interface Dictionary {" in source
     assert "export type UnknownType = unknown;" in source
@@ -151,7 +145,7 @@ def test_generate_client_without_paths() -> None:
 def test_schema_renderer_handles_combinations() -> None:
     renderer = ts_codegen._SchemaRenderer(_build_spec()["components"]["schemas"])
     assert renderer.render_type({"$ref": "#/components/schemas/Widget"}) == "Widget"
-    assert renderer.render_type({"enum": ["one", 2]}) == '\"one\" | 2'
+    assert renderer.render_type({"enum": ["one", 2]}) == '"one" | 2'
     assert renderer.render_type({"const": True}) == "true"
     assert renderer.render_type({"type": ["string", "null"]}) == "string | null"
     assert renderer.render_type({"type": "array", "items": {"type": "integer"}}) == "Array<number>"
@@ -173,14 +167,16 @@ def test_operation_helpers_cover_edge_cases() -> None:
     assert ts_codegen._sanitize_operation_id("123") == "op_123"
     assert ts_codegen._type_name_from_path("/", "GET") == "RootGet"
     assert ts_codegen._type_name_from_path("/123/resource", "POST") == "Route123ResourcePost"
-    request_body = ts_codegen._select_request_body({
-        "requestBody": {
-            "content": {
-                "application/json": {"schema": {"type": "object"}},
-                "text/plain": {"schema": {"type": "string"}},
+    request_body = ts_codegen._select_request_body(
+        {
+            "requestBody": {
+                "content": {
+                    "application/json": {"schema": {"type": "object"}},
+                    "text/plain": {"schema": {"type": "string"}},
+                }
             }
         }
-    })
+    )
     assert request_body == ("application/json", {"type": "object"})
     fallback_body = ts_codegen._select_request_body(
         {"requestBody": {"content": {"text/plain": {"schema": {"type": "string"}}}}}

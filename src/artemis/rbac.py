@@ -306,9 +306,7 @@ class _CedarPyRuntime:
         self._module = module
         self._policies_text = policies_text
         self._schema_json = schema_json
-        self._principal_attributes = {
-            key: dict(value) for key, value in principal_attributes.items()
-        }
+        self._principal_attributes = {key: dict(value) for key, value in principal_attributes.items()}
 
     @classmethod
     def build(cls, policies: Sequence[CedarPolicy]) -> _CedarPyRuntime | None:
@@ -442,8 +440,7 @@ class _CedarPolicyCompiler:
                 "shape": {
                     "type": "Record",
                     "attributes": {
-                        name: {"type": attr_type, "required": False}
-                        for name, attr_type in sorted(attributes.items())
+                        name: {"type": attr_type, "required": False} for name, attr_type in sorted(attributes.items())
                     },
                 }
             }
@@ -476,11 +473,11 @@ class _CedarPolicyCompiler:
 
 
 def _format_entity_reference(entity: CedarEntity) -> str:
-    return f"{entity.type}::\"{_escape_string(entity.id)}\""
+    return f'{entity.type}::"{_escape_string(entity.id)}"'
 
 
 def _action_literal(action: str) -> str:
-    return f"Action::\"{_escape_string(action)}\""
+    return f'Action::"{_escape_string(action)}"'
 
 
 def _serialize_entity(entity: CedarEntity, attribute_types: Mapping[str, str]) -> Mapping[str, Any]:
@@ -508,7 +505,7 @@ def _render_reference(label: str, reference: CedarReference) -> tuple[str | None
     if identifier in (None, "*"):
         clause = f"{label} is {entity_type}"
     else:
-        clause = f"{label} == {entity_type}::\"{_escape_string(identifier)}\""
+        clause = f'{label} == {entity_type}::"{_escape_string(identifier)}"'
     return clause, entity_type
 
 
@@ -584,7 +581,7 @@ def _cedar_attribute_value(value: Any, attr_type: str) -> Any | None:
 
 
 def _escape_string(value: str) -> str:
-    return value.replace("\\", "\\\\").replace('"', "\\\"")
+    return value.replace("\\", "\\\\").replace('"', '\\"')
 
 
 __all__ = [

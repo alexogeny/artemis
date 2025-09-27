@@ -137,9 +137,7 @@ def test_generate_openapi_handles_docstrings_and_skips_parameters() -> None:
     request_schema = operation["requestBody"]["content"]["application/json"]["schema"]
     assert request_schema == {"$ref": "#/components/schemas/DocPayload"}
     awaitable_response = spec["paths"]["/awaitable"]["get"]["responses"]["200"]
-    assert awaitable_response["content"]["application/json"]["schema"] == {
-        "$ref": "#/components/schemas/Result"
-    }
+    assert awaitable_response["content"]["application/json"]["schema"] == {"$ref": "#/components/schemas/Result"}
 
 
 def test_generate_openapi_without_components() -> None:

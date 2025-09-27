@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import datetime as dt
 from collections import defaultdict
-from typing import Any, Iterable
+from typing import Any, Iterable, cast
 
 import pytest
 from msgspec import Struct, structs
@@ -83,9 +83,7 @@ class InMemoryTable:
         limit: int | None = None,
     ) -> list[Any]:
         bucket = [
-            record
-            for record in self._storage.get(self._bucket_key(tenant), ())
-            if self._matches(record, filters)
+            record for record in self._storage.get(self._bucket_key(tenant), ()) if self._matches(record, filters)
         ]
         if order_by:
             field, *rest = next(iter(order_by)).split()
@@ -673,7 +671,8 @@ async def test_delegation_service_enforces_actor_authorization(
             principal=intruder,
             payload=make_payload(),
         )
-    assert unauthorized_grant.value.detail["detail"] == "delegation_forbidden"
+    unauthorized_grant_error = cast(HTTPError, unauthorized_grant.value)
+    assert unauthorized_grant_error.detail["detail"] == "delegation_forbidden"
 
     with pytest.raises(HTTPError) as wrong_scope:
         await service.grant(
@@ -681,7 +680,8 @@ async def test_delegation_service_enforces_actor_authorization(
             principal=CedarEntity(type="User", id="grantor"),
             payload=make_payload(),
         )
-    assert wrong_scope.value.detail["detail"] == "tenant_required"
+    wrong_scope_error = cast(HTTPError, wrong_scope.value)
+    assert wrong_scope_error.detail["detail"] == "tenant_required"
 
     grantor = CedarEntity(type="User", id="grantor")
     granted = await service.grant(
@@ -696,7 +696,8 @@ async def test_delegation_service_enforces_actor_authorization(
             principal=intruder,
             delegation_id=granted.id,
         )
-    assert unauthorized_revoke.value.detail["detail"] == "delegation_forbidden"
+    unauthorized_revoke_error = cast(HTTPError, unauthorized_revoke.value)
+    assert unauthorized_revoke_error.detail["detail"] == "delegation_forbidden"
 
     delegate = CedarEntity(type="User", id="delegate")
     await service.revoke(
@@ -711,7 +712,8 @@ async def test_delegation_service_enforces_actor_authorization(
             principal=delegate,
             delegation_id=granted.id,
         )
-    assert admin_scope_revoke.value.detail["detail"] == "tenant_required"
+    admin_scope_revoke_error = cast(HTTPError, admin_scope_revoke.value)
+    assert admin_scope_revoke_error.detail["detail"] == "tenant_required"
 
     clock.value = clock.now() + dt.timedelta(hours=2)
     admin = CedarEntity(type="AdminUser", id="admin", attributes={"tenant": tenant_alpha.tenant})
@@ -902,8 +904,7 @@ async def test_build_cedar_engine_includes_assignments_and_delegations(
     policies = list(engine.policies())
     assert len(policies) == 3
     assert any(
-        policy.principal == CedarReference("User", "delegate") and "tiles:view" in policy.actions
-        for policy in policies
+        policy.principal == CedarReference("User", "delegate") and "tiles:view" in policy.actions for policy in policies
     )
     analyst = CedarEntity(type="User", id="analyst")
     resource = CedarEntity(type="workspace", id=tenant_alpha.tenant)
