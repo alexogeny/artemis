@@ -39,6 +39,8 @@ from .websockets import WebSocket, WebSocketDisconnect
 
 Handler = Callable[[Request], Awaitable[Response]]
 
+HeaderPart = bytes | bytearray | memoryview | str
+
 
 class ArtemisApp:
     """Central application object."""
@@ -484,10 +486,36 @@ class ArtemisApp:
         receive: Callable[[], Awaitable[Mapping[str, Any]]],
         send: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
-        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
+        headers, header_errors = self._decode_scope_headers(scope.get("headers", []))
+        if header_errors:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_header_encoding"})
+            response = exception_to_response(error)
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": response.status,
+                    "headers": [
+                        (k.encode("latin-1"), v.encode("latin-1")) for k, v in response.headers
+                    ],
+                }
+            )
+            await _send_response_body(response, send)
+            return
         host = headers.get("host")
-        if host is None:
-            raise RuntimeError("Host header required for multi-tenant resolution")
+        if not host:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "missing_host_header"})
+            response = exception_to_response(error)
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": response.status,
+                    "headers": [
+                        (k.encode("latin-1"), v.encode("latin-1")) for k, v in response.headers
+                    ],
+                }
+            )
+            await _send_response_body(response, send)
+            return
         body_state: dict[str, Any] = {
             "buffer": bytearray(),
             "cached": None,
@@ -519,14 +547,18 @@ class ArtemisApp:
             body_state["buffer"] = bytearray()
             return body_bytes
 
-        response = await self.dispatch(
-            scope["method"],
-            scope["path"],
-            host=host,
-            query_string=(scope.get("query_string") or b"").decode(),
-            headers=headers,
-            body_loader=load_body,
-        )
+        try:
+            response = await self.dispatch(
+                scope["method"],
+                scope["path"],
+                host=host,
+                query_string=(scope.get("query_string") or b"").decode(),
+                headers=headers,
+                body_loader=load_body,
+            )
+        except TenantResolutionError:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_host_header"})
+            response = exception_to_response(error)
         await send(
             {
                 "type": "http.response.start",
@@ -542,9 +574,12 @@ class ArtemisApp:
         receive: Callable[[], Awaitable[Mapping[str, Any]]],
         send: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
-        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
+        headers, header_errors = self._decode_scope_headers(scope.get("headers", []))
+        if header_errors:
+            await send({"type": "websocket.close", "code": 4400})
+            return
         host = headers.get("host")
-        if host is None:
+        if not host:
             await send({"type": "websocket.close", "code": 4400})
             return
         try:
@@ -604,6 +639,21 @@ class ArtemisApp:
             if not websocket.closed:
                 await websocket.close()
 
+    @staticmethod
+    def _decode_scope_headers(
+        raw_headers: Iterable[tuple[HeaderPart, HeaderPart]]
+    ) -> tuple[dict[str, str], bool]:
+        decoded: dict[str, str] = {}
+        had_errors = False
+        for raw_name, raw_value in raw_headers:
+            name, name_error = _decode_header_component(raw_name)
+            value, value_error = _decode_header_component(raw_value)
+            had_errors = had_errors or name_error or value_error
+            if not name:
+                continue
+            decoded[name.lower()] = value
+        return decoded, had_errors
+
 
 class Artemis(ArtemisApp):
     """Convenience subclass exposing configuration helpers."""
@@ -613,6 +663,18 @@ class Artemis(ArtemisApp):
         if isinstance(config, AppConfig):
             return cls(config=config)
         return cls(config=msgspec.convert(config, type=AppConfig))
+
+
+def _decode_header_component(component: object) -> tuple[str, bool]:
+    if isinstance(component, str):
+        return component, False
+    if isinstance(component, (bytes, bytearray, memoryview)):
+        raw = bytes(component)
+        try:
+            return raw.decode("latin-1"), False
+        except UnicodeDecodeError:  # pragma: no cover - latin-1 decoding should not fail
+            return raw.decode("latin-1", errors="replace"), True
+    return str(component), True
 
 
 def _is_struct(annotation: Any) -> bool:
