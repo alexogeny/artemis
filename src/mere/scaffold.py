@@ -84,7 +84,10 @@ def _iac_files(options: ProjectOptions, slug: str) -> Iterable[ProjectFile]:
     if options.iac in {"terraform", "opentofu"}:
         return (
             ProjectFile(path=f"infra/{options.iac}/main.tf", content=_terraform_template(options)),
-            ProjectFile(path=f"infra/{options.iac}/variables.tf", content=_terraform_variables_template()),
+            ProjectFile(
+                path=f"infra/{options.iac}/variables.tf",
+                content=_terraform_variables_template(options),
+            ),
             ProjectFile(path=f"infra/{options.iac}/README.md", content=_terraform_readme_template(options)),
         )
     if options.iac == "k8s":
@@ -397,20 +400,64 @@ def _terraform_template(options: ProjectOptions) -> str:
     return body.strip() + "\n"
 
 
-def _terraform_variables_template() -> str:
-    return dedent(
-        """\
-        variable "site" {
-          type        = string
-          description = "Mere site identifier"
-        }
+def _terraform_variables_template(options: ProjectOptions) -> str:
+    variables: list[str] = [
+        dedent(
+            """\
+            variable "site" {
+              type        = string
+              description = "Mere site identifier"
+            }
+            """
+        ).strip(),
+        dedent(
+            """\
+            variable "domain" {
+              type        = string
+              description = "Base domain for tenant routing"
+            }
+            """
+        ).strip(),
+    ]
 
-        variable "domain" {
-          type        = string
-          description = "Base domain for tenant routing"
-        }
-        """
-    )
+    if options.backbone in {"aws", "gcp"}:
+        variables.append(
+            dedent(
+                """\
+                variable "region" {
+                  type        = string
+                  description = "Cloud region for Mere infrastructure"
+                }
+                """
+            ).strip()
+        )
+
+    if options.backbone == "gcp":
+        variables.append(
+            dedent(
+                """\
+                variable "project" {
+                  type        = string
+                  description = "Google Cloud project identifier"
+                }
+                """
+            ).strip()
+        )
+
+    if options.backbone == "cloudflare":
+        variables.append(
+            dedent(
+                """\
+                variable "api_token" {
+                  type        = string
+                  description = "Cloudflare API token with DNS write permissions"
+                  sensitive   = true
+                }
+                """
+            ).strip()
+        )
+
+    return "\n\n".join(variables) + "\n"
 
 
 def _terraform_readme_template(options: ProjectOptions) -> str:
