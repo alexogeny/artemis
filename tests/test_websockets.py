@@ -61,7 +61,7 @@ async def test_websocket_echo_and_background() -> None:
                 "type": "websocket",
                 "path": "/ws/chat",
                 "query_string": b"",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
                 "subprotocols": [],
             },
             receive,
@@ -110,7 +110,7 @@ async def test_websocket_executor_background() -> None:
                 "type": "websocket",
                 "path": "/worker",
                 "query_string": b"",
-                "headers": [(b"host", b"beta.demo.example.com")],
+                "headers": [(b"host", b"beta.demo.example.com"), (b"origin", b"https://beta.demo.example.com")],
                 "subprotocols": [],
             },
             receive,
@@ -279,7 +279,7 @@ async def test_websocket_unknown_tenant_closes() -> None:
             {
                 "type": "websocket",
                 "path": "/ws",
-                "headers": [(b"host", b"unknown.demo.example.com")],
+                "headers": [(b"host", b"unknown.demo.example.com"), (b"origin", b"https://unknown.demo.example.com")],
             },
             receive,
             send,
@@ -307,7 +307,8 @@ async def test_websocket_route_not_found() -> None:
             {
                 "type": "websocket",
                 "path": "/missing",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "scheme": "ws",
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"http://acme.demo.example.com")],
             },
             receive,
             send,
@@ -316,6 +317,531 @@ async def test_websocket_route_not_found() -> None:
         await app.shutdown()
 
     assert messages and messages[0]["code"] == 4404
+
+
+@pytest.mark.asyncio
+async def test_websocket_missing_origin_closes() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - missing origin aborts handshake
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [(b"host", b"acme.demo.example.com")],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_non_http_origin() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - invalid origin aborts handshake
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"ftp://acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_cross_origin() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - cross origin aborts handshake
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://evil.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_blank_host_value() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"   "),
+                    (b"origin", b"https://acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_origin_with_invalid_port() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://acme.demo.example.com:999999"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_origin_missing_host_component() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://:443"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_blank_origin_value() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"   "),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_rejects_malformed_ipv6_origin() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://[::1"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_accepts_sec_websocket_origin_header() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.close()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"sec-websocket-origin", b"https://acme.demo.example.com:443"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    accept_messages = [msg for msg in messages if msg.get("type") == "websocket.accept"]
+    assert accept_messages
+
+
+@pytest.mark.asyncio
+async def test_websocket_accepts_trusted_cross_origin() -> None:
+    app = ArtemisApp(
+        AppConfig(
+            site="demo",
+            domain="example.com",
+            allowed_tenants=("acme", "beta"),
+            websocket_trusted_origins=(
+                "   ",
+                "https://chat.example.com",
+                "https://chat.example.com:8443",
+            ),
+        )
+    )
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.close()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://chat.example.com:8443"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    accept_messages = [msg for msg in messages if msg.get("type") == "websocket.accept"]
+    assert accept_messages
+
+
+@pytest.mark.asyncio
+async def test_websocket_secure_scheme_requires_https_origin() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
+        await socket.accept()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "scheme": "wss",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"http://acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4403}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_ws_scheme_accepts_http_origin() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.close()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "scheme": "ws",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com:80"),
+                    (b"origin", b"http://acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    accept_messages = [msg for msg in messages if msg.get("type") == "websocket.accept"]
+    assert accept_messages
+
+
+@pytest.mark.asyncio
+async def test_websocket_allows_origin_without_explicit_default_port() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.close()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "scheme": "wss",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com:443"),
+                    (b"origin", b"https://acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    accept_messages = [msg for msg in messages if msg.get("type") == "websocket.accept"]
+    assert accept_messages
+
+
+@pytest.mark.asyncio
+async def test_websocket_allows_explicit_default_origin_port() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    @app.websocket("/ws")
+    async def ws(socket: WebSocket) -> None:
+        await socket.accept()
+        await socket.close()
+
+    messages: list[Mapping[str, object]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "websocket.connect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://acme.demo.example.com:443"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    accept_messages = [msg for msg in messages if msg.get("type") == "websocket.accept"]
+    assert accept_messages
 
 
 @pytest.mark.asyncio
@@ -341,7 +867,7 @@ async def test_websocket_invalid_initial_message() -> None:
             {
                 "type": "websocket",
                 "path": "/ws",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -376,7 +902,7 @@ async def test_websocket_authorization_failure_close() -> None:
             {
                 "type": "websocket",
                 "path": "/guarded",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -409,7 +935,7 @@ async def test_websocket_handler_exception_closes() -> None:
             {
                 "type": "websocket",
                 "path": "/boom",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -444,7 +970,7 @@ async def test_websocket_handler_auto_close() -> None:
             {
                 "type": "websocket",
                 "path": "/auto-close",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -483,7 +1009,7 @@ async def test_websocket_handler_disconnect_propagation() -> None:
             {
                 "type": "websocket",
                 "path": "/recv",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -542,7 +1068,7 @@ async def test_websocket_route_argument_injection() -> None:
             {
                 "type": "websocket",
                 "path": "/rooms/main/5",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -586,7 +1112,7 @@ async def test_websocket_handler_http_error_close() -> None:
             {
                 "type": "websocket",
                 "path": "/http-error",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -623,7 +1149,7 @@ async def test_websocket_missing_dependency_closes() -> None:
             {
                 "type": "websocket",
                 "path": "/missing-dependency",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -658,7 +1184,7 @@ async def test_websocket_disconnect_during_connect() -> None:
             {
                 "type": "websocket",
                 "path": "/ws",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -692,7 +1218,7 @@ async def test_websocket_receive_exception_closes() -> None:
             {
                 "type": "websocket",
                 "path": "/ws",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,
@@ -725,7 +1251,7 @@ async def test_websocket_handler_return_value_error() -> None:
             {
                 "type": "websocket",
                 "path": "/invalid",
-                "headers": [(b"host", b"acme.demo.example.com")],
+                "headers": [(b"host", b"acme.demo.example.com"), (b"origin", b"https://acme.demo.example.com")],
             },
             receive,
             send,

@@ -8,7 +8,7 @@ from artemis.application import ArtemisApp
 from artemis.config import AppConfig
 from artemis.requests import Request
 from artemis.responses import Response
-from artemis.serialization import json_encode
+from artemis.serialization import json_decode, json_encode
 
 
 @pytest.mark.asyncio
@@ -56,15 +56,19 @@ async def test_asgi_requires_host_header() -> None:
     async def ping() -> str:
         return "pong"
 
+    messages: list[dict[str, object]] = []
+
     async def receive() -> Mapping[str, object]:
         return {"type": "http.request", "body": b"", "more_body": False}
 
     async def send(message: Mapping[str, object]) -> None:
-        raise AssertionError("send should not be called")
+        messages.append(dict(message))
 
     scope = {"type": "http", "method": "GET", "path": "/ping", "query_string": b"", "headers": []}
-    with pytest.raises(RuntimeError):
-        await app(scope, receive, send)
+    await app(scope, receive, send)
+    assert messages[0]["status"] == 400
+    payload = json_decode(cast(bytes, messages[-1]["body"]))
+    assert payload["error"]["detail"]["detail"] == "missing_host_header"
 
 
 @pytest.mark.asyncio

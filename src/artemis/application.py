@@ -6,6 +6,7 @@ import inspect
 import os
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 import msgspec
 
@@ -38,6 +39,8 @@ from .typing_utils import convert_primitive
 from .websockets import WebSocket, WebSocketDisconnect
 
 Handler = Callable[[Request], Awaitable[Response]]
+
+HeaderPart = bytes | bytearray | memoryview | str
 
 
 class ArtemisApp:
@@ -484,15 +487,57 @@ class ArtemisApp:
         receive: Callable[[], Awaitable[Mapping[str, Any]]],
         send: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
-        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
+        headers, header_errors = self._decode_scope_headers(scope.get("headers", []))
+        async def send_http_error(error: HTTPError) -> None:
+            response = exception_to_response(error)
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": response.status,
+                    "headers": [
+                        (name.encode("latin-1"), value.encode("latin-1"))
+                        for name, value in response.headers
+                    ],
+                }
+            )
+            await _send_response_body(response, send)
+
+        if header_errors:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_header_encoding"})
+            await send_http_error(error)
+            return
         host = headers.get("host")
-        if host is None:
-            raise RuntimeError("Host header required for multi-tenant resolution")
+        if not host:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "missing_host_header"})
+            await send_http_error(error)
+            return
+        max_body_bytes = self.config.max_request_body_bytes
+        if max_body_bytes is not None:
+            content_length = headers.get("content-length")
+            if content_length:
+                try:
+                    declared_length = int(content_length)
+                except ValueError:
+                    error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_content_length"})
+                    await send_http_error(error)
+                    return
+                if declared_length < 0:
+                    error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_content_length"})
+                    await send_http_error(error)
+                    return
+                if declared_length > max_body_bytes:
+                    error = HTTPError(
+                        Status.PAYLOAD_TOO_LARGE,
+                        {"detail": "request_body_too_large"},
+                    )
+                    await send_http_error(error)
+                    return
         body_state: dict[str, Any] = {
             "buffer": bytearray(),
             "cached": None,
             "done": False,
         }
+        query_string = self._decode_query_string(scope.get("query_string"))
 
         async def load_body() -> bytes:
             cached = body_state["cached"]
@@ -510,7 +555,18 @@ class ArtemisApp:
                     continue
                 chunk = message.get("body", b"")
                 if chunk:
-                    body_state["buffer"].extend(chunk)
+                    chunk_bytes = bytes(chunk)
+                    if max_body_bytes is not None:
+                        projected = len(body_state["buffer"]) + len(chunk_bytes)
+                        if projected > max_body_bytes:
+                            body_state["done"] = True
+                            body_state["cached"] = None
+                            body_state["buffer"] = bytearray()
+                            raise HTTPError(
+                                Status.PAYLOAD_TOO_LARGE,
+                                {"detail": "request_body_too_large"},
+                            )
+                    body_state["buffer"].extend(chunk_bytes)
                 if not message.get("more_body", False):
                     body_state["done"] = True
                     continue
@@ -519,14 +575,18 @@ class ArtemisApp:
             body_state["buffer"] = bytearray()
             return body_bytes
 
-        response = await self.dispatch(
-            scope["method"],
-            scope["path"],
-            host=host,
-            query_string=(scope.get("query_string") or b"").decode(),
-            headers=headers,
-            body_loader=load_body,
-        )
+        try:
+            response = await self.dispatch(
+                scope["method"],
+                scope["path"],
+                host=host,
+                query_string=query_string,
+                headers=headers,
+                body_loader=load_body,
+            )
+        except TenantResolutionError:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_host_header"})
+            response = exception_to_response(error)
         await send(
             {
                 "type": "http.response.start",
@@ -542,10 +602,16 @@ class ArtemisApp:
         receive: Callable[[], Awaitable[Mapping[str, Any]]],
         send: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
-        headers = {key.decode().lower(): value.decode() for key, value in scope.get("headers", [])}
-        host = headers.get("host")
-        if host is None:
+        headers, header_errors = self._decode_scope_headers(scope.get("headers", []))
+        if header_errors:
             await send({"type": "websocket.close", "code": 4400})
+            return
+        host = headers.get("host")
+        if not host:
+            await send({"type": "websocket.close", "code": 4400})
+            return
+        if not self._is_allowed_websocket_origin(host, headers, scope):
+            await send({"type": "websocket.close", "code": 4403})
             return
         try:
             tenant = self.tenant_resolver.resolve(host)
@@ -564,7 +630,7 @@ class ArtemisApp:
             headers=headers,
             tenant=tenant,
             path_params=match.params,
-            query_string=(scope.get("query_string") or b"").decode(),
+            query_string=self._decode_query_string(scope.get("query_string")),
         )
         scope_obj = self.dependencies.scope(request)
         websocket = WebSocket(
@@ -604,6 +670,84 @@ class ArtemisApp:
             if not websocket.closed:
                 await websocket.close()
 
+    @staticmethod
+    def _decode_scope_headers(
+        raw_headers: Iterable[tuple[HeaderPart, HeaderPart]]
+    ) -> tuple[dict[str, str], bool]:
+        decoded: dict[str, str] = {}
+        had_errors = False
+        for raw_name, raw_value in raw_headers:
+            name, name_error = _decode_header_component(raw_name)
+            value, value_error = _decode_header_component(raw_value)
+            had_errors = had_errors or name_error or value_error
+            if not name:
+                continue
+            decoded[name.lower()] = value
+        return decoded, had_errors
+
+    def _is_allowed_websocket_origin(
+        self,
+        host: str,
+        headers: Mapping[str, str],
+        scope: Mapping[str, Any],
+    ) -> bool:
+        websocket_scheme = str(scope.get("scheme") or "").lower()
+        allowed_origin_schemes = {"http", "https"}
+        if websocket_scheme in {"ws", "wss"}:
+            allowed_origin_schemes = {"https"} if websocket_scheme == "wss" else {"http"}
+
+        origin_value = headers.get("origin") or headers.get("sec-websocket-origin")
+        if origin_value is None:
+            return False
+        origin_scheme, origin_host, origin_port = _parse_origin_host(origin_value, require_http_scheme=True)
+        if origin_scheme is None or origin_host is None:
+            return False
+        if origin_scheme not in allowed_origin_schemes:
+            return False
+
+        _, expected_host, expected_port = _parse_origin_host(host, require_http_scheme=False)
+        if expected_host is None:
+            return False
+
+        allowed_entries: list[tuple[str, int | None, set[int]]] = []
+        host_defaults = _default_ports_for_scheme(websocket_scheme)
+        allowed_entries.append((expected_host, expected_port, host_defaults))
+        if expected_port is None:
+            for default_port in host_defaults:
+                allowed_entries.append((expected_host, default_port, host_defaults))
+
+        for entry in self.config.websocket_trusted_origins:
+            entry_scheme, entry_host, entry_port = _parse_origin_host(entry, require_http_scheme=False)
+            if entry_host is None:
+                continue
+            defaults = _default_ports_for_scheme(entry_scheme)
+            allowed_entries.append((entry_host, entry_port, defaults))
+            if entry_port is None:
+                for default_port in defaults:
+                    allowed_entries.append((entry_host, default_port, defaults))
+
+        origin_defaults = _default_ports_for_scheme(origin_scheme)
+        for allowed_host, allowed_port, allowed_defaults in allowed_entries:
+            if origin_host != allowed_host:
+                continue
+            if origin_port == allowed_port:
+                return True
+            if origin_port is None and allowed_port in origin_defaults:
+                return True
+            if allowed_port is None and origin_port in allowed_defaults:
+                return True
+        return False
+
+    @staticmethod
+    def _decode_query_string(raw: object | None) -> str:
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            return bytes(raw).decode("latin-1")
+        return str(raw)  # pragma: no cover - defensive fallback
+
 
 class Artemis(ArtemisApp):
     """Convenience subclass exposing configuration helpers."""
@@ -613,6 +757,49 @@ class Artemis(ArtemisApp):
         if isinstance(config, AppConfig):
             return cls(config=config)
         return cls(config=msgspec.convert(config, type=AppConfig))
+
+
+def _decode_header_component(component: object) -> tuple[str, bool]:
+    if isinstance(component, str):
+        return component, False
+    if isinstance(component, (bytes, bytearray, memoryview)):
+        raw = bytes(component)
+        try:
+            return raw.decode("latin-1"), False
+        except UnicodeDecodeError:  # pragma: no cover - latin-1 decoding should not fail
+            return raw.decode("latin-1", errors="replace"), True
+    return str(component), True
+
+
+def _parse_origin_host(value: str, *, require_http_scheme: bool) -> tuple[str | None, str | None, int | None]:
+    candidate = value.strip()
+    if not candidate:
+        return None, None, None
+    target = candidate if "://" in candidate else f"//{candidate}"
+    try:
+        parts = urlsplit(target, allow_fragments=False)
+    except ValueError:
+        return None, None, None
+    scheme = parts.scheme.lower() if parts.scheme else None
+    if require_http_scheme and scheme not in {"http", "https"}:
+        return None, None, None
+    host = parts.hostname
+    try:
+        port = parts.port
+    except ValueError:
+        return None, None, None
+    if host is None:
+        return None, None, None
+    return scheme, host.lower(), port
+
+
+def _default_ports_for_scheme(scheme: str | None) -> set[int]:
+    normalized = (scheme or "").lower()
+    if normalized in {"https", "wss"}:
+        return {443}
+    if normalized in {"http", "ws"}:
+        return {80}
+    return {80, 443}
 
 
 def _is_struct(annotation: Any) -> bool:

@@ -100,6 +100,8 @@ def test_observability_rejects_malicious_trace_headers(monkeypatch: pytest.Monke
         self,
         span_name: str,
         *,
+        kind: Any | None,
+        attributes: Mapping[str, Any],
         trace_context: Mapping[str, str] | None = None,
         traceparent: str | None = None,
         tracestate: str | None = None,
@@ -110,6 +112,8 @@ def test_observability_rejects_malicious_trace_headers(monkeypatch: pytest.Monke
         captured["tracestate"] = tracestate
         return original_start(
             span_name,
+            kind=kind,
+            attributes=attributes,
             trace_context=trace_context,
             traceparent=traceparent,
             tracestate=tracestate,
@@ -134,4 +138,6 @@ def test_observability_rejects_malicious_trace_headers(monkeypatch: pytest.Monke
     assert captured["traceparent"] is None
     assert captured["tracestate"] is None
     assert context is not None
-    assert "set-cookie" not in context.traceparent
+    traceparent = context.traceparent
+    if traceparent is not None:
+        assert "set-cookie" not in traceparent

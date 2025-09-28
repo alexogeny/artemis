@@ -26,6 +26,7 @@ from artemis.routing import RouteGuard, get
 from artemis.serialization import json_decode, json_encode
 from artemis.tenancy import TenantContext
 from artemis.testing import TestClient
+from artemis.websockets import WebSocket
 from tests.support import FakeConnection, FakePool
 
 
@@ -397,6 +398,579 @@ async def test_app_guard_sets_global_guards() -> None:
         assert forbidden.status == 403
         allowed = await client.get("/inventory", tenant="acme", headers={"x-user": "allowed"})
         assert allowed.status == 200
+
+
+@pytest.mark.asyncio
+async def test_asgi_sanitizes_non_utf8_header_bytes() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.get("/inspect")
+    async def inspect(request: Request) -> Response:
+        return JSONResponse({"header": request.header("x-weird")})
+
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/inspect",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://acme.demo.example.com"),
+                    (b"x-weird", b"\xff\xfe"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 200
+    payload = json_decode(messages[-1]["body"])
+    assert payload == {"header": "ÿþ"}
+
+
+@pytest.mark.asyncio
+async def test_asgi_rejects_scope_with_invalid_host_bytes() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.get("/noop")
+    async def noop() -> None:
+        return None
+
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/noop",
+                "query_string": b"",
+                "headers": [(b"host", b"\xff\xfe")],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 400
+    payload = json_decode(messages[-1]["body"])
+    assert payload["error"]["detail"]["detail"] == "invalid_host_header"
+
+
+@pytest.mark.asyncio
+async def test_asgi_rejects_scope_without_host_header() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.get("/noop")
+    async def noop() -> None:
+        return None
+
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/noop",
+                "query_string": b"",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 400
+    payload = json_decode(messages[-1]["body"])
+    assert payload["error"]["detail"]["detail"] == "missing_host_header"
+
+
+@pytest.mark.asyncio
+async def test_asgi_rejects_scope_with_unencodable_headers() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.get("/noop")
+    async def noop() -> None:
+        return None
+
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/noop",
+                "query_string": b"",
+                "headers": [
+                    (b"", b"ignored"),
+                    ("x-text", "value"),
+                    (object(), b"value"),
+                    (b"host", b"acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 400
+    payload = json_decode(messages[-1]["body"])
+    assert payload["error"]["detail"]["detail"] == "invalid_header_encoding"
+
+
+@pytest.mark.asyncio
+async def test_asgi_decodes_non_utf8_query_string() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.get("/inspect")
+    async def inspect(request: Request) -> Response:
+        params = {key: list(values) for key, values in request.query_params.items()}
+        return JSONResponse({"params": params})
+
+    messages: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, object]:
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/inspect",
+                "query_string": b"\xff=\xfe",
+                "headers": [(b"host", b"acme.demo.example.com")],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 200
+    payload = json_decode(messages[-1]["body"])
+    assert payload == {"params": {"ÿ": ["þ"]}}
+
+
+@pytest.mark.asyncio
+async def test_http_request_rejects_excessive_content_length() -> None:
+    app = ArtemisApp(
+        AppConfig(
+            site="demo",
+            domain="example.com",
+            allowed_tenants=("acme",),
+            max_request_body_bytes=4,
+        )
+    )
+
+    @app.post("/ingest")
+    async def ingest(request: Request) -> Response:  # pragma: no cover - should not execute
+        await request.body()
+        return JSONResponse({"ok": True})
+
+    messages: list[dict[str, Any]] = []
+    receive_calls = 0
+
+    async def receive() -> Mapping[str, object]:
+        nonlocal receive_calls
+        receive_calls += 1
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/ingest",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"content-length", b"10"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert receive_calls == 0
+    assert messages[0]["status"] == int(Status.PAYLOAD_TOO_LARGE)
+    payload = json_decode(messages[-1]["body"])
+    assert payload["error"]["detail"]["detail"] == "request_body_too_large"
+
+
+@pytest.mark.asyncio
+async def test_http_request_streaming_enforces_body_limit() -> None:
+    app = ArtemisApp(
+        AppConfig(
+            site="demo",
+            domain="example.com",
+            allowed_tenants=("acme",),
+            max_request_body_bytes=6,
+        )
+    )
+
+    @app.post("/ingest")
+    async def ingest(request: Request) -> Response:
+        await request.body()
+        return JSONResponse({"ok": True})
+
+    messages: list[dict[str, Any]] = []
+    incoming: list[Mapping[str, object]] = [
+        {"type": "http.request", "body": b"abcd", "more_body": True},
+        {"type": "http.request", "body": b"efgh", "more_body": False},
+    ]
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/ingest",
+                "query_string": "skip=1",
+                "headers": [(b"host", b"acme.demo.example.com")],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == int(Status.PAYLOAD_TOO_LARGE)
+    payload = json_decode(messages[-1]["body"])
+    assert payload["error"]["detail"]["detail"] == "request_body_too_large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("content_length", [b"oops", b"-1"])
+async def test_http_request_with_invalid_content_length_header(content_length: bytes) -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.post("/ingest")
+    async def ingest(request: Request) -> Response:  # pragma: no cover - should not execute
+        await request.body()
+        return JSONResponse({"ok": True})
+
+    messages: list[dict[str, Any]] = []
+    receive_calls = 0
+
+    async def receive() -> Mapping[str, object]:
+        nonlocal receive_calls
+        receive_calls += 1
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/ingest",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"content-length", content_length),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert receive_calls == 0
+    assert messages[0]["status"] == int(Status.BAD_REQUEST)
+    payload = json_decode(messages[-1]["body"])
+    assert payload["error"]["detail"]["detail"] == "invalid_content_length"
+
+
+@pytest.mark.asyncio
+async def test_http_request_allows_content_length_within_limit() -> None:
+    app = ArtemisApp(
+        AppConfig(
+            site="demo",
+            domain="example.com",
+            allowed_tenants=("acme",),
+            max_request_body_bytes=8,
+        )
+    )
+
+    @app.post("/ingest")
+    async def ingest(request: Request) -> Response:
+        body = await request.body()
+        return JSONResponse({"size": len(body)})
+
+    messages: list[dict[str, Any]] = []
+    incoming: list[Mapping[str, object]] = [
+        {"type": "http.request", "body": b"data", "more_body": False},
+    ]
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/ingest",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"content-length", b"4"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 200
+    payload = json_decode(messages[-1]["body"])
+    assert payload == {"size": 4}
+
+
+@pytest.mark.asyncio
+async def test_http_request_without_body_limit_allows_large_payload() -> None:
+    app = ArtemisApp(
+        AppConfig(
+            site="demo",
+            domain="example.com",
+            allowed_tenants=("acme",),
+            max_request_body_bytes=None,
+        )
+    )
+
+    @app.post("/ingest")
+    async def ingest(request: Request) -> Response:
+        body = await request.body()
+        return JSONResponse({"size": len(body)})
+
+    messages: list[dict[str, Any]] = []
+    incoming: list[Mapping[str, object]] = [
+        {
+            "type": "http.request",
+            "body": b"abcdefghij",
+            "more_body": False,
+        },
+    ]
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "http.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/ingest",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"content-length", b"10"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["status"] == 200
+    payload = json_decode(messages[-1]["body"])
+    assert payload == {"size": 10}
+
+
+@pytest.mark.asyncio
+async def test_websocket_scope_sanitizes_headers() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.websocket("/ws")
+    async def websocket_endpoint(socket: WebSocket) -> None:
+        assert socket.request.header("x-weird") == "ÿþ"
+        await socket.accept()
+        await socket.close()
+
+    messages: list[dict[str, Any]] = []
+    incoming: list[Mapping[str, object]] = [{"type": "websocket.connect"}]
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "websocket.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/ws",
+                "query_string": b"",
+                "headers": [
+                    (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://acme.demo.example.com"),
+                    (b"x-weird", b"\xff\xfe"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages[0]["type"] == "websocket.accept"
+    assert messages[-1]["type"] == "websocket.close"
+
+
+@pytest.mark.asyncio
+async def test_websocket_scope_without_host_header_closes_with_protocol_error() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.websocket("/noop")
+    async def noop(socket: WebSocket) -> None:  # pragma: no cover - should not execute
+        await socket.accept()
+
+    messages: list[dict[str, Any]] = []
+    incoming: list[Mapping[str, object]] = [{"type": "websocket.connect"}]
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "websocket.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/noop",
+                "query_string": b"",
+                "headers": [],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4400}]
+
+
+@pytest.mark.asyncio
+async def test_websocket_scope_with_unencodable_headers_closes_with_protocol_error() -> None:
+    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.websocket("/noop")
+    async def noop(socket: WebSocket) -> None:  # pragma: no cover - should not execute
+        await socket.accept()
+
+    messages: list[dict[str, Any]] = []
+    incoming: list[Mapping[str, object]] = [{"type": "websocket.connect"}]
+
+    async def receive() -> Mapping[str, object]:
+        if incoming:
+            return incoming.pop(0)
+        return {"type": "websocket.disconnect"}
+
+    async def send(message: Mapping[str, object]) -> None:
+        messages.append(dict(message))
+
+    await app.startup()
+    try:
+        await app(
+            {
+                "type": "websocket",
+                "path": "/noop",
+                "query_string": b"",
+                "headers": [
+                    (b"", b"ignored"),
+                    ("x-text", "value"),
+                    (object(), b"value"),
+                    (b"host", b"acme.demo.example.com"),
+                ],
+            },
+            receive,
+            send,
+        )
+    finally:
+        await app.shutdown()
+
+    assert messages == [{"type": "websocket.close", "code": 4400}]
 
 
 @pytest.mark.asyncio
