@@ -46,6 +46,20 @@ The documentation lives in the [`docs/`](docs/) directory and is rendered with M
 `mkdocs-shadcn` theme. Preview changes locally with `uv run mkdocs serve` and publish to GitHub Pages
 via `uv run mkdocs gh-deploy --force`.
 
+## CLI project generator
+
+Create a production-ready Mere service, complete with quickstart wiring, IaC skeletons, and local
+Compose tooling, using the bundled CLI:
+
+```bash
+uv run mere new my-service --git-host github --iac terraform --backbone aws
+```
+
+The generator can target GitHub or GitLab CI, multiple IaC providers (Terraform, OpenTofu, Kubernetes,
+CloudFormation), and backbone clouds (AWS, DigitalOcean, Cloudflare, Google Cloud, Azure). Use
+`--skip-dev-stack` if you do not need the Docker Compose PostgreSQL/Keycloak development environment.
+Run `uv run mere new --help` to inspect the full matrix of options at any time.
+
 ### Database bootstrap
 
 When the app exposes a `Database` and `ORM`, the quickstart helper automatically runs

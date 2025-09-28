@@ -18,6 +18,33 @@ Calling `attach_quickstart` registers routes, configures tenancy metadata, and l
 front-end assets. The helper is idempotent—calling it multiple times inspects the existing state and
 only applies missing pieces.
 
+## Scaffolding a production project
+
+The `mere` CLI can materialise a complete project—including tenancy-aware quickstart wiring,
+infrastructure definitions, and local developer tooling—in a single command:
+
+```bash
+uv run mere new my-service \
+  --git-host github \
+  --iac terraform \
+  --backbone aws
+```
+
+The generator creates:
+
+- `app/` with a ready-to-serve `MereApp` that calls `attach_quickstart` and exposes a `/health` probe.
+- `app/runtime.py` exposing `get_database()`/`get_tenants()` so migrations and test data snapshots work
+  out of the box.
+- CI workflows tailored to GitHub or GitLab with the full `ruff`/`ty`/`pytest` quality bar.
+- IaC skeletons for Terraform/OpenTofu, Kubernetes, or CloudFormation preconfigured for AWS,
+  Google Cloud, Azure, DigitalOcean, or Cloudflare.
+- `ops/docker-compose.yml` to launch PostgreSQL 16 and Keycloak 23 locally, matching the quickstart
+  authentication flows.
+
+Use `--skip-dev-stack` to omit the Docker Compose files if your team relies on an alternative local
+stack, and swap `--iac`/`--backbone`/`--git-host` to match your production environment. Consult
+`uv run mere new --help` whenever you need a refresher on the supported combinations.
+
 ## Authentication flows
 
 - **Acme tenant** – configured for SAML SSO with Okta metadata. Use it to validate SSO login logic.
