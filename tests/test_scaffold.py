@@ -88,3 +88,26 @@ def test_compose_and_ops_templates() -> None:
     ops = scaffold._ops_readme_template()
     assert "postgres" in compose
     assert "docker compose" in ops
+
+
+@pytest.mark.parametrize(
+    "backbone, expected_snippets",
+    [
+        ("aws", ("variable \"region\"",)),
+        ("gcp", ("variable \"region\"", "variable \"project\"")),
+        ("cloudflare", ("variable \"api_token\"",)),
+    ],
+)
+def test_terraform_variables_template_declares_backbone_inputs(
+    backbone: str, expected_snippets: tuple[str, ...]
+) -> None:
+    rendered = scaffold._terraform_variables_template(_options(backbone=backbone))
+    for snippet in expected_snippets:
+        assert snippet in rendered
+
+
+def test_terraform_variables_template_excludes_unused_inputs() -> None:
+    rendered = scaffold._terraform_variables_template(_options(backbone="digitalocean"))
+    assert "variable \"region\"" not in rendered
+    assert "variable \"project\"" not in rendered
+    assert "variable \"api_token\"" not in rendered
