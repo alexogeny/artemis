@@ -19,6 +19,8 @@ from urllib.parse import parse_qsl
 import msgspec
 
 from .audit import AuditActor, bind_actor
+from .exceptions import HTTPError
+from .http import Status
 from .serialization import json_decode
 from .tenancy import TenantContext
 from .typing_utils import convert_primitive
@@ -29,6 +31,8 @@ if TYPE_CHECKING:
 T = TypeVar("T")
 
 BodyLoader = Callable[[], Awaitable[bytes | bytearray | memoryview | None]]
+
+_MAX_QUERY_PARAMS = 1024
 
 
 @lru_cache(maxsize=None)
@@ -85,7 +89,15 @@ class Request:
     @staticmethod
     def _parse_query(raw: str) -> MutableMapping[str, list[str]]:
         parsed: MutableMapping[str, list[str]] = {}
-        for key, value in parse_qsl(raw, keep_blank_values=True):
+        try:
+            pairs = parse_qsl(
+                raw,
+                keep_blank_values=True,
+                max_num_fields=_MAX_QUERY_PARAMS,
+            )
+        except ValueError as exc:
+            raise HTTPError(Status.BAD_REQUEST, {"detail": "too_many_query_parameters"}) from exc
+        for key, value in pairs:
             parsed.setdefault(key, []).append(value)
         return parsed
 
