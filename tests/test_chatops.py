@@ -7,14 +7,14 @@ from typing import Any
 
 import pytest
 
-from artemis import (
+from mere import (
     AppConfig,
-    ArtemisApp,
     ChatMessage,
     ChatOpsConfig,
     ChatOpsError,
     ChatOpsRoute,
     ChatOpsService,
+    MereApp,
     Observability,
     ObservabilityConfig,
     SlackWebhookConfig,
@@ -22,7 +22,7 @@ from artemis import (
     TenantScope,
     TestClient,
 )
-from artemis.chatops import (
+from mere.chatops import (
     ChatOpsCommandResolutionError,
     ChatOpsInvocationError,
     ChatOpsSlashCommand,
@@ -34,7 +34,7 @@ from artemis.chatops import (
     _webhook_host,
     parse_slash_command_args,
 )
-from artemis.serialization import json_decode
+from mere.serialization import json_decode
 from tests.observability_stubs import (
     setup_stub_datadog,
     setup_stub_opentelemetry,
@@ -110,7 +110,7 @@ async def test_chatops_routes_per_tenant() -> None:
         default=SlackWebhookConfig(
             webhook_url="https://hooks.slack.com/services/default",
             default_channel="#general",
-            username="artemis",
+            username="mere",
         ),
         routes=(
             ChatOpsRoute(
@@ -216,7 +216,7 @@ async def test_chatops_dependency_integration() -> None:
         chatops=chatops_config,
     )
     chatops_service = ChatOpsService(chatops_config, transport=transport)
-    app = ArtemisApp(config=config, chatops=chatops_service)
+    app = MereApp(config=config, chatops=chatops_service)
 
     @app.post("/notify")
     async def notify(chatops: ChatOpsService, tenant: TenantContext) -> dict[str, Any]:
@@ -287,7 +287,7 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
     await service.send(tenant, ChatMessage(text="tenant alert", channel="#alerts"))
     await service.send(admin, ChatMessage(text="admin alert"))
 
-    assert [span.name for span in tracer.spans] == ["artemis.chatops.send", "artemis.chatops.send"]
+    assert [span.name for span in tracer.spans] == ["mere.chatops.send", "mere.chatops.send"]
     first_span, second_span = tracer.spans
     assert first_span.attributes["chatops.tenant"] == "acme"
     assert first_span.attributes["chatops.scope"] == "tenant"
@@ -832,7 +832,7 @@ async def test_default_transport_handles_missing_base_host(monkeypatch: pytest.M
         return DummyOpener()
 
     monkeypatch.setattr("urllib.request.build_opener", fake_build_opener)
-    monkeypatch.setattr("artemis.chatops._webhook_host", lambda url: None)
+    monkeypatch.setattr("mere.chatops._webhook_host", lambda url: None)
 
     config = SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/default")
 
@@ -1041,7 +1041,7 @@ def test_ensure_tls_destination_allows_missing_base_host(monkeypatch: pytest.Mon
         def geturl(self) -> str:
             return "https://hooks.slack.com/services/default"
 
-    monkeypatch.setattr("artemis.chatops._webhook_host", lambda url: None)
+    monkeypatch.setattr("mere.chatops._webhook_host", lambda url: None)
 
     config = SlackWebhookConfig(webhook_url="https:///missing")
 

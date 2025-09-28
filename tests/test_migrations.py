@@ -11,7 +11,7 @@ from typing import Annotated, Any, cast
 import msgspec
 import pytest
 
-from artemis import (  # type: ignore[attr-defined]
+from mere import (  # type: ignore[attr-defined]
     Migration,
     MigrationContext,
     MigrationError,
@@ -26,10 +26,10 @@ from artemis import (  # type: ignore[attr-defined]
     model,
     run_sql,
 )
-from artemis.cli import _load_environment, _models_by_scope, _render_migration_template
-from artemis.cli import main as cli_main
-from artemis.database import Database, DatabaseConfig, PoolConfig
-from artemis.migrations import (
+from mere.cli import _load_environment, _models_by_scope, _render_migration_template
+from mere.cli import main as cli_main
+from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.migrations import (
     _resolve_model_schema,
     build_create_table_statement,
     identity_order_clause,
@@ -38,7 +38,7 @@ from artemis.migrations import (
     render_literal,
     sql_type_for,
 )
-from artemis.orm import FieldInfo, ModelInfo
+from mere.orm import FieldInfo, ModelInfo
 from tests.support import FakeConnection, FakePool
 
 
@@ -640,7 +640,7 @@ async def test_snapshot_scope_without_order_clause(monkeypatch: pytest.MonkeyPat
     connection.queue_result([{"id": "abc"}])
     database = _database_with_connection(connection)
     runner = MigrationRunner(database, migrations=[])
-    monkeypatch.setattr("artemis.migrations.identity_order_clause", lambda info: "")
+    monkeypatch.setattr("mere.migrations.identity_order_clause", lambda info: "")
     rows = await runner._snapshot_scope(MigrationScope.ADMIN, None)
     select = next(sql for method, sql, *_ in connection.calls if sql.startswith("SELECT"))
     assert "ORDER BY" not in select
@@ -885,7 +885,7 @@ def test_render_migration_template_empty_models() -> None:
     imports = [line for line in content.splitlines() if line.startswith("from ")]
     assert imports == [
         "from __future__ import annotations",
-        "from artemis.migrations import Migration, MigrationScope, create_table_for_model",
+        "from mere.migrations import Migration, MigrationScope, create_table_for_model",
     ]
 
 

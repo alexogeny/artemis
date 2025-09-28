@@ -6,16 +6,16 @@ from typing import cast
 
 import pytest
 
-from artemis.application import ArtemisApp, _status_to_websocket_close
-from artemis.config import AppConfig
-from artemis.exceptions import HTTPError
-from artemis.execution import ExecutionMode, TaskExecutor
-from artemis.http import Status
-from artemis.requests import Request
-from artemis.routing import RouteGuard
-from artemis.tenancy import TenantContext, TenantScope
-from artemis.websockets import WebSocket, WebSocketDisconnect
-from artemis.websockets import _log_task_error as _log_ws_task_error
+from mere.application import MereApp, _status_to_websocket_close
+from mere.config import AppConfig
+from mere.exceptions import HTTPError
+from mere.execution import ExecutionMode, TaskExecutor
+from mere.http import Status
+from mere.requests import Request
+from mere.routing import RouteGuard
+from mere.tenancy import TenantContext, TenantScope
+from mere.websockets import WebSocket, WebSocketDisconnect
+from mere.websockets import _log_task_error as _log_ws_task_error
 
 
 class RouteHelper:
@@ -24,7 +24,7 @@ class RouteHelper:
 
 @pytest.mark.asyncio
 async def test_websocket_echo_and_background() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws/{channel}")
     async def ws(channel: str, socket: WebSocket) -> None:
@@ -79,7 +79,7 @@ async def test_websocket_echo_and_background() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_executor_background() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/worker")
     async def worker(socket: WebSocket) -> None:
@@ -244,7 +244,7 @@ async def test_websocket_auto_accept_and_fork_behaviour() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_missing_host_closes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     messages: list[Mapping[str, object]] = []
 
     async def receive() -> Mapping[str, object]:
@@ -264,7 +264,7 @@ async def test_websocket_missing_host_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_unknown_tenant_closes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     messages: list[Mapping[str, object]] = []
 
     async def receive() -> Mapping[str, object]:
@@ -292,7 +292,7 @@ async def test_websocket_unknown_tenant_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_route_not_found() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     messages: list[Mapping[str, object]] = []
 
     async def receive() -> Mapping[str, object]:
@@ -321,7 +321,7 @@ async def test_websocket_route_not_found() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_missing_origin_closes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - missing origin aborts handshake
@@ -354,7 +354,7 @@ async def test_websocket_missing_origin_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_non_http_origin() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - invalid origin aborts handshake
@@ -390,7 +390,7 @@ async def test_websocket_rejects_non_http_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_cross_origin() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - cross origin aborts handshake
@@ -426,7 +426,7 @@ async def test_websocket_rejects_cross_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_blank_host_value() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
@@ -462,7 +462,7 @@ async def test_websocket_rejects_blank_host_value() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_origin_with_invalid_port() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
@@ -498,7 +498,7 @@ async def test_websocket_rejects_origin_with_invalid_port() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_origin_missing_host_component() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
@@ -534,7 +534,7 @@ async def test_websocket_rejects_origin_missing_host_component() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_blank_origin_value() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
@@ -570,7 +570,7 @@ async def test_websocket_rejects_blank_origin_value() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_rejects_malformed_ipv6_origin() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
@@ -606,7 +606,7 @@ async def test_websocket_rejects_malformed_ipv6_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_accepts_sec_websocket_origin_header() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
@@ -644,7 +644,7 @@ async def test_websocket_accepts_sec_websocket_origin_header() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_accepts_trusted_cross_origin() -> None:
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(
             site="demo",
             domain="example.com",
@@ -693,7 +693,7 @@ async def test_websocket_accepts_trusted_cross_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_secure_scheme_requires_https_origin() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake rejected before execution
@@ -730,7 +730,7 @@ async def test_websocket_secure_scheme_requires_https_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_ws_scheme_accepts_http_origin() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
@@ -769,7 +769,7 @@ async def test_websocket_ws_scheme_accepts_http_origin() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_allows_origin_without_explicit_default_port() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
@@ -808,7 +808,7 @@ async def test_websocket_allows_origin_without_explicit_default_port() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_allows_explicit_default_origin_port() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:
@@ -846,7 +846,7 @@ async def test_websocket_allows_explicit_default_origin_port() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_invalid_initial_message() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - handshake should fail before execution
@@ -880,7 +880,7 @@ async def test_websocket_invalid_initial_message() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_authorization_failure_close() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     guard = RouteGuard(action="chat:open", resource_type="room")
 
@@ -915,7 +915,7 @@ async def test_websocket_authorization_failure_close() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_handler_exception_closes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/boom")
     async def boom(socket: WebSocket) -> None:
@@ -947,7 +947,7 @@ async def test_websocket_handler_exception_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_handler_auto_close() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/auto-close")
     async def auto_close(socket: WebSocket) -> None:
@@ -984,7 +984,7 @@ async def test_websocket_handler_auto_close() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_handler_disconnect_propagation() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/recv")
     async def recv(socket: WebSocket) -> None:
@@ -1023,7 +1023,7 @@ async def test_websocket_handler_disconnect_propagation() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_route_argument_injection() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     helper_value = RouteHelper()
     app.dependencies.provide(RouteHelper, lambda: helper_value)
@@ -1088,7 +1088,7 @@ async def test_websocket_route_argument_injection() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_handler_http_error_close() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/http-error")
     async def http_error(socket: WebSocket) -> None:
@@ -1126,7 +1126,7 @@ async def test_websocket_handler_http_error_close() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_missing_dependency_closes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/missing-dependency")
     async def missing_dependency(helper: RouteHelper, socket: WebSocket) -> None:
@@ -1163,7 +1163,7 @@ async def test_websocket_missing_dependency_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_disconnect_during_connect() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - disconnect aborts handshake
@@ -1197,7 +1197,7 @@ async def test_websocket_disconnect_during_connect() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_receive_exception_closes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/ws")
     async def ws(socket: WebSocket) -> None:  # pragma: no cover - receive error aborts handshake
@@ -1230,7 +1230,7 @@ async def test_websocket_receive_exception_closes() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_handler_return_value_error() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.websocket("/invalid")
     async def invalid(socket: WebSocket) -> str:

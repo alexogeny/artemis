@@ -1,4 +1,4 @@
-from artemis import (
+from mere import (
     BillingRecord,
     BillingStatus,
     TenantUser,

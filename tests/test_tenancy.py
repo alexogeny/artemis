@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from artemis.tenancy import TenantResolutionError, TenantResolver, TenantScope
+from mere.tenancy import TenantResolutionError, TenantResolver, TenantScope
 
 
 @pytest.mark.parametrize(

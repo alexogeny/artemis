@@ -12,9 +12,9 @@ import msgspec
 import pytest
 from msgspec import structs
 
-import artemis.quickstart as quickstart
-from artemis import AppConfig, ArtemisApp, PasskeyManager, SessionLevel, TestClient
-from artemis.chatops import (
+import mere.quickstart as quickstart
+from mere import AppConfig, MereApp, PasskeyManager, SessionLevel, TestClient
+from mere.chatops import (
     ChatMessage,
     ChatOpsCommandBinding,
     ChatOpsCommandContext,
@@ -26,8 +26,8 @@ from artemis.chatops import (
     ChatOpsSlashCommand,
     SlackWebhookConfig,
 )
-from artemis.database import Database, DatabaseConfig, PoolConfig
-from artemis.domain.services import (
+from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.domain.services import (
     AuditLogEntry,
     AuditLogExport,
     AuditLogPage,
@@ -41,17 +41,17 @@ from artemis.domain.services import (
     TileRecord,
     TileService,
 )
-from artemis.exceptions import HTTPError
-from artemis.http import Status
-from artemis.migrations import MigrationRunner
-from artemis.models import (
+from mere.exceptions import HTTPError
+from mere.http import Status
+from mere.migrations import MigrationRunner
+from mere.models import (
     BillingRecord,
     BillingStatus,
     SupportTicketKind,
     SupportTicketStatus,
 )
-from artemis.orm import ORM
-from artemis.quickstart import (
+from mere.orm import ORM
+from mere.quickstart import (
     DEFAULT_QUICKSTART_AUTH,
     LoginStep,
     MfaAttempt,
@@ -86,10 +86,10 @@ from artemis.quickstart import (
     load_quickstart_auth_from_env,
     quickstart_migrations,
 )
-from artemis.rbac import CedarEngine
-from artemis.requests import Request
-from artemis.responses import JSONResponse, Response
-from artemis.tenancy import TenantContext, TenantScope
+from mere.rbac import CedarEngine
+from mere.requests import Request
+from mere.responses import JSONResponse, Response
+from mere.tenancy import TenantContext, TenantScope
 from tests.support import FakeConnection, FakePool
 
 
@@ -101,34 +101,34 @@ def _assert_error_detail(exc: pytest.ExceptionInfo[BaseException], code: str) ->
 
 @pytest.mark.asyncio
 async def test_attach_quickstart_routes_dev_environment() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
     attach_quickstart(app)
 
     async with TestClient(app) as client:
         for tenant in ("acme", "beta", app.config.admin_subdomain):
-            ping = await client.get("/__artemis/ping", tenant=tenant)
+            ping = await client.get("/__mere/ping", tenant=tenant)
             assert ping.status == 200
             assert ping.body.decode() == "pong"
 
-            openapi = await client.get("/__artemis/openapi.json", tenant=tenant)
+            openapi = await client.get("/__mere/openapi.json", tenant=tenant)
             assert openapi.status == 200
             spec = json.loads(openapi.body.decode())
-            assert "/__artemis/ping" in spec["paths"]
+            assert "/__mere/ping" in spec["paths"]
 
-            client_ts = await client.get("/__artemis/client.ts", tenant=tenant)
+            client_ts = await client.get("/__mere/client.ts", tenant=tenant)
             assert client_ts.status == 200
             assert ("content-type", "application/typescript") in client_ts.headers
-            assert "export class ArtemisClient" in client_ts.body.decode()
+            assert "export class MereClient" in client_ts.body.decode()
 
 
 def test_attach_quickstart_rejects_production() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     with pytest.raises(RuntimeError):
         attach_quickstart(app, environment="production")
 
 
 def test_attach_quickstart_updates_allowed_tenants_from_config() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=()))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=()))
     config = QuickstartAuthConfig(
         tenants=(
             QuickstartTenant(
@@ -153,7 +153,7 @@ def test_attach_quickstart_updates_allowed_tenants_from_config() -> None:
 
 @pytest.mark.asyncio
 async def test_attach_quickstart_with_root_base_path() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
     attach_quickstart(app, base_path="")
 
     async with TestClient(app) as client:
@@ -164,12 +164,12 @@ async def test_attach_quickstart_with_root_base_path() -> None:
 
 @pytest.mark.asyncio
 async def test_quickstart_sso_login_hint() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
     attach_quickstart(app)
 
     async with TestClient(app) as client:
         response = await client.post(
-            "/__artemis/auth/login/start",
+            "/__mere/auth/login/start",
             tenant="acme",
             json={"email": "founder@acme.test"},
         )
@@ -182,12 +182,12 @@ async def test_quickstart_sso_login_hint() -> None:
 
 @pytest.mark.asyncio
 async def test_quickstart_passkey_flow_with_mfa() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
     attach_quickstart(app)
 
     async with TestClient(app) as client:
         start = await client.post(
-            "/__artemis/auth/login/start",
+            "/__mere/auth/login/start",
             tenant="beta",
             json={"email": "ops@beta.test"},
         )
@@ -211,7 +211,7 @@ async def test_quickstart_passkey_flow_with_mfa() -> None:
         signature = manager.sign(passkey=demo_passkey, challenge=challenge)
 
         passkey_response = await client.post(
-            "/__artemis/auth/login/passkey",
+            "/__mere/auth/login/passkey",
             tenant="beta",
             json={
                 "flow_token": flow_token,
@@ -224,7 +224,7 @@ async def test_quickstart_passkey_flow_with_mfa() -> None:
         assert passkey_payload["next"] == "mfa"
 
         mfa_response = await client.post(
-            "/__artemis/auth/login/mfa",
+            "/__mere/auth/login/mfa",
             tenant="beta",
             json={"flow_token": flow_token, "code": user.mfa_code},
         )
@@ -244,12 +244,12 @@ async def test_quickstart_login_flow_times_out() -> None:
         admin=DEFAULT_QUICKSTART_AUTH.admin,
         flow_ttl_seconds=0,
     )
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)))
     attach_quickstart(app, auth_config=config)
 
     async with TestClient(app) as client:
         start = await client.post(
-            "/__artemis/auth/login/start",
+            "/__mere/auth/login/start",
             tenant="beta",
             json={"email": "ops@beta.test"},
         )
@@ -257,7 +257,7 @@ async def test_quickstart_login_flow_times_out() -> None:
         flow_token = json.loads(start.body.decode())["flow_token"]
 
         expired = await client.post(
-            "/__artemis/auth/login/password",
+            "/__mere/auth/login/password",
             tenant="beta",
             json={"flow_token": flow_token, "password": "beta-password"},
         )
@@ -266,7 +266,7 @@ async def test_quickstart_login_flow_times_out() -> None:
         assert expired_payload["error"]["detail"]["detail"] == "flow_expired"
 
         restart = await client.post(
-            "/__artemis/auth/login/start",
+            "/__mere/auth/login/start",
             tenant="beta",
             json={"email": "ops@beta.test"},
         )
@@ -280,12 +280,12 @@ async def test_quickstart_login_flow_locks_after_failures() -> None:
         admin=DEFAULT_QUICKSTART_AUTH.admin,
         max_attempts=2,
     )
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)))
     attach_quickstart(app, auth_config=config)
 
     async with TestClient(app) as client:
         start = await client.post(
-            "/__artemis/auth/login/start",
+            "/__mere/auth/login/start",
             tenant="beta",
             json={"email": "ops@beta.test"},
         )
@@ -293,7 +293,7 @@ async def test_quickstart_login_flow_locks_after_failures() -> None:
         flow_token = json.loads(start.body.decode())["flow_token"]
 
         first_attempt = await client.post(
-            "/__artemis/auth/login/password",
+            "/__mere/auth/login/password",
             tenant="beta",
             json={"flow_token": flow_token, "password": "wrong"},
         )
@@ -302,7 +302,7 @@ async def test_quickstart_login_flow_locks_after_failures() -> None:
         assert first_payload["error"]["detail"]["detail"] == "invalid_password"
 
         second_attempt = await client.post(
-            "/__artemis/auth/login/password",
+            "/__mere/auth/login/password",
             tenant="beta",
             json={"flow_token": flow_token, "password": "wrong"},
         )
@@ -333,14 +333,14 @@ async def test_quickstart_engine_prunes_expired_flows() -> None:
 
 @pytest.mark.asyncio
 async def test_quickstart_password_flow_for_admin() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
     attach_quickstart(app)
 
     admin = DEFAULT_QUICKSTART_AUTH.admin.users[0]
 
     async with TestClient(app) as client:
         start = await client.post(
-            "/__artemis/auth/login/start",
+            "/__mere/auth/login/start",
             tenant=app.config.admin_subdomain,
             json={"email": admin.email},
         )
@@ -350,7 +350,7 @@ async def test_quickstart_password_flow_for_admin() -> None:
         flow_token = start_payload["flow_token"]
 
         password_response = await client.post(
-            "/__artemis/auth/login/password",
+            "/__mere/auth/login/password",
             tenant=app.config.admin_subdomain,
             json={"flow_token": flow_token, "password": admin.password},
         )
@@ -359,7 +359,7 @@ async def test_quickstart_password_flow_for_admin() -> None:
         assert password_payload["next"] == "mfa"
 
         mfa_response = await client.post(
-            "/__artemis/auth/login/mfa",
+            "/__mere/auth/login/mfa",
             tenant=app.config.admin_subdomain,
             json={"flow_token": flow_token, "code": admin.mfa_code},
         )
@@ -408,7 +408,7 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     async def _noop_apply(
         self: quickstart.QuickstartSeeder,
@@ -450,7 +450,7 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
     async with TestClient(app) as client:
         connection.queue_result([msgspec.to_builtins(seeded_record)])
         admin_response = await client.get(
-            "/__artemis/admin/billing",
+            "/__mere/admin/billing",
             tenant=app.config.admin_subdomain,
         )
         assert admin_response.status == Status.OK
@@ -458,7 +458,7 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
         assert admin_payload[0]["customer_id"] == "cust_acme"
 
         tenant_response = await client.get(
-            "/__artemis/admin/billing",
+            "/__mere/admin/billing",
             tenant="acme",
         )
         assert tenant_response.status == Status.FORBIDDEN
@@ -480,7 +480,7 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
         )
         connection.queue_result([msgspec.to_builtins(created_record)])
         create_response = await client.post(
-            "/__artemis/admin/billing",
+            "/__mere/admin/billing",
             tenant=app.config.admin_subdomain,
             json={
                 "customer_id": "cust_gamma",
@@ -499,7 +499,7 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
         assert created_payload["metadata"]["notes"] == "manual"
 
         denied_create = await client.post(
-            "/__artemis/admin/billing",
+            "/__mere/admin/billing",
             tenant="acme",
             json={
                 "customer_id": "cust_blocked",
@@ -526,7 +526,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     async def _noop_apply(
         self: quickstart.QuickstartSeeder,
@@ -566,7 +566,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
             ]
         )
         admin_response = await client.get(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=app.config.admin_subdomain,
         )
         assert admin_response.status == Status.OK
@@ -574,13 +574,13 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         assert {item["slug"] for item in admin_payload} == {"acme", "beta"}
 
         connection.queue_result([msgspec.to_builtins(acme_record)])
-        acme_response = await client.get("/__artemis/tenants", tenant="acme")
+        acme_response = await client.get("/__mere/tenants", tenant="acme")
         assert acme_response.status == Status.OK
         acme_payload = json.loads(acme_response.body.decode())
         assert acme_payload[0]["name"] == "Acme Rockets"
 
         connection.queue_result([msgspec.to_builtins(beta_record)])
-        beta_response = await client.get("/__artemis/tenants", tenant="beta")
+        beta_response = await client.get("/__mere/tenants", tenant="beta")
         assert beta_response.status == Status.OK
         beta_payload = json.loads(beta_response.body.decode())
         assert beta_payload[0]["slug"] == "beta"
@@ -604,7 +604,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
 
         connection.queue_result([])
         create_response = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=app.config.admin_subdomain,
             json={"slug": "gamma", "name": "Gamma Co"},
         )
@@ -614,17 +614,17 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         assert "gamma" in app.tenant_resolver.allowed_tenants
 
         connection.queue_result([msgspec.to_builtins(gamma_created)])
-        gamma_response = await client.get("/__artemis/tenants", tenant="gamma")
+        gamma_response = await client.get("/__mere/tenants", tenant="gamma")
         assert gamma_response.status == Status.OK
         gamma_payload = json.loads(gamma_response.body.decode())
         assert gamma_payload[0]["slug"] == "gamma"
 
-        ping_response = await client.get("/__artemis/ping", tenant="gamma")
+        ping_response = await client.get("/__mere/ping", tenant="gamma")
         assert ping_response.status == Status.OK
 
         scope_request = Request(
             method="GET",
-            path="/__artemis/tenants",
+            path="/__mere/tenants",
             tenant=TenantContext(
                 tenant=app.config.admin_subdomain,
                 site=app.config.site,
@@ -637,14 +637,14 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         assert any(tenant.slug == "gamma" for tenant in engine.config.tenants)
 
         denied_response = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant="acme",
             json={"slug": "delta", "name": "Delta"},
         )
         assert denied_response.status == Status.FORBIDDEN
 
         invalid_slug = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=app.config.admin_subdomain,
             json={"slug": "!!bad!!", "name": "Broken"},
         )
@@ -653,7 +653,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         assert invalid_slug_payload["error"]["detail"]["detail"] == "invalid_slug"
 
         invalid_name = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=app.config.admin_subdomain,
             json={"slug": "delta", "name": "   "},
         )
@@ -662,7 +662,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         assert invalid_name_payload["error"]["detail"]["detail"] == "invalid_name"
 
         reserved_slug = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=app.config.admin_subdomain,
             json={"slug": app.config.admin_subdomain, "name": "Admin"},
         )
@@ -672,7 +672,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
 
         connection.queue_result([msgspec.to_builtins(gamma_created)])
         duplicate = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=app.config.admin_subdomain,
             json={"slug": "gamma", "name": "Gamma Again"},
         )
@@ -695,7 +695,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     class RecordingChatOpsService(ChatOpsService):
         def __init__(
@@ -915,21 +915,21 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
 
     async with TestClient(app) as client:
         admin = app.config.admin_subdomain
-        settings_response = await client.get("/__artemis/admin/chatops", tenant=admin)
+        settings_response = await client.get("/__mere/admin/chatops", tenant=admin)
         assert settings_response.status == Status.OK
         settings_payload = json.loads(settings_response.body.decode())
         assert settings_payload["enabled"] is False
         assert settings_payload["slash_commands"] == []
 
         update_response = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 "enabled": True,
                 "webhook": {
                     "webhook_url": "https://hooks.slack.com/services/demo",
                     "default_channel": "#alerts",
-                    "username": "Artemis",
+                    "username": "Mere",
                 },
                 "notifications": {
                     "tenant_created": "#tenants",
@@ -965,7 +965,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         chatops_service.fail_on_events.add("subscription_past_due")
 
         create_response = await client.post(
-            "/__artemis/tenants",
+            "/__mere/tenants",
             tenant=admin,
             json={"slug": "gamma", "name": "Gamma Org"},
         )
@@ -993,7 +993,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         )
         connection.queue_result([msgspec.to_builtins(created_record)])
         billing_response = await client.post(
-            "/__artemis/admin/billing",
+            "/__mere/admin/billing",
             tenant=admin,
             json={
                 "customer_id": created_record.customer_id,
@@ -1026,7 +1026,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         )
         connection.queue_result([msgspec.to_builtins(active_record)])
         active_response = await client.post(
-            "/__artemis/admin/billing",
+            "/__mere/admin/billing",
             tenant=admin,
             json={
                 "customer_id": active_record.customer_id,
@@ -1042,7 +1042,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert chatops_service.sent[-1][1].extra["event"] == "billing_updated"
 
         slash_create = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> create-tenant slug=omega note=demo extra-token name=Omega",
@@ -1061,7 +1061,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert "omega" in slash_message.text.lower()
 
         legacy_slash = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "command": "/quickstart-create-tenant",
@@ -1080,7 +1080,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert "sigma" in sigma_message.text.lower()
 
         extend_trial = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> extend-trial tenant=gamma days=14 note=demo",
@@ -1101,7 +1101,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert chatops_service.sent[-1][0].scope is TenantScope.ADMIN
 
         support_create = await client.post(
-            "/__artemis/support/tickets",
+            "/__mere/support/tickets",
             tenant="acme",
             json={
                 "subject": "Login issue",
@@ -1119,14 +1119,14 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert created_ticket_message.extra["tenant"] == "acme"
 
         admin_support_empty = await client.get(
-            "/__artemis/support/tickets",
+            "/__mere/support/tickets",
             tenant=admin,
         )
         assert admin_support_empty.status == Status.OK
         assert json.loads(admin_support_empty.body.decode()) == []
 
         admin_support_forbidden = await client.post(
-            "/__artemis/support/tickets",
+            "/__mere/support/tickets",
             tenant=admin,
             json={
                 "subject": "Admin ticket",
@@ -1137,7 +1137,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert admin_support_forbidden.status == Status.FORBIDDEN
 
         tenant_ticket_list = await client.get(
-            "/__artemis/support/tickets",
+            "/__mere/support/tickets",
             tenant="acme",
         )
         assert tenant_ticket_list.status == Status.OK
@@ -1145,7 +1145,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert tenant_ticket_payload[0]["admin_ticket_id"] == ticket_id
 
         admin_ticket_list = await client.get(
-            "/__artemis/admin/support/tickets",
+            "/__mere/admin/support/tickets",
             tenant=admin,
         )
         assert admin_ticket_list.status == Status.OK
@@ -1153,7 +1153,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert admin_ticket_payload[0]["id"] == ticket_id
 
         metrics_response = await client.get(
-            "/__artemis/admin/metrics",
+            "/__mere/admin/metrics",
             tenant=admin,
         )
         assert metrics_response.status == Status.OK
@@ -1162,7 +1162,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert metrics_payload["support_tickets"]["resolved"] == 0
 
         diagnostics_response = await client.get(
-            "/__artemis/admin/diagnostics",
+            "/__mere/admin/diagnostics",
             tenant=admin,
         )
         assert diagnostics_response.status == Status.OK
@@ -1170,7 +1170,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert diagnostics_payload["support"]["open"] == 1
 
         metrics_slash = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> tenant-metrics",
@@ -1184,7 +1184,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert metrics_slash_payload["metrics"]["support_tickets"]["open"] == 1
 
         diagnostics_slash = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> system-diagnostics",
@@ -1198,7 +1198,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert diag_slash_payload["diagnostics"]["support"]["open"] == 1
 
         admin_ticket_update = await client.post(
-            f"/__artemis/admin/support/tickets/{ticket_id}",
+            f"/__mere/admin/support/tickets/{ticket_id}",
             tenant=admin,
             json={"status": "responded", "note": "Acknowledged"},
         )
@@ -1208,7 +1208,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert responded_message.extra["status"] == "responded"
 
         ticket_update = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": f"<@U999> ticket-update ticket={ticket_id} status=resolved note=Fixed",
@@ -1225,7 +1225,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert resolved_message.extra["status"] == "resolved"
 
         missing_ticket_args = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": f"<@U999> ticket-update ticket={ticket_id}",
@@ -1237,7 +1237,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert missing_ticket_args.status == Status.BAD_REQUEST
 
         invalid_ticket_status = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": f"<@U999> ticket-update ticket={ticket_id} status=invalid",
@@ -1249,7 +1249,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert invalid_ticket_status.status == Status.BAD_REQUEST
 
         metrics_after_update = await client.get(
-            "/__artemis/admin/metrics",
+            "/__mere/admin/metrics",
             tenant=admin,
         )
         metrics_after_payload = json.loads(metrics_after_update.body.decode())
@@ -1257,14 +1257,14 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert metrics_after_payload["support_tickets"]["resolved"] == 1
 
         missing_webhook = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={"enabled": True},
         )
         assert missing_webhook.status == Status.BAD_REQUEST
 
         unknown_command = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> unknown",
@@ -1276,7 +1276,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert unknown_command.status == Status.NOT_FOUND
 
         invalid_mention = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U000> create-tenant slug=bad name=Bad",
@@ -1288,7 +1288,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert invalid_mention.status == Status.FORBIDDEN
 
         at_mention_create = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "@U999 create-tenant slug=phi name=Phi",
@@ -1303,7 +1303,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert "phi" in created_tenants
 
         bare_token_create = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "U999 create-tenant slug=chi name=Chi",
@@ -1318,7 +1318,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert "chi" in created_tenants
 
         missing_command_token = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999>",
@@ -1330,7 +1330,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert missing_command_token.status == Status.BAD_REQUEST
 
         empty_text = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "",
@@ -1342,7 +1342,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert empty_text.status == Status.BAD_REQUEST
 
         missing_create_args = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> create-tenant slug=delta",
@@ -1354,7 +1354,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert missing_create_args.status == Status.BAD_REQUEST
 
         workspace_forbidden = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> create-tenant slug=theta name=Theta",
@@ -1366,7 +1366,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert workspace_forbidden.status == Status.FORBIDDEN
 
         missing_workspace = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> create-tenant slug=iota name=Iota",
@@ -1377,7 +1377,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert missing_workspace.status == Status.FORBIDDEN
 
         missing_extend_days = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> extend-trial tenant=gamma",
@@ -1389,7 +1389,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert missing_extend_days.status == Status.BAD_REQUEST
 
         invalid_days = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> extend-trial tenant=gamma days=abc",
@@ -1401,7 +1401,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert invalid_days.status == Status.BAD_REQUEST
 
         zero_days = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> extend-trial tenant=gamma days=0",
@@ -1413,7 +1413,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert zero_days.status == Status.BAD_REQUEST
 
         invalid_slug = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> extend-trial tenant=!!bad!! days=10",
@@ -1425,7 +1425,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert invalid_slug.status == Status.BAD_REQUEST
 
         missing_tenant = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> extend-trial tenant=unknown days=5",
@@ -1437,7 +1437,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert missing_tenant.status == Status.NOT_FOUND
 
         disable_bot = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1451,7 +1451,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         commands_payload = disabled_payload["slash_commands"]
 
         no_bot = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "text": "<@U999> create-tenant slug=upsilon name=Upsilon",
@@ -1463,7 +1463,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert no_bot.status == Status.BAD_REQUEST
 
         restore_bot = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1477,7 +1477,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         commands_payload = restored_payload["slash_commands"]
 
         tenant_forbidden = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant="acme",
             json={
                 "command": "/create-tenant",
@@ -1499,7 +1499,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
             }
         )
         public_update = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1515,7 +1515,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         chatops_service = cast(RecordingChatOpsService, app.chatops)
         chatops_service.config = ChatOpsConfig(enabled=False)
         unconfigured_public = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant="acme",
             json={
                 "text": "<@U999> demo-extend",
@@ -1533,7 +1533,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         )
 
         configured_public = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant="acme",
             json={
                 "text": "<@U999> demo-extend tenant=gamma days=2",
@@ -1548,7 +1548,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert recorded_extensions[-1].extended_days == 2
 
         invalid_command_update = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1567,7 +1567,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert invalid_command_update.status == Status.BAD_REQUEST
 
         duplicate_command_update = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1579,7 +1579,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert duplicate_command_update.status == Status.BAD_REQUEST
 
         invalid_alias_update = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1599,7 +1599,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert invalid_alias_update.status == Status.BAD_REQUEST
 
         duplicate_alias_update = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1622,7 +1622,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         commands_payload = initial_commands
 
         refresh_commands = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1635,7 +1635,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         commands_payload = json.loads(refresh_commands.body.decode())["slash_commands"]
 
         disable_integration = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1649,7 +1649,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert disable_integration.status == Status.OK
 
         disabled_invocation = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "command": "/quickstart-create-tenant",
@@ -1664,7 +1664,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert disabled_payload["error"]["detail"]["detail"] == "chatops_disabled"
 
         reenable_integration = await client.post(
-            "/__artemis/admin/chatops",
+            "/__mere/admin/chatops",
             tenant=admin,
             json={
                 **base_update,
@@ -1696,7 +1696,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         )
 
         response_invocation = await client.post(
-            "/__artemis/chatops/slash",
+            "/__mere/chatops/slash",
             tenant=admin,
             json={
                 "command": "/quickstart-create-tenant",
@@ -1725,7 +1725,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
         allowed_tenants=("acme",),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     settings = QuickstartChatOpsSettings(
         enabled=True,
@@ -1884,7 +1884,7 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
         allowed_tenants=("acme",),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     settings = QuickstartChatOpsSettings(
         enabled=True,
@@ -2390,11 +2390,11 @@ async def test_attach_quickstart_bootstraps_database(monkeypatch: pytest.MonkeyP
     )
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = ArtemisApp(config, database=database, orm=orm)
+    app = MereApp(config, database=database, orm=orm)
     attach_quickstart(app)
 
     async with TestClient(app) as client:
-        response = await client.get("/__artemis/ping", tenant="acme")
+        response = await client.get("/__mere/ping", tenant="acme")
         assert response.status == 200
 
     assert calls["seed_config"] is DEFAULT_QUICKSTART_AUTH
@@ -2512,14 +2512,14 @@ async def test_attach_quickstart_syncs_allowed_tenants_from_registry(monkeypatch
     app_config = AppConfig(site="demo", domain="local.test", allowed_tenants=(), database=db_config)
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = ArtemisApp(app_config, database=database, orm=orm)
+    app = MereApp(app_config, database=database, orm=orm)
 
     attach_quickstart(app)
 
     assert "gamma" not in app.tenant_resolver.allowed_tenants
 
     async with TestClient(app) as client:
-        response = await client.get("/__artemis/ping", tenant="gamma")
+        response = await client.get("/__mere/ping", tenant="gamma")
         assert response.status == 200
 
     assert "gamma" in app.tenant_resolver.allowed_tenants
@@ -2592,7 +2592,7 @@ async def test_attach_quickstart_with_custom_config(monkeypatch: pytest.MonkeyPa
     )
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = ArtemisApp(config, database=database, orm=orm)
+    app = MereApp(config, database=database, orm=orm)
     custom = QuickstartAuthConfig(
         tenants=(
             QuickstartTenant(
@@ -2606,7 +2606,7 @@ async def test_attach_quickstart_with_custom_config(monkeypatch: pytest.MonkeyPa
     attach_quickstart(app, auth_config=custom)
 
     async with TestClient(app) as client:
-        response = await client.get("/__artemis/ping", tenant="acme")
+        response = await client.get("/__mere/ping", tenant="acme")
         assert response.status == 200
 
     assert calls["config"] is custom
@@ -2638,7 +2638,7 @@ def test_load_quickstart_auth_from_env_json() -> None:
             ]
         },
     }
-    env = {"ARTEMIS_QUICKSTART_AUTH": json.dumps(payload)}
+    env = {"MERE_QUICKSTART_AUTH": json.dumps(payload)}
     loaded = load_quickstart_auth_from_env(env=env)
     assert loaded is not None
     assert loaded.tenants[0].slug == "env"
@@ -2672,7 +2672,7 @@ def test_load_quickstart_auth_from_env_file(tmp_path: Path) -> None:
     }
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload))
-    env = {"ARTEMIS_QUICKSTART_AUTH_FILE": str(path)}
+    env = {"MERE_QUICKSTART_AUTH_FILE": str(path)}
     loaded = load_quickstart_auth_from_env(env=env)
     assert loaded is not None
     assert loaded.tenants[0].slug == "file"
@@ -2680,7 +2680,7 @@ def test_load_quickstart_auth_from_env_file(tmp_path: Path) -> None:
 
 
 def test_load_quickstart_auth_from_env_invalid() -> None:
-    env = {"ARTEMIS_QUICKSTART_AUTH": "{not json}"}
+    env = {"MERE_QUICKSTART_AUTH": "{not json}"}
     with pytest.raises(RuntimeError):
         load_quickstart_auth_from_env(env=env)
 
@@ -2750,11 +2750,11 @@ async def test_attach_quickstart_uses_repository_config(monkeypatch: pytest.Monk
     )
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = ArtemisApp(config, database=database, orm=orm)
+    app = MereApp(config, database=database, orm=orm)
     attach_quickstart(app)
 
     async with TestClient(app) as client:
-        response = await client.get("/__artemis/ping", tenant="acme")
+        response = await client.get("/__mere/ping", tenant="acme")
         assert response.status == 200
 
     reload_config = calls["reload"]
@@ -3147,7 +3147,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     notifications = quickstart.QuickstartChatOpsNotificationChannels(
         tenant_created="#tenants",
@@ -3244,7 +3244,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     _assert_error_detail(duplicate, "duplicate_command")
 
     admin_context = app.tenant_resolver.context_for(app.config.admin_subdomain, TenantScope.ADMIN)
-    request = Request(method="POST", path="/__artemis/chatops/slash", tenant=admin_context)
+    request = Request(method="POST", path="/__mere/chatops/slash", tenant=admin_context)
 
     payload_create = QuickstartSlashCommandInvocation(
         text="<@U999> create-tenant slug=nu name=Nu",
@@ -3327,7 +3327,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     notifications = quickstart.QuickstartChatOpsNotificationChannels(
         tenant_created="#tenants",
@@ -3904,13 +3904,13 @@ class StubAuditService:
         )
 
 
-def _build_quickstart_app(monkeypatch: pytest.MonkeyPatch) -> ArtemisApp:
+def _build_quickstart_app(monkeypatch: pytest.MonkeyPatch) -> MereApp:
     connection = FakeConnection()
     pool = FakePool(connection)
     db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
     database = Database(db_config, pool=pool)
     config = AppConfig(site="demo", domain="local.test", allowed_tenants=("acme",), database=db_config)
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     async def _noop_apply(
         self: quickstart.QuickstartSeeder,
@@ -3951,27 +3951,27 @@ async def test_quickstart_tile_routes_delegate_to_service(
 
     async with TestClient(app) as client:
         create = await client.post(
-            "/__artemis/workspaces/ws-1/tiles",
+            "/__mere/workspaces/ws-1/tiles",
             tenant="acme",
             json={"title": "Sales", "layout": {"type": "chart"}},
         )
         assert create.status == Status.CREATED
         update = await client.request(
             "PATCH",
-            "/__artemis/workspaces/ws-1/tiles/tile-1",
+            "/__mere/workspaces/ws-1/tiles/tile-1",
             tenant="acme",
             json={"description": "Updated"},
         )
         assert update.status == 200
         delete = await client.request(
             "DELETE",
-            "/__artemis/workspaces/ws-1/tiles/tile-1",
+            "/__mere/workspaces/ws-1/tiles/tile-1",
             tenant="acme",
         )
         assert delete.status == Status.NO_CONTENT
         permissions = await client.request(
             "PUT",
-            "/__artemis/workspaces/ws-1/tiles/tile-1/permissions",
+            "/__mere/workspaces/ws-1/tiles/tile-1/permissions",
             tenant="acme",
             json={"roles": ["viewer"], "users": ["user-1"]},
         )
@@ -3992,20 +3992,20 @@ async def test_quickstart_rbac_routes_require_admin(
 
     async with TestClient(app) as client:
         forbidden = await client.post(
-            "/__artemis/workspaces/ws-1/rbac/permission-sets",
+            "/__mere/workspaces/ws-1/rbac/permission-sets",
             tenant="acme",
             json={"name": "ops", "permissions": ["tiles:read"]},
         )
         assert forbidden.status == Status.FORBIDDEN
 
         created = await client.post(
-            "/__artemis/workspaces/ws-1/rbac/permission-sets",
+            "/__mere/workspaces/ws-1/rbac/permission-sets",
             tenant=app.config.admin_subdomain,
             json={"name": "ops", "permissions": ["tiles:read"]},
         )
         assert created.status == Status.CREATED
         assigned = await client.post(
-            "/__artemis/workspaces/ws-1/rbac/roles/role-ps-1/assign",
+            "/__mere/workspaces/ws-1/rbac/roles/role-ps-1/assign",
             tenant=app.config.admin_subdomain,
             json={"userIds": ["user-1"]},
         )
@@ -4027,7 +4027,7 @@ async def test_quickstart_delegation_routes_delegate(
 
     async with TestClient(app) as client:
         admin_forbidden = await client.post(
-            "/__artemis/delegations",
+            "/__mere/delegations",
             tenant=app.config.admin_subdomain,
             json={
                 "workspaceId": "ws-1",
@@ -4041,7 +4041,7 @@ async def test_quickstart_delegation_routes_delegate(
         assert admin_forbidden.status == Status.FORBIDDEN
 
         grant = await client.post(
-            "/__artemis/delegations",
+            "/__mere/delegations",
             tenant="acme",
             json={
                 "workspaceId": "ws-1",
@@ -4055,13 +4055,13 @@ async def test_quickstart_delegation_routes_delegate(
         assert grant.status == Status.CREATED
         admin_delete = await client.request(
             "DELETE",
-            "/__artemis/delegations/del-1",
+            "/__mere/delegations/del-1",
             tenant=app.config.admin_subdomain,
         )
         assert admin_delete.status == Status.FORBIDDEN
         revoke = await client.request(
             "DELETE",
-            "/__artemis/delegations/del-1",
+            "/__mere/delegations/del-1",
             tenant="acme",
         )
         assert revoke.status == Status.NO_CONTENT
@@ -4083,7 +4083,7 @@ async def test_quickstart_cedar_dependency_handles_missing_workspace(
 
     tenant_request = Request(
         method="GET",
-        path="/__artemis/workspaces/acme/tiles",
+        path="/__mere/workspaces/acme/tiles",
         tenant=TenantContext(
             tenant="acme",
             site=app.config.site,
@@ -4098,7 +4098,7 @@ async def test_quickstart_cedar_dependency_handles_missing_workspace(
 
     admin_request = Request(
         method="GET",
-        path="/__artemis/workspaces/ws-1/rbac/permission-sets",
+        path="/__mere/workspaces/ws-1/rbac/permission-sets",
         tenant=TenantContext(
             tenant=app.config.admin_subdomain,
             site=app.config.site,
@@ -4114,7 +4114,7 @@ async def test_quickstart_cedar_dependency_handles_missing_workspace(
 
     admin_missing = Request(
         method="GET",
-        path="/__artemis/diagnostics",
+        path="/__mere/diagnostics",
         tenant=TenantContext(
             tenant=app.config.admin_subdomain,
             site=app.config.site,
@@ -4128,7 +4128,7 @@ async def test_quickstart_cedar_dependency_handles_missing_workspace(
 
     public_request = Request(
         method="GET",
-        path="/__artemis/ping",
+        path="/__mere/ping",
         tenant=TenantContext(
             tenant="public",
             site=app.config.site,
@@ -4151,13 +4151,13 @@ async def test_quickstart_audit_routes_delegate_to_service(
 
     async with TestClient(app) as client:
         logs = await client.get(
-            "/__artemis/workspaces/ws-1/audit-logs",
+            "/__mere/workspaces/ws-1/audit-logs",
             tenant=app.config.admin_subdomain,
             query={"actor": "admin", "from": "2024-01-01T00:00:00Z"},
         )
         assert logs.status == 200
         export = await client.get(
-            "/__artemis/workspaces/ws-1/audit-logs/export",
+            "/__mere/workspaces/ws-1/audit-logs/export",
             tenant=app.config.admin_subdomain,
             query={"format": "csv"},
         )
@@ -4167,7 +4167,7 @@ async def test_quickstart_audit_routes_delegate_to_service(
         assert stub.read_calls
         assert stub.export_calls[0]["format"] == "csv"
         export_json = await client.get(
-            "/__artemis/workspaces/ws-1/audit-logs/export",
+            "/__mere/workspaces/ws-1/audit-logs/export",
             tenant=app.config.admin_subdomain,
         )
         assert export_json.status == 200

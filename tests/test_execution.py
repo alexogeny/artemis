@@ -4,7 +4,7 @@ from typing import cast
 
 import pytest
 
-from artemis.execution import ExecutionConfig, ExecutionMode, TaskExecutor
+from mere.execution import ExecutionConfig, ExecutionMode, TaskExecutor
 
 
 def add_numbers(a: int, b: int) -> int:

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from artemis.http import (
+from mere.http import (
     Status,
     ensure_status,
     is_client_error,

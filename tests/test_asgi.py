@@ -4,16 +4,16 @@ from typing import Mapping, cast
 
 import pytest
 
-from artemis.application import ArtemisApp
-from artemis.config import AppConfig
-from artemis.requests import Request
-from artemis.responses import Response
-from artemis.serialization import json_decode, json_encode
+from mere.application import MereApp
+from mere.config import AppConfig
+from mere.requests import Request
+from mere.responses import Response
+from mere.serialization import json_decode, json_encode
 
 
 @pytest.mark.asyncio
 async def test_asgi_interface_handles_request() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/ping")
     async def ping() -> str:
@@ -50,7 +50,7 @@ async def test_asgi_interface_handles_request() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_requires_host_header() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/ping")
     async def ping() -> str:
@@ -73,7 +73,7 @@ async def test_asgi_requires_host_header() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_rejects_non_http_scope() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     async def receive() -> Mapping[str, object]:
         return {"type": "http.request", "body": b"", "more_body": False}
@@ -94,7 +94,7 @@ async def test_asgi_rejects_non_http_scope() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_collects_body_chunks() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.post("/upload")
     async def upload(request: Request) -> Response:
@@ -137,7 +137,7 @@ async def test_asgi_collects_body_chunks() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_large_post_body_reuse() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.post("/bulk")
     async def bulk(request: Request) -> Response:
@@ -202,7 +202,7 @@ async def test_asgi_large_post_body_reuse() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_body_loader_handles_disconnect_and_cached_reads() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.post("/manual")
     async def manual(request: Request) -> Response:

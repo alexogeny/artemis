@@ -8,11 +8,11 @@ from typing import Protocol
 import msgspec
 import pytest
 
-from artemis import AppConfig, ArtemisApp, JSONResponse, TestClient
-from artemis.codegen import generate_typescript_client
-from artemis.golden import GoldenFile, RequestResponseRecorder
-from artemis.observability import Observability, ObservabilityConfig
-from artemis.openapi import generate_openapi
+from mere import AppConfig, JSONResponse, MereApp, TestClient
+from mere.codegen import generate_typescript_client
+from mere.golden import GoldenFile, RequestResponseRecorder
+from mere.observability import Observability, ObservabilityConfig
+from mere.openapi import generate_openapi
 
 
 class _ResponseLike(Protocol):
@@ -25,7 +25,7 @@ class CreateItem(msgspec.Struct):
     name: str
 
 
-def _build_app() -> ArtemisApp:
+def _build_app() -> MereApp:
     class _DeterministicIds:
         def __init__(self) -> None:
             self._counter = 0
@@ -38,7 +38,7 @@ def _build_app() -> ArtemisApp:
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False),
         id_generator=_DeterministicIds(),
     )
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")),
         observability=observability,
     )

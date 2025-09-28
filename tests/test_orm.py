@@ -4,12 +4,12 @@ from typing import Any, cast
 import msgspec
 import pytest
 
-import artemis.orm as orm_module
-from artemis.audit import AuditActor, AuditTrail, audit_context
-from artemis.database import Database, DatabaseConfig, PoolConfig
-from artemis.id57 import generate_id57
-from artemis.models import AppSecret, BillingRecord, BillingStatus, Passkey, TenantUser
-from artemis.orm import (
+import mere.orm as orm_module
+from mere.audit import AuditActor, AuditTrail, audit_context
+from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.id57 import generate_id57
+from mere.models import AppSecret, BillingRecord, BillingStatus, Passkey, TenantUser
+from mere.orm import (
     ORM,
     Model,
     ModelInfo,
@@ -20,7 +20,7 @@ from artemis.orm import (
     default_registry,
     model,
 )
-from artemis.tenancy import TenantResolver
+from mere.tenancy import TenantResolver
 from tests.support import FakeConnection, FakePool
 
 

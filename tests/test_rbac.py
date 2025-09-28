@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-import artemis.rbac as rbac_module
-from artemis.id57 import generate_id57
-from artemis.models import (
+import mere.rbac as rbac_module
+from mere.id57 import generate_id57
+from mere.models import (
     AdminRoleAssignment,
     Permission,
     PermissionEffect,
@@ -13,7 +13,7 @@ from artemis.models import (
     RoleScope,
     UserRole,
 )
-from artemis.rbac import (
+from mere.rbac import (
     CedarEffect,
     CedarEngine,
     CedarEntity,

@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import pytest
 
-from artemis.dependency import DependencyProvider, DependencyScope
-from artemis.requests import Request
-from artemis.tenancy import TenantContext, TenantScope
+from mere.dependency import DependencyProvider, DependencyScope
+from mere.requests import Request
+from mere.tenancy import TenantContext, TenantScope
 
 
 @pytest.mark.asyncio
@@ -104,7 +104,7 @@ async def test_dependency_factory_receives_request() -> None:
 
 @pytest.mark.asyncio
 async def test_dependency_reflection_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    import artemis.dependency as dependency_module
+    import mere.dependency as dependency_module
 
     dependency_module._cached_signature.cache_clear()
     dependency_module._cached_type_hints.cache_clear()

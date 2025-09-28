@@ -8,10 +8,10 @@ from typing import Any, Iterable, cast
 
 import pytest
 
-from artemis import (
+from mere import (
     AppConfig,
-    ArtemisApp,
     ChatMessage,
+    MereApp,
     Observability,
     ObservabilityConfig,
     Request,
@@ -21,7 +21,7 @@ from artemis import (
     TenantScope,
     TestClient,
 )
-from artemis.observability import _MAX_TRACESTATE_LENGTH
+from mere.observability import _MAX_TRACESTATE_LENGTH
 from tests.observability_stubs import (
     setup_stub_datadog,
     setup_stub_opentelemetry,
@@ -60,7 +60,7 @@ async def test_request_observability_success(monkeypatch: pytest.MonkeyPatch) ->
         allowed_tenants=("acme",),
         observability=observability.config,
     )
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     @app.get("/ping")
     async def ping() -> dict[str, bool]:
@@ -96,7 +96,7 @@ async def test_request_observability_error(monkeypatch: pytest.MonkeyPatch) -> N
         allowed_tenants=("acme",),
         observability=observability.config,
     )
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     @app.get("/boom")
     async def boom() -> None:
@@ -508,7 +508,7 @@ async def test_observability_emits_trace_headers_and_logs(
         id_generator=id_gen,
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     async def passthrough(request: Request, handler):
         return await handler(request)
@@ -522,7 +522,7 @@ async def test_observability_emits_trace_headers_and_logs(
     incoming = "00-" + ("a" * 32) + "-" + ("b" * 16) + "-01"
 
     async with TestClient(app) as client:
-        with caplog.at_level(logging.INFO, logger="artemis.observability"):
+        with caplog.at_level(logging.INFO, logger="mere.observability"):
             response = await client.get("/ping", tenant="acme", headers={"traceparent": incoming})
 
     headers = {key: value for key, value in response.headers}
@@ -608,7 +608,7 @@ async def test_observability_records_middleware_spans(
     tracer = setup_stub_opentelemetry(monkeypatch)
     observability = Observability(ObservabilityConfig(datadog_enabled=False))
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     async def middleware(request: Request, handler):
         return await handler(request)
@@ -685,7 +685,7 @@ def test_observability_log_disabled(caplog: pytest.LogCaptureFixture) -> None:
     observability = Observability(
         ObservabilityConfig(enabled=False, opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
-    with caplog.at_level(logging.INFO, logger="artemis.observability"):
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
         observability._log(None, "event", {"detail": True})
     assert caplog.records == []
 
@@ -694,7 +694,7 @@ def test_observability_log_without_context(caplog: pytest.LogCaptureFixture) -> 
     observability = Observability(
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
-    with caplog.at_level(logging.INFO, logger="artemis.observability"):
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
         observability._log(None, "standalone.event")
     record = json.loads(caplog.records[-1].message)
     assert record == {"event": "standalone.event"}
@@ -711,7 +711,7 @@ def test_observability_log_ignores_missing_context_fields(caplog: pytest.LogCapt
     context.span_id = None
     context.parent_span_id = None
     context.log_fields.clear()
-    with caplog.at_level(logging.INFO, logger="artemis.observability"):
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
         observability._log(context, "minimal.event")
     record = json.loads(caplog.records[-1].message)
     assert record == {"event": "minimal.event"}
@@ -737,7 +737,7 @@ def test_observability_log_includes_context_fields(caplog: pytest.LogCaptureFixt
     )
     assert context is not None
     context.span_id = "span-1"
-    with caplog.at_level(logging.INFO, logger="artemis.observability"):
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
         observability._log(context, "custom.event", {"extra": "yes", "skip": None})
     record = json.loads(caplog.records[-1].message)
     assert record["custom"] == "value"
@@ -900,7 +900,7 @@ async def test_observability_middleware_error_logs_exception(
     assert request_context is not None
     middleware_context = observability.on_middleware_start(lambda req, handler: handler(req), request, request_context)
     assert middleware_context is not None
-    with caplog.at_level(logging.INFO, logger="artemis.observability"):
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
         observability.on_middleware_error(middleware_context, RuntimeError("boom"))
     assert tracer.spans[-1].exceptions[-1].args[0] == "boom"
     log = json.loads(caplog.records[-1].message)
@@ -949,7 +949,7 @@ async def test_observability_middleware_success_logs(caplog: pytest.LogCaptureFi
     request_context = observability.on_request_start(request)
     middleware_context = observability.on_middleware_start(object(), request, request_context)
     assert middleware_context is not None
-    with caplog.at_level(logging.INFO, logger="artemis.observability"):
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
         observability.on_middleware_success(middleware_context)
     events = [json.loads(record.message)["event"] for record in caplog.records]
     assert "middleware.success" in events

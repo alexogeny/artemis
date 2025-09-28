@@ -4,9 +4,9 @@ import datetime as dt
 
 import pytest
 
-from artemis.database import SecretRef
-from artemis.exceptions import HTTPError
-from artemis.models import (
+from mere.database import SecretRef
+from mere.exceptions import HTTPError
+from mere.models import (
     AdminUser,
     AppSecret,
     MfaCode,
@@ -17,8 +17,8 @@ from artemis.models import (
     TenantSecret,
     TenantUser,
 )
-from artemis.requests import Request
-from artemis.responses import (
+from mere.requests import Request
+from mere.responses import (
     DEFAULT_SECURITY_HEADERS,
     JSONResponse,
     PlainTextResponse,
@@ -27,8 +27,8 @@ from artemis.responses import (
     exception_to_response,
     security_headers_middleware,
 )
-from artemis.serialization import json_decode
-from artemis.tenancy import TenantContext, TenantScope
+from mere.serialization import json_decode
+from mere.tenancy import TenantContext, TenantScope
 
 
 def test_plain_text_response_headers() -> None:

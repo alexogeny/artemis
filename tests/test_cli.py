@@ -5,7 +5,7 @@ from typing import Sequence
 
 import pytest
 
-import artemis.cli as cli
+import mere.cli as cli
 
 
 def test_quality_runs_all_steps(monkeypatch: pytest.MonkeyPatch) -> None:

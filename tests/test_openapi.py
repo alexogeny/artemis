@@ -5,10 +5,10 @@ from typing import Annotated, Literal, Optional, Protocol
 
 import msgspec
 
-import artemis.openapi as openapi_module
-from artemis import AppConfig, ArtemisApp, JSONResponse, Observability, ObservabilityConfig, PlainTextResponse, Response
-from artemis.openapi import generate_openapi
-from artemis.routing import RouteGuard
+import mere.openapi as openapi_module
+from mere import AppConfig, JSONResponse, MereApp, Observability, ObservabilityConfig, PlainTextResponse, Response
+from mere.openapi import generate_openapi
+from mere.routing import RouteGuard
 
 
 class _ResponseLike(Protocol):
@@ -39,12 +39,12 @@ class RecursiveNode(msgspec.Struct):
     child: Optional["RecursiveNode"] = None
 
 
-def _make_app() -> ArtemisApp:
+def _make_app() -> MereApp:
     observability = Observability(
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     guard = RouteGuard(action="read", resource_type="item", resource_id="42", principal_type="user")
 
@@ -90,7 +90,7 @@ def test_generate_openapi_captures_route_metadata() -> None:
     assert set(schema["required"]) == {"payload", "extra"}
 
     raw = spec["paths"]["/raw"]["get"]
-    guards = raw["x-artemis-guards"]
+    guards = raw["x-mere-guards"]
     assert guards[0]["resource_type"] == "item"
     assert raw["responses"]["200"]["description"] == "Response"
 
@@ -115,7 +115,7 @@ def test_generate_openapi_handles_docstrings_and_skips_parameters() -> None:
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     @app.post("/doc/{item_id}")
     async def documented(item_id: int, note, count: int, result: Result, payload: DocPayload) -> Result:
@@ -145,7 +145,7 @@ def test_generate_openapi_without_components() -> None:
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = ArtemisApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability)
 
     @app.get("/ping")
     async def ping() -> str:

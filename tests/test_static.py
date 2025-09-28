@@ -8,13 +8,13 @@ import brotli
 import pytest
 import zstandard as zstd
 
-from artemis.application import ArtemisApp
-from artemis.config import AppConfig
-from artemis.exceptions import HTTPError
-from artemis.execution import ExecutionConfig, ExecutionMode, TaskExecutor
-from artemis.serialization import json_decode
-from artemis.static import StaticFiles, _gzip_compress
-from artemis.testing import TestClient
+from mere.application import MereApp
+from mere.config import AppConfig
+from mere.exceptions import HTTPError
+from mere.execution import ExecutionConfig, ExecutionMode, TaskExecutor
+from mere.serialization import json_decode
+from mere.static import StaticFiles, _gzip_compress
+from mere.testing import TestClient
 
 
 @pytest.mark.asyncio
@@ -24,7 +24,7 @@ async def test_mount_static_serves_files_for_all_tenants(tmp_path) -> None:
     bundle = assets / "app.js"
     bundle.write_text("console.log('ok');", encoding="utf-8")
 
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     app.mount_static("/assets", directory=assets)
 
     async with TestClient(app) as client:
@@ -46,7 +46,7 @@ async def test_mount_static_serves_directory_index(tmp_path) -> None:
     docs.mkdir(parents=True)
     (docs / "index.html").write_text("<h1>Docs</h1>", encoding="utf-8")
 
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     app.mount_static("/assets", directory=assets)
 
     async with TestClient(app) as client:
@@ -66,7 +66,7 @@ async def test_mount_static_missing_and_traversal(tmp_path) -> None:
     assets = tmp_path / "assets"
     assets.mkdir()
 
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     app.mount_static("/assets", directory=assets, index_file=None)
 
     async with TestClient(app) as client:
@@ -90,7 +90,7 @@ async def test_mount_static_head_request(tmp_path) -> None:
     script.write_text("console.log('head');", encoding="utf-8")
     expected_size = script.stat().st_size
 
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     app.mount_static("/assets", directory=assets, cache_control="public, max-age=60")
 
     async with TestClient(app) as client:
@@ -112,7 +112,7 @@ async def test_mount_static_applies_compression(tmp_path) -> None:
     script.write_text("const data = '" + "x" * 512 + "';", encoding="utf-8")
     expected = script.read_bytes()
 
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     app.mount_static("/assets", directory=assets)
 
     async with TestClient(app) as client:
@@ -237,7 +237,7 @@ async def test_staticfiles_caches_assets(tmp_path, monkeypatch: pytest.MonkeyPat
 
 
 def test_mount_static_requires_existing_directory(tmp_path) -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     with pytest.raises(ValueError):
         app.mount_static("/assets", directory=tmp_path / "missing")
 
@@ -245,19 +245,19 @@ def test_mount_static_requires_existing_directory(tmp_path) -> None:
 def test_mount_static_rejects_absolute_index(tmp_path) -> None:
     assets = tmp_path / "assets"
     assets.mkdir()
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     with pytest.raises(ValueError):
         app.mount_static("/assets", directory=assets, index_file="/abs/index.html")
 
 
 def test_mount_static_rejects_root_path(tmp_path) -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     with pytest.raises(ValueError):
         app.mount_static("/", directory=tmp_path)
 
 
 def test_mount_static_rejects_empty_path(tmp_path) -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     with pytest.raises(ValueError):
         app.mount_static("   ", directory=tmp_path)
 
@@ -422,7 +422,7 @@ async def test_staticfiles_stream_bubbles_reader_errors(tmp_path) -> None:
 
 
 def test_static_available_compressors_handles_missing(monkeypatch) -> None:
-    from artemis import static as static_module
+    from mere import static as static_module
 
     current = static_module._available_compressors()
     assert ("gzip", static_module._gzip_compress) in current
@@ -490,7 +490,7 @@ async def test_mount_static_normalizes_path_and_names(tmp_path) -> None:
     assets.mkdir()
     (assets / "app.js").write_text("console.log('named');", encoding="utf-8")
 
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     app.mount_static("assets", directory=assets, name="static-assets")
 
     async with TestClient(app) as client:
