@@ -1,0 +1,54 @@
+site_name: Mere
+site_description: Async multi-tenant web framework
+site_url: https://github.com/your-org/mere
+repo_url: https://github.com/your-org/mere
+repo_name: your-org/mere
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Architecture:
+      - Overview: architecture/overview.md
+  - Guides:
+      - Quickstart helper: guides/quickstart.md
+      - Tenant routing: guides/tenancy.md
+      - Observability: guides/observability.md
+      - Database and ORM: guides/database.md
+  - Reference:
+      - API reference: reference/api.md
+      - CLI: reference/cli.md
+      - HTTP utilities: reference/http.md
+  - Operations:
+      - Publishing docs: ops/publishing.md
+
+theme:
+  name: shadcn
+  features:
+    - navigation.indexes
+    - navigation.sections
+    - content.code.copy
+    - toc.follow
+
+plugins:
+  - search
+  - mkdocstrings:
+      default_handler: python
+      handlers:
+        python:
+          options:
+            docstring_style: google
+            show_root_heading: false
+            show_signature: true
+            line_length: 88
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - footnotes
+  - codehilite
+  - toc:
+      permalink: true
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true

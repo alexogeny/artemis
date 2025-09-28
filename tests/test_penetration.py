@@ -7,9 +7,9 @@ from typing import Any, Mapping
 
 import pytest
 
-from artemis.observability import Observability, ObservabilityConfig, _default_id_generator
-from artemis.requests import Request
-from artemis.tenancy import (
+from mere.observability import Observability, ObservabilityConfig, _default_id_generator
+from mere.requests import Request
+from mere.tenancy import (
     TenantContext,
     TenantResolutionError,
     TenantResolver,
@@ -76,7 +76,7 @@ def test_default_id_generator_relies_on_secure_entropy(monkeypatch: pytest.Monke
         payload[-1] = len(calls)
         return bytes(payload)
 
-    monkeypatch.setattr("artemis.observability.secrets.token_bytes", fake_token_bytes)
+    monkeypatch.setattr("mere.observability.secrets.token_bytes", fake_token_bytes)
     generator = _default_id_generator()
     token = generator(16)
     assert token.endswith(f"{len(calls):02x}")

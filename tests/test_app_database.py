@@ -1,10 +1,10 @@
 import pytest
 
-from artemis.application import ArtemisApp
-from artemis.config import AppConfig
-from artemis.database import Database, DatabaseConfig, PoolConfig
-from artemis.requests import Request
-from artemis.tenancy import TenantResolver
+from mere.application import MereApp
+from mere.config import AppConfig
+from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.requests import Request
+from mere.tenancy import TenantResolver
 from tests.support import FakeConnection, FakePool
 
 
@@ -15,7 +15,7 @@ async def test_application_wires_database_and_orm() -> None:
     db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://demo"), admin_schema="admin")
     database = Database(db_config, pool=pool)
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",), database=db_config)
-    app = ArtemisApp(config=config, database=database)
+    app = MereApp(config=config, database=database)
 
     assert app.database is database
     assert app.orm is not None

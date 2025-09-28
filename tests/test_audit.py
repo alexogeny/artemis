@@ -5,17 +5,17 @@ import datetime as dt
 import msgspec
 import pytest
 
-from artemis.audit import INSERT, UPDATE, AuditActor, AuditTrail, audit_context
-from artemis.database import Database, DatabaseConfig, PoolConfig
-from artemis.models import (
+from mere.audit import INSERT, UPDATE, AuditActor, AuditTrail, audit_context
+from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.models import (
     AdminAuditLogEntry,
     BillingRecord,
     BillingStatus,
     TenantAuditLogEntry,
     TenantUser,
 )
-from artemis.orm import default_registry
-from artemis.tenancy import TenantResolver
+from mere.orm import default_registry
+from mere.tenancy import TenantResolver
 from tests.support import FakeConnection, FakePool
 
 

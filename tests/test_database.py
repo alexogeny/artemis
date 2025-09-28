@@ -2,8 +2,8 @@ from typing import Any, Mapping, cast
 
 import pytest
 
-import artemis.database as database_module
-from artemis.database import (
+import mere.database as database_module
+from mere.database import (
     Database,
     DatabaseConfig,
     DatabaseConnection,
@@ -16,7 +16,7 @@ from artemis.database import (
     TLSConfig,
     _quote_identifier,
 )
-from artemis.tenancy import TenantResolver
+from mere.tenancy import TenantResolver
 from tests.support import FakeConnection, FakePool, StaticSecretResolver
 
 
@@ -61,7 +61,7 @@ async def test_database_schema_resolution_and_pool_factory() -> None:
         return FakePool()
 
     config = DatabaseConfig(
-        pool=PoolConfig(dsn="postgres://demo", options={"application_name": "artemis"}),
+        pool=PoolConfig(dsn="postgres://demo", options={"application_name": "mere"}),
         admin_schema="admin",
         tenant_schema_template="tenant_{tenant}",
         tenant_schema_overrides={"beta": "custom_beta"},
@@ -69,7 +69,7 @@ async def test_database_schema_resolution_and_pool_factory() -> None:
     database = Database(config, pool_factory=factory)
     await database.startup()
     assert captured_options[0]["dsn"] == "postgres://demo"
-    assert captured_options[0]["application_name"] == "artemis"
+    assert captured_options[0]["application_name"] == "mere"
     assert captured_options[0]["sslmode"] == "verify-full"
     assert captured_options[0]["options"]["sslmode"] == "verify-full"
 

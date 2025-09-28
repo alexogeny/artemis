@@ -4,22 +4,22 @@ from typing import TYPE_CHECKING, cast
 
 import pytest
 
-from artemis.application import ArtemisApp
-from artemis.config import AppConfig
-from artemis.middleware import apply_middleware
-from artemis.observability import Observability
-from artemis.requests import Request
-from artemis.responses import Response
-from artemis.tenancy import TenantContext, TenantScope
-from artemis.testing import TestClient
+from mere.application import MereApp
+from mere.config import AppConfig
+from mere.middleware import apply_middleware
+from mere.observability import Observability
+from mere.requests import Request
+from mere.responses import Response
+from mere.tenancy import TenantContext, TenantScope
+from mere.testing import TestClient
 
 if TYPE_CHECKING:
-    from artemis.observability import _ObservationContext
+    from mere.observability import _ObservationContext
 
 
 @pytest.mark.asyncio
 async def test_middleware_executes_in_order() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     events: list[str] = []
 
     async def recorder(request, handler):

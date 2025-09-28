@@ -1,4 +1,4 @@
-# AGENTS.md — **Artemis (Backend)**
+# AGENTS.md — **Mere (Backend)**
 
 Implement fast, safe, tenant-aware services and tools with a bias toward **Rust-backed Python** libraries, fully asynchronous functional code, and near-total test coverage.
 

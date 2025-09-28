@@ -1,11 +1,11 @@
-"""Test support utilities for Artemis database and ORM tests."""
+"""Test support utilities for Mere database and ORM tests."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Any, Iterable, List, Mapping, Sequence
 
-from artemis.database import SecretRef
+from mere.database import SecretRef
 
 
 @dataclass

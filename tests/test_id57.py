@@ -2,7 +2,7 @@ import uuid
 
 import pytest
 
-from artemis.id57 import ALPHABET, USING_RUST_BACKEND, base57_encode, decode57, generate_id57
+from mere.id57 import ALPHABET, USING_RUST_BACKEND, base57_encode, decode57, generate_id57
 
 
 def test_generate_id57_lexicographically_sorted() -> None:

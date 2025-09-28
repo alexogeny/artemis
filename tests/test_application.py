@@ -6,27 +6,27 @@ import msgspec
 import pytest
 import pytest_asyncio
 
-from artemis.application import Artemis, ArtemisApp
-from artemis.audit import AuditTrail, current_actor
-from artemis.config import AppConfig
-from artemis.database import Database, DatabaseConfig, PoolConfig
-from artemis.dependency import DependencyProvider
-from artemis.exceptions import HTTPError
-from artemis.http import Status
-from artemis.orm import ORM
-from artemis.rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
-from artemis.requests import Request
-from artemis.responses import (
+from mere.application import Mere, MereApp
+from mere.audit import AuditTrail, current_actor
+from mere.config import AppConfig
+from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.dependency import DependencyProvider
+from mere.exceptions import HTTPError
+from mere.http import Status
+from mere.orm import ORM
+from mere.rbac import CedarEffect, CedarEngine, CedarEntity, CedarPolicy, CedarReference
+from mere.requests import Request
+from mere.responses import (
     DEFAULT_SECURITY_HEADERS,
     JSONResponse,
     Response,
     security_headers_middleware,
 )
-from artemis.routing import RouteGuard, get
-from artemis.serialization import json_decode, json_encode
-from artemis.tenancy import TenantContext
-from artemis.testing import TestClient
-from artemis.websockets import WebSocket
+from mere.routing import RouteGuard, get
+from mere.serialization import json_decode, json_encode
+from mere.tenancy import TenantContext
+from mere.testing import TestClient
+from mere.websockets import WebSocket
 from tests.support import FakeConnection, FakePool
 
 
@@ -64,13 +64,13 @@ class ItemStore:
 
 
 @pytest_asyncio.fixture
-async def app() -> AsyncIterator[ArtemisApp]:
+async def app() -> AsyncIterator[MereApp]:
     provider = DependencyProvider()
     store = ItemStore()
     provider.provide(ItemStore, lambda: store)
 
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta"))
-    application = ArtemisApp(config=config, dependency_provider=provider)
+    application = MereApp(config=config, dependency_provider=provider)
 
     @application.get("/items/{item_id}", name="get_item")
     async def read_item(item_id: int, store: ItemStore, tenant: TenantContext) -> dict[str, Any]:
@@ -116,7 +116,7 @@ async def app() -> AsyncIterator[ArtemisApp]:
 
 
 @pytest.mark.asyncio
-async def test_tenant_isolation(app: ArtemisApp) -> None:
+async def test_tenant_isolation(app: MereApp) -> None:
     async with TestClient(app) as client:
         acme = await client.get("/items/1", tenant="acme")
         beta = await client.get("/items/1", tenant="beta")
@@ -125,7 +125,7 @@ async def test_tenant_isolation(app: ArtemisApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_body_parsing_and_creation(app: ArtemisApp) -> None:
+async def test_body_parsing_and_creation(app: MereApp) -> None:
     async with TestClient(app) as client:
         response = await client.post("/items", tenant="acme", json={"name": "Analyzer"})
         assert response.status == 201
@@ -134,7 +134,7 @@ async def test_body_parsing_and_creation(app: ArtemisApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_admin_route_requires_admin_scope(app: ArtemisApp) -> None:
+async def test_admin_route_requires_admin_scope(app: MereApp) -> None:
     async with TestClient(app) as client:
         admin = await client.get("/admin/tenants", tenant="admin")
         assert json_decode(admin.body) == ["acme", "beta"]
@@ -145,14 +145,14 @@ async def test_admin_route_requires_admin_scope(app: ArtemisApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_query_parsing(app: ArtemisApp) -> None:
+async def test_query_parsing(app: MereApp) -> None:
     async with TestClient(app) as client:
         response = await client.get("/search", tenant="acme", query={"limit": 5, "offset": 2})
         assert json_decode(response.body) == {"limit": 5, "offset": 2}
 
 
 @pytest.mark.asyncio
-async def test_security_headers_present(app: ArtemisApp) -> None:
+async def test_security_headers_present(app: MereApp) -> None:
     async with TestClient(app) as client:
         response = await client.get("/noop", tenant="acme")
         headers = dict(response.headers)
@@ -161,7 +161,7 @@ async def test_security_headers_present(app: ArtemisApp) -> None:
 
 
 def test_security_middleware_ordering() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     async def custom(request: Request, handler):
         return await handler(request)
@@ -179,14 +179,14 @@ def test_security_middleware_ordering() -> None:
 
 
 @pytest.mark.asyncio
-async def test_url_generation(app: ArtemisApp) -> None:
+async def test_url_generation(app: MereApp) -> None:
     path = app.url_path_for("get_item", item_id=99)
     assert path == "/items/99"
 
 
 @pytest.mark.asyncio
 async def test_include_and_lifecycle_hooks() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
     events: list[str] = []
 
     @app.on_startup
@@ -218,19 +218,19 @@ async def test_include_and_lifecycle_hooks() -> None:
         app.url_path_for("missing")
 
 
-def test_artemis_from_config() -> None:
-    dict_app = Artemis.from_config({"site": "prod", "domain": "example.com", "allowed_tenants": ("acme", "beta")})
-    assert isinstance(dict_app, ArtemisApp)
+def test_mere_from_config() -> None:
+    dict_app = Mere.from_config({"site": "prod", "domain": "example.com", "allowed_tenants": ("acme", "beta")})
+    assert isinstance(dict_app, MereApp)
     assert dict_app.config.site == "prod"
     assert dict_app.config.tenant_host("acme") == "acme.prod.example.com"
 
-    config_app = Artemis.from_config(AppConfig(site="demo", domain="example.org", allowed_tenants=("acme", "beta")))
-    assert isinstance(config_app, ArtemisApp)
+    config_app = Mere.from_config(AppConfig(site="demo", domain="example.org", allowed_tenants=("acme", "beta")))
+    assert isinstance(config_app, MereApp)
     assert config_app.config.tenant_host(config_app.config.marketing_tenant) == "demo.example.org"
 
 
 def test_include_requires_metadata() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     def handler() -> str:
         return "ok"
@@ -251,7 +251,7 @@ async def test_route_guard_authorizes_with_cedar_engine() -> None:
     engine = CedarEngine([policy])
     provider.provide(CedarEngine, lambda: engine)
 
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")),
         dependency_provider=provider,
     )
@@ -287,7 +287,7 @@ async def test_guard_requires_principal() -> None:
     provider = DependencyProvider()
     engine = CedarEngine([])
     provider.provide(CedarEngine, lambda: engine)
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)),
         dependency_provider=provider,
     )
@@ -317,7 +317,7 @@ async def test_guard_rejects_principal_type_mismatch() -> None:
     )
     engine = CedarEngine([policy])
     provider.provide(CedarEngine, lambda: engine)
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)),
         dependency_provider=provider,
     )
@@ -343,7 +343,7 @@ async def test_guard_rejects_principal_type_mismatch() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_handles_status_enum_exception(app: ArtemisApp) -> None:
+async def test_dispatch_handles_status_enum_exception(app: MereApp) -> None:
     class StatusError(Exception):
         def __init__(self, status: Status | int) -> None:
             super().__init__("boom")
@@ -375,7 +375,7 @@ async def test_app_guard_sets_global_guards() -> None:
     )
     engine = CedarEngine([policy])
     provider.provide(CedarEngine, lambda: engine)
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)),
         dependency_provider=provider,
     )
@@ -402,7 +402,7 @@ async def test_app_guard_sets_global_guards() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_sanitizes_non_utf8_header_bytes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.get("/inspect")
     async def inspect(request: Request) -> Response:
@@ -443,7 +443,7 @@ async def test_asgi_sanitizes_non_utf8_header_bytes() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_rejects_scope_with_invalid_host_bytes() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.get("/noop")
     async def noop() -> None:
@@ -480,7 +480,7 @@ async def test_asgi_rejects_scope_with_invalid_host_bytes() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_rejects_scope_without_host_header() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.get("/noop")
     async def noop() -> None:
@@ -517,7 +517,7 @@ async def test_asgi_rejects_scope_without_host_header() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_rejects_scope_with_unencodable_headers() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.get("/noop")
     async def noop() -> None:
@@ -559,7 +559,7 @@ async def test_asgi_rejects_scope_with_unencodable_headers() -> None:
 
 @pytest.mark.asyncio
 async def test_asgi_decodes_non_utf8_query_string() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.get("/inspect")
     async def inspect(request: Request) -> Response:
@@ -597,7 +597,7 @@ async def test_asgi_decodes_non_utf8_query_string() -> None:
 
 @pytest.mark.asyncio
 async def test_http_request_rejects_excessive_content_length() -> None:
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(
             site="demo",
             domain="example.com",
@@ -648,7 +648,7 @@ async def test_http_request_rejects_excessive_content_length() -> None:
 
 @pytest.mark.asyncio
 async def test_http_request_streaming_enforces_body_limit() -> None:
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(
             site="demo",
             domain="example.com",
@@ -700,7 +700,7 @@ async def test_http_request_streaming_enforces_body_limit() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("content_length", [b"oops", b"-1"])
 async def test_http_request_with_invalid_content_length_header(content_length: bytes) -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.post("/ingest")
     async def ingest(request: Request) -> Response:  # pragma: no cover - should not execute
@@ -744,7 +744,7 @@ async def test_http_request_with_invalid_content_length_header(content_length: b
 
 @pytest.mark.asyncio
 async def test_http_request_allows_content_length_within_limit() -> None:
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(
             site="demo",
             domain="example.com",
@@ -796,7 +796,7 @@ async def test_http_request_allows_content_length_within_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_http_request_without_body_limit_allows_large_payload() -> None:
-    app = ArtemisApp(
+    app = MereApp(
         AppConfig(
             site="demo",
             domain="example.com",
@@ -852,7 +852,7 @@ async def test_http_request_without_body_limit_allows_large_payload() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_scope_sanitizes_headers() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.websocket("/ws")
     async def websocket_endpoint(socket: WebSocket) -> None:
@@ -896,7 +896,7 @@ async def test_websocket_scope_sanitizes_headers() -> None:
 
 @pytest.mark.asyncio
 async def test_websocket_scope_without_host_header_closes_with_protocol_error() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.websocket("/noop")
     async def noop(socket: WebSocket) -> None:  # pragma: no cover - should not execute
@@ -933,7 +933,7 @@ async def test_websocket_scope_without_host_header_closes_with_protocol_error() 
 
 @pytest.mark.asyncio
 async def test_websocket_scope_with_unencodable_headers_closes_with_protocol_error() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
     @app.websocket("/noop")
     async def noop(socket: WebSocket) -> None:  # pragma: no cover - should not execute
@@ -974,7 +974,7 @@ async def test_websocket_scope_with_unencodable_headers_closes_with_protocol_err
 
 
 @pytest.mark.asyncio
-async def test_none_response_coerces_to_204(app: ArtemisApp) -> None:
+async def test_none_response_coerces_to_204(app: MereApp) -> None:
     async with TestClient(app) as client:
         response = await client.get("/noop", tenant="acme")
     assert response.status == 204
@@ -982,7 +982,7 @@ async def test_none_response_coerces_to_204(app: ArtemisApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_unannotated_path_param(app: ArtemisApp) -> None:
+async def test_unannotated_path_param(app: MereApp) -> None:
     async with TestClient(app) as client:
         response = await client.get("/echo/sample", tenant="acme")
     payload = json_decode(response.body)
@@ -990,7 +990,7 @@ async def test_unannotated_path_param(app: ArtemisApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_execute_route_struct_injection(app: ArtemisApp) -> None:
+async def test_execute_route_struct_injection(app: MereApp) -> None:
     match = app.router.find("POST", "/items")
     tenant = app.tenant_resolver.context_for("acme")
     request = Request(
@@ -1007,7 +1007,7 @@ async def test_execute_route_struct_injection(app: ArtemisApp) -> None:
 
 
 @pytest.mark.asyncio
-async def test_double_struct_reuse(app: ArtemisApp) -> None:
+async def test_double_struct_reuse(app: MereApp) -> None:
     async with TestClient(app) as client:
         response = await client.post("/double", tenant="acme", json={"name": "Mirror"})
     payload = json_decode(response.body)
@@ -1016,7 +1016,7 @@ async def test_double_struct_reuse(app: ArtemisApp) -> None:
 
 @pytest.mark.asyncio
 async def test_execute_route_missing_dependency_error() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/needs")
     def needs(missing: MissingDependency):  # type: ignore[no-untyped-def]
@@ -1032,7 +1032,7 @@ async def test_execute_route_missing_dependency_error() -> None:
 
 @pytest.mark.asyncio
 async def test_execute_route_coroutine_direct() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/async-call")
     def async_call():  # type: ignore[no-untyped-def]
@@ -1049,13 +1049,13 @@ async def test_execute_route_coroutine_direct() -> None:
     assert response.body == b"async"
 
 
-def _app_with_database() -> tuple[ArtemisApp, Database, ORM]:
+def _app_with_database() -> tuple[MereApp, Database, ORM]:
     connection = FakeConnection()
     pool = FakePool(connection)
     config = DatabaseConfig(pool=PoolConfig(dsn="postgres://demo"), tenant_schema_template="tenant_{tenant}")
     database = Database(config, pool=pool)
     orm = ORM(database)
-    app = ArtemisApp(AppConfig(database=config, allowed_tenants=("acme",)), database=database, orm=orm)
+    app = MereApp(AppConfig(database=config, allowed_tenants=("acme",)), database=database, orm=orm)
     return app, database, orm
 
 
@@ -1064,7 +1064,7 @@ def test_application_reuses_existing_audit_trail() -> None:
     audit = AuditTrail(database, registry=orm.registry)
     orm.attach_audit_trail(audit)
 
-    reused = ArtemisApp(AppConfig(database=database.config, allowed_tenants=("acme",)), database=database, orm=orm)
+    reused = MereApp(AppConfig(database=database.config, allowed_tenants=("acme",)), database=database, orm=orm)
     assert reused.audit_trail is audit
 
 
@@ -1075,7 +1075,7 @@ def test_application_initializes_audit_trail_when_missing() -> None:
 
 
 def test_application_without_database_has_no_audit_trail() -> None:
-    app = ArtemisApp(AppConfig())
+    app = MereApp(AppConfig())
     assert app.audit_trail is None
 
 
@@ -1085,8 +1085,8 @@ def test_application_handles_missing_orm(monkeypatch: pytest.MonkeyPatch) -> Non
     config = DatabaseConfig(pool=PoolConfig(dsn="postgres://demo"), tenant_schema_template="tenant_{tenant}")
     database = Database(config, pool=pool)
 
-    monkeypatch.setattr("artemis.application.ORM", lambda _: None)
-    app = ArtemisApp(AppConfig(database=config, allowed_tenants=("acme",)), database=database)
+    monkeypatch.setattr("mere.application.ORM", lambda _: None)
+    app = MereApp(AppConfig(database=config, allowed_tenants=("acme",)), database=database)
     assert app.orm is None
     assert app.audit_trail is not None
 
@@ -1102,7 +1102,7 @@ async def test_dispatch_binds_audit_actor_from_principal(monkeypatch: pytest.Mon
             if header_user:
                 self.with_principal(CedarEntity(type="User", id=header_user))
 
-    monkeypatch.setattr("artemis.application.Request", AutoPrincipalRequest)
+    monkeypatch.setattr("mere.application.Request", AutoPrincipalRequest)
 
     @app.get("/actor")
     async def actor_endpoint() -> dict[str, str | None]:

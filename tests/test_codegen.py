@@ -2,8 +2,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import artemis.codegen as ts_codegen
-from artemis.codegen import generate_typescript_client
+import mere.codegen as ts_codegen
+from mere.codegen import generate_typescript_client
 
 
 def _build_spec() -> dict[str, Any]:
@@ -131,7 +131,7 @@ def test_generate_client_without_components() -> None:
         }
     }
     source = generate_typescript_client(spec)
-    assert "export class ArtemisClient" in source
+    assert "export class MereClient" in source
     assert "async ping(input: PingGetInput): Promise<PingGetOutput> {" in source
     assert "pingSuspense(input: PingGetInput): SuspenseResource<PingGetOutput> {" in source
 

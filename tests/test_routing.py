@@ -5,8 +5,8 @@ from typing import Any, Callable, cast
 
 import pytest
 
-import artemis.routing as routing
-from artemis.routing import RouteGuard, RouteMatch, Router, get, post, route
+import mere.routing as routing
+from mere.routing import RouteGuard, RouteMatch, Router, get, post, route
 
 
 @pytest.mark.asyncio
@@ -71,7 +71,7 @@ def test_route_decorator_accepts_guard_sequences() -> None:
     async def handler() -> None:
         return None
 
-    spec = getattr(handler, "__artemis_route__")
+    spec = getattr(handler, "__mere_route__")
     assert spec.guards == (guard_a, guard_b)
 
 
@@ -82,7 +82,7 @@ def test_route_decorator_single_guard() -> None:
     async def handler() -> None:
         return None
 
-    spec = getattr(handler, "__artemis_route__")
+    spec = getattr(handler, "__mere_route__")
     assert spec.guards == (guard,)
 
 
@@ -232,7 +232,7 @@ async def test_post_decorator_metadata() -> None:
     async def submit() -> str:
         return "ok"
 
-    spec = getattr(submit, "__artemis_route__")
+    spec = getattr(submit, "__mere_route__")
     assert spec.methods == ("POST",)
 
 

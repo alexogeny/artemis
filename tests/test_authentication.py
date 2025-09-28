@@ -12,9 +12,9 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.x509.oid import NameOID
 
-import artemis.authentication as authentication_module
 import lxml.etree as LET
-from artemis.authentication import (
+import mere.authentication as authentication_module
+from mere.authentication import (
     AuthenticationError,
     AuthenticationRateLimiter,
     AuthenticationService,
@@ -28,9 +28,9 @@ from artemis.authentication import (
     compose_admin_secret,
     compose_tenant_secret,
 )
-from artemis.database import SecretRef
-from artemis.id57 import generate_id57
-from artemis.models import (
+from mere.database import SecretRef
+from mere.id57 import generate_id57
+from mere.models import (
     AdminUser,
     AppSecret,
     Customer,

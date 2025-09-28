@@ -1,16 +1,16 @@
-# artemis
+# Mere
 
 ## Developer quickstart
 
-`attach_quickstart` wires production-grade authentication and tenancy scaffolding for a multi-tenant Artemis
+`attach_quickstart` wires production-grade authentication and tenancy scaffolding for a multi-tenant Mere
 deployment in a few lines of code. The helper defaults to development/staging domains so the sample tenants
 (`acme`, `beta`) stay out of production, but the login engine and routes it exposes are the same ones you would
 run for real customers. When enabled it provides:
 
-* **Diagnostics:** `/__artemis/ping`, OpenAPI JSON, and a generated TypeScript client that all resolve for
+* **Diagnostics:** `/__mere/ping`, OpenAPI JSON, and a generated TypeScript client that all resolve for
   every tenant host (`*.site.domain`), including the admin control plane (`admin.site.domain`).
 * **Authentication flows:** fully tenant-aware login endpoints that model SSO, passkey, password, and MFA
-  hops for both customer tenants and the admin realm—the same orchestration used in production Artemis
+  hops for both customer tenants and the admin realm—the same orchestration used in production Mere
   deployments. The default configuration ships with:
   * `acme.<site>.<domain>` → SAML SSO metadata wired for Okta.
   * `beta.<site>.<domain>` → passkey-first flow with password fallback plus TOTP-style MFA.
@@ -25,7 +25,7 @@ run for real customers. When enabled it provides:
 
 ### Endpoints
 
-All routes live under `/__artemis` by default (configurable via `base_path`).
+All routes live under `/__mere` by default (configurable via `base_path`).
 
 | Method | Path                          | Description                                      |
 | ------ | ----------------------------- | ------------------------------------------------ |
@@ -36,6 +36,12 @@ All routes live under `/__artemis` by default (configurable via `base_path`).
 | POST   | `/auth/login/passkey`         | Complete a passkey assertion.                    |
 | POST   | `/auth/login/password`        | Submit a password (handles passkey fallbacks).   |
 | POST   | `/auth/login/mfa`             | Finish MFA challenges and receive a reference session.|
+
+### Documentation
+
+The documentation lives in the [`docs/`](docs/) directory and is rendered with MkDocs using the
+`mkdocs-shadcn` theme. Preview changes locally with `uv run mkdocs serve` and publish to GitHub Pages
+via `uv run mkdocs gh-deploy --force`.
 
 ### Database bootstrap
 
@@ -57,11 +63,11 @@ config = await repository.load()
 
 Pass a `QuickstartAuthConfig` into `attach_quickstart` to model your own tenants, users, and credentials.
 When a database is attached the seeder writes those identities into the quickstart tables so you can iterate
-with realistic storage. Construct `ArtemisApp` with a `Database`/`ORM` to persist the data, or omit them to stay
+with realistic storage. Construct `MereApp` with a `Database`/`ORM` to persist the data, or omit them to stay
 purely in-memory. You can also point `attach_quickstart` at configuration stored in environment variables:
 
-* `ARTEMIS_QUICKSTART_AUTH` — JSON payload matching `QuickstartAuthConfig`.
-* `ARTEMIS_QUICKSTART_AUTH_FILE` — path to a JSON file containing the same payload.
+* `MERE_QUICKSTART_AUTH` — JSON payload matching `QuickstartAuthConfig`.
+* `MERE_QUICKSTART_AUTH_FILE` — path to a JSON file containing the same payload.
 
 Both inputs support secrets mounted from your secret manager; the loader resolves `_FILE` first so you can
 mount them as one-off files.
@@ -69,8 +75,8 @@ mount them as one-off files.
 Example using inline configuration:
 
 ```python
-from artemis import AppConfig, ArtemisApp
-from artemis.quickstart import (
+from mere import AppConfig, MereApp
+from mere.quickstart import (
     DEFAULT_QUICKSTART_AUTH,
     QuickstartAuthConfig,
     QuickstartPasskey,
@@ -79,7 +85,7 @@ from artemis.quickstart import (
     attach_quickstart,
 )
 
-app = ArtemisApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme",)))
+app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme",)))
 
 auth_config = QuickstartAuthConfig(
     tenants=(
@@ -105,14 +111,14 @@ attach_quickstart(app, auth_config=auth_config)
 
 ### SAML provider configuration
 
-Artemis validates SAML assertions by honoring both the `<Conditions>` and `<SubjectConfirmationData>`
+Mere validates SAML assertions by honoring both the `<Conditions>` and `<SubjectConfirmationData>`
 timestamps inside each assertion. Providers can tune that behavior on `TenantSamlProvider`:
 
 * `clock_skew_seconds` (default: 120) expands the acceptance window on both sides when comparing the
   `NotBefore` and `NotOnOrAfter` attributes. Increase this value when your identity provider's clock runs
   slightly ahead or behind your cluster to avoid spurious `assertion_not_yet_valid` or `assertion_expired`
   errors.
-* `allowed_audiences` enumerates the `<Audience>` values that Artemis will accept. When populated, at least
+* `allowed_audiences` enumerates the `<Audience>` values that Mere will accept. When populated, at least
   one audience in the assertion must match the configured list, otherwise validation fails with
   `invalid_audience`. Leave the list empty to accept any audience from the identity provider.
 

@@ -7,14 +7,14 @@ from typing import Any, Iterable, cast
 import pytest
 from msgspec import Struct, structs
 
-from artemis.domain.quickstart_services import (
+from mere.domain.quickstart_services import (
     QuickstartAuditService,
     QuickstartDelegationService,
     QuickstartRbacService,
     QuickstartTileService,
     build_cedar_engine,
 )
-from artemis.domain.services import (
+from mere.domain.services import (
     AuditLogExportQuery,
     DelegationGrant,
     PermissionSetCreate,
@@ -23,8 +23,8 @@ from artemis.domain.services import (
     TilePermissions,
     TileUpdate,
 )
-from artemis.exceptions import HTTPError
-from artemis.models import (
+from mere.exceptions import HTTPError
+from mere.models import (
     DashboardTile,
     DashboardTilePermission,
     Permission,
@@ -33,12 +33,12 @@ from artemis.models import (
     WorkspacePermissionSet,
     WorkspaceRoleAssignment,
 )
-from artemis.rbac import CedarEntity, CedarReference
-from artemis.tenancy import TenantContext, TenantScope
+from mere.rbac import CedarEntity, CedarReference
+from mere.tenancy import TenantContext, TenantScope
 
 
 class InMemoryTable:
-    """Very small in-memory stand-in for :mod:`artemis.orm` model managers."""
+    """Very small in-memory stand-in for :mod:`mere.orm` model managers."""
 
     def __init__(self, model_type: type[Any]) -> None:
         self._model_type = model_type

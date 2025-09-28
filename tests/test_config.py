@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from artemis.config import AppConfig
+from mere.config import AppConfig
 
 
 def test_tenant_host_variants() -> None:

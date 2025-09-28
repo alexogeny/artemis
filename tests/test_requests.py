@@ -5,12 +5,12 @@ import asyncio
 import msgspec
 import pytest
 
-from artemis.audit import audit_context, current_actor
-from artemis.exceptions import HTTPError
-from artemis.rbac import CedarEntity
-from artemis.requests import _MAX_QUERY_PARAMS, Request
-from artemis.serialization import json_encode
-from artemis.tenancy import TenantContext, TenantScope
+from mere.audit import audit_context, current_actor
+from mere.exceptions import HTTPError
+from mere.rbac import CedarEntity
+from mere.requests import _MAX_QUERY_PARAMS, Request
+from mere.serialization import json_encode
+from mere.tenancy import TenantContext, TenantScope
 
 
 class BodyModel(msgspec.Struct):
@@ -62,7 +62,7 @@ def test_request_defers_query_parsing() -> None:
 
 
 def test_request_query_type_hints_cached(monkeypatch: pytest.MonkeyPatch) -> None:
-    import artemis.requests as requests_module
+    import mere.requests as requests_module
 
     requests_module._model_type_hints.cache_clear()
     call_count = 0

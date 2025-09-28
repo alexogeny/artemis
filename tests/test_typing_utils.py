@@ -5,8 +5,8 @@ from typing import Optional
 import msgspec
 import pytest
 
-from artemis.exceptions import HTTPError
-from artemis.typing_utils import convert_primitive
+from mere.exceptions import HTTPError
+from mere.typing_utils import convert_primitive
 
 
 class ExampleStruct(msgspec.Struct):

@@ -1,10 +1,10 @@
 [project]
-name = "artemis"
+name = "mere"
 version = "0.1.0"
-description = "Artemis asynchronous multi-tenant web framework"
+description = "Mere asynchronous multi-tenant web framework"
 readme = "README.md"
 license = { file = "LICENSE" }
-authors = [{ name = "Artemis Team" }]
+authors = [{ name = "Mere Team" }]
 requires-python = ">=3.11"
 dependencies = [
     "granian>=1.5.0",
@@ -22,8 +22,8 @@ dependencies = [
 ]
 
 [project.scripts]
-artemis = "artemis.cli:main"
-quality = "artemis.cli:quality"
+mere = "mere.cli:main"
+quality = "mere.cli:quality"
 
 [tool.uv]
 managed = true
@@ -35,17 +35,20 @@ dev-dependencies = [
     "pytest-cov>=4.1",
     "ruff>=0.3",
     "ty>=0.0.1a21",
+    "mkdocs>=1.5",
+    "mkdocs-shadcn>=0.9.5",
+    "mkdocstrings[python]>=0.24",
 ]
 
 [tool.uv.sources]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"
-addopts = "--strict-config --strict-markers --cov=artemis --cov-report=term-missing --cov-fail-under=100"
+addopts = "--strict-config --strict-markers --cov=mere --cov-report=term-missing --cov-fail-under=100"
 
 [tool.coverage.run]
 branch = true
-source = ["artemis"]
+source = ["mere"]
 
 [tool.coverage.report]
 precision = 2

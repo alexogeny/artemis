@@ -6,19 +6,19 @@ from collections.abc import Mapping
 
 import pytest
 
-from artemis.application import ArtemisApp, _send_response_body
-from artemis.config import AppConfig
-from artemis.events import EventStream, ServerSentEvent
-from artemis.events import _ensure_awaitable as _ensure_event_awaitable
-from artemis.events import _log_task_error as _log_event_task_error
-from artemis.execution import ExecutionMode
-from artemis.requests import Request
-from artemis.responses import Response
+from mere.application import MereApp, _send_response_body
+from mere.config import AppConfig
+from mere.events import EventStream, ServerSentEvent
+from mere.events import _ensure_awaitable as _ensure_event_awaitable
+from mere.events import _log_task_error as _log_event_task_error
+from mere.execution import ExecutionMode
+from mere.requests import Request
+from mere.responses import Response
 
 
 @pytest.mark.asyncio
 async def test_event_stream_emits_across_tenants() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.sse("/events/{name}")
     async def events(name: str, stream: EventStream, request: Request) -> EventStream:
@@ -62,7 +62,7 @@ async def test_event_stream_emits_across_tenants() -> None:
 
 @pytest.mark.asyncio
 async def test_event_stream_background_executor() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/batch")
     async def batch(stream: EventStream) -> EventStream:
@@ -92,7 +92,7 @@ async def test_event_stream_background_executor() -> None:
 
 @pytest.mark.asyncio
 async def test_event_stream_auto_return_on_none() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/auto")
     async def auto(stream: EventStream) -> None:
@@ -199,7 +199,7 @@ async def test_event_stream_background_cancellation() -> None:
 
 @pytest.mark.asyncio
 async def test_event_stream_multiple_stream_parameters_error() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/multi")
     async def multi(first: EventStream, second: EventStream) -> None:
@@ -215,7 +215,7 @@ async def test_event_stream_multiple_stream_parameters_error() -> None:
 
 @pytest.mark.asyncio
 async def test_event_stream_empty_stream_asgi() -> None:
-    app = ArtemisApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
 
     @app.get("/empty")
     async def empty(stream: EventStream) -> EventStream:
