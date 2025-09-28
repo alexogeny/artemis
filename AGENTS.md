@@ -68,6 +68,11 @@ Implement fast, safe, tenant-aware services and tools with a bias toward **Rust-
   * Contract tests for public APIs (inputs/outputs, error models).
   * Performance smoke tests for critical paths.
 * Every new public surface **must** ship with tests.
+* **As part of every PR**, ensure that you've run these four things:
+✅ uv run ruff format
+✅ uv run ruff check
+✅ uv run ty check
+✅ uv run pytest
 
 ---
 
@@ -99,5 +104,10 @@ Implement fast, safe, tenant-aware services and tools with a bias toward **Rust-
 * Readable code, 120-char lines, ruff-clean, ty-clean.
 * Tests on PR with \~100% coverage and CI green.
 * Public API is declarative, typed, and documented with examples.
+* **As part of every PR**, ensure that you've run these four things:
+✅ uv run ruff format
+✅ uv run ruff check
+✅ uv run ty check
+✅ uv run pytest
 
 *Keep it simple. Favor safety, clarity, and throughput.*
