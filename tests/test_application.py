@@ -426,6 +426,7 @@ async def test_asgi_sanitizes_non_utf8_header_bytes() -> None:
                 "query_string": b"",
                 "headers": [
                     (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://acme.demo.example.com"),
                     (b"x-weird", b"\xff\xfe"),
                 ],
             },
@@ -879,6 +880,7 @@ async def test_websocket_scope_sanitizes_headers() -> None:
                 "query_string": b"",
                 "headers": [
                     (b"host", b"acme.demo.example.com"),
+                    (b"origin", b"https://acme.demo.example.com"),
                     (b"x-weird", b"\xff\xfe"),
                 ],
             },

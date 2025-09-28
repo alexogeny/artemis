@@ -19,6 +19,7 @@ class AppConfig(Struct, frozen=True):
     marketing_tenant: str = "public"
     allowed_tenants: tuple[str, ...] = ()
     max_request_body_bytes: int | None = 1_048_576
+    websocket_trusted_origins: tuple[str, ...] = ()
     execution: ExecutionConfig = ExecutionConfig()
     database: DatabaseConfig | None = None
     chatops: ChatOpsConfig = ChatOpsConfig()

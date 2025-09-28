@@ -6,6 +6,7 @@ import inspect
 import os
 from collections.abc import AsyncIterable, AsyncIterator
 from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
+from urllib.parse import urlsplit
 
 import msgspec
 
@@ -609,6 +610,9 @@ class ArtemisApp:
         if not host:
             await send({"type": "websocket.close", "code": 4400})
             return
+        if not self._is_allowed_websocket_origin(host, headers, scope):
+            await send({"type": "websocket.close", "code": 4403})
+            return
         try:
             tenant = self.tenant_resolver.resolve(host)
         except (LookupError, TenantResolutionError):
@@ -681,6 +685,59 @@ class ArtemisApp:
             decoded[name.lower()] = value
         return decoded, had_errors
 
+    def _is_allowed_websocket_origin(
+        self,
+        host: str,
+        headers: Mapping[str, str],
+        scope: Mapping[str, Any],
+    ) -> bool:
+        websocket_scheme = str(scope.get("scheme") or "").lower()
+        allowed_origin_schemes = {"http", "https"}
+        if websocket_scheme in {"ws", "wss"}:
+            allowed_origin_schemes = {"https"} if websocket_scheme == "wss" else {"http"}
+
+        origin_value = headers.get("origin") or headers.get("sec-websocket-origin")
+        if origin_value is None:
+            return False
+        origin_scheme, origin_host, origin_port = _parse_origin_host(origin_value, require_http_scheme=True)
+        if origin_scheme is None or origin_host is None:
+            return False
+        if origin_scheme not in allowed_origin_schemes:
+            return False
+
+        _, expected_host, expected_port = _parse_origin_host(host, require_http_scheme=False)
+        if expected_host is None:
+            return False
+
+        allowed_entries: list[tuple[str, int | None, set[int]]] = []
+        host_defaults = _default_ports_for_scheme(websocket_scheme)
+        allowed_entries.append((expected_host, expected_port, host_defaults))
+        if expected_port is None:
+            for default_port in host_defaults:
+                allowed_entries.append((expected_host, default_port, host_defaults))
+
+        for entry in self.config.websocket_trusted_origins:
+            entry_scheme, entry_host, entry_port = _parse_origin_host(entry, require_http_scheme=False)
+            if entry_host is None:
+                continue
+            defaults = _default_ports_for_scheme(entry_scheme)
+            allowed_entries.append((entry_host, entry_port, defaults))
+            if entry_port is None:
+                for default_port in defaults:
+                    allowed_entries.append((entry_host, default_port, defaults))
+
+        origin_defaults = _default_ports_for_scheme(origin_scheme)
+        for allowed_host, allowed_port, allowed_defaults in allowed_entries:
+            if origin_host != allowed_host:
+                continue
+            if origin_port == allowed_port:
+                return True
+            if origin_port is None and allowed_port in origin_defaults:
+                return True
+            if allowed_port is None and origin_port in allowed_defaults:
+                return True
+        return False
+
     @staticmethod
     def _decode_query_string(raw: object | None) -> str:
         if raw is None:
@@ -712,6 +769,37 @@ def _decode_header_component(component: object) -> tuple[str, bool]:
         except UnicodeDecodeError:  # pragma: no cover - latin-1 decoding should not fail
             return raw.decode("latin-1", errors="replace"), True
     return str(component), True
+
+
+def _parse_origin_host(value: str, *, require_http_scheme: bool) -> tuple[str | None, str | None, int | None]:
+    candidate = value.strip()
+    if not candidate:
+        return None, None, None
+    target = candidate if "://" in candidate else f"//{candidate}"
+    try:
+        parts = urlsplit(target, allow_fragments=False)
+    except ValueError:
+        return None, None, None
+    scheme = parts.scheme.lower() if parts.scheme else None
+    if require_http_scheme and scheme not in {"http", "https"}:
+        return None, None, None
+    host = parts.hostname
+    try:
+        port = parts.port
+    except ValueError:
+        return None, None, None
+    if host is None:
+        return None, None, None
+    return scheme, host.lower(), port
+
+
+def _default_ports_for_scheme(scheme: str | None) -> set[int]:
+    normalized = (scheme or "").lower()
+    if normalized in {"https", "wss"}:
+        return {443}
+    if normalized in {"http", "ws"}:
+        return {80}
+    return {80, 443}
 
 
 def _is_struct(annotation: Any) -> bool:
