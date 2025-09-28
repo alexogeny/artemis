@@ -86,8 +86,10 @@ def test_request_rejects_excessive_query_parameters() -> None:
     request = build_request(query_string="&".join(f"key{index}=value" for index in range(_MAX_QUERY_PARAMS + 1)))
     with pytest.raises(HTTPError) as captured:
         _ = request.query_params
-    assert captured.value.status == 400
-    assert captured.value.detail == {"detail": "too_many_query_parameters"}
+    error = captured.value
+    assert isinstance(error, HTTPError)
+    assert error.status == 400
+    assert error.detail == {"detail": "too_many_query_parameters"}
 
 
 @pytest.mark.asyncio

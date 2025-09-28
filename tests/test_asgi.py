@@ -67,7 +67,7 @@ async def test_asgi_requires_host_header() -> None:
     scope = {"type": "http", "method": "GET", "path": "/ping", "query_string": b"", "headers": []}
     await app(scope, receive, send)
     assert messages[0]["status"] == 400
-    payload = json_decode(messages[-1]["body"])
+    payload = json_decode(cast(bytes, messages[-1]["body"]))
     assert payload["error"]["detail"]["detail"] == "missing_host_header"
 
 
