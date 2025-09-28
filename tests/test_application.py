@@ -160,6 +160,17 @@ async def test_security_headers_present(app: MereApp) -> None:
             assert headers.get(name) == value
 
 
+@pytest.mark.asyncio
+async def test_missing_route_returns_not_found(app: MereApp) -> None:
+    async with TestClient(app) as client:
+        response = await client.get("/missing", tenant="acme")
+        assert response.status == Status.NOT_FOUND
+        payload = json_decode(response.body)
+        assert payload == {
+            "error": {"status": 404, "reason": "Not Found", "detail": {"detail": "route_not_found"}}
+        }
+
+
 def test_security_middleware_ordering() -> None:
     app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
