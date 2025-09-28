@@ -14,6 +14,7 @@ from .database import Database
 from .metadata import PROJECT_NAME
 from .migrations import Migration, MigrationRunner, MigrationScope, generate_schema_migrations
 from .orm import Model
+from .scaffold import BACKBONES, GIT_HOSTS, IAC_PROVIDERS, ProjectOptions, render_project
 from .tenancy import TenantContext
 
 
@@ -79,6 +80,24 @@ def _build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--output", default="tests/test_data.sql", help="Destination file for the SQL snapshot")
     snapshot.add_argument("--skip-admin", action="store_true", help="Skip admin scope data in the snapshot")
     snapshot.set_defaults(func=_cmd_snapshot)
+
+    scaffold = sub.add_parser("new", help="Scaffold a new Mere project")
+    scaffold.add_argument("path", help="Directory for the new project")
+    scaffold.add_argument("--name", help="Project name (defaults to directory name)")
+    scaffold.add_argument("--git-host", choices=GIT_HOSTS, default=GIT_HOSTS[0], help="Target git host")
+    scaffold.add_argument("--iac", choices=IAC_PROVIDERS, default=IAC_PROVIDERS[0], help="Infrastructure as code tool")
+    scaffold.add_argument(
+        "--backbone",
+        choices=BACKBONES,
+        default=BACKBONES[0],
+        help="Cloud backbone provider",
+    )
+    scaffold.add_argument(
+        "--skip-dev-stack",
+        action="store_true",
+        help="Skip generating the local Docker Compose developer stack",
+    )
+    scaffold.set_defaults(func=_cmd_new_project)
 
     return parser
 
@@ -149,6 +168,39 @@ def _cmd_snapshot(args: argparse.Namespace) -> int:
         include_admin = True
     asyncio.run(runner.snapshot_test_data(Path(args.output), tenants=tenants, include_admin=include_admin))
     print(f"wrote {args.output}")
+    return 0
+
+
+def _cmd_new_project(args: argparse.Namespace) -> int:
+    target = Path(args.path).resolve()
+    if target.exists():
+        if target.is_file():
+            raise SystemExit(f"Target {target} is a file")
+        if any(target.iterdir()):
+            raise SystemExit(f"Target directory {target} already exists and is not empty")
+    else:
+        target.mkdir(parents=True, exist_ok=True)
+
+    project_name = args.name or target.name
+    options = ProjectOptions(
+        name=project_name,
+        git_host=args.git_host,
+        iac=args.iac,
+        backbone=args.backbone,
+        include_dev_stack=not args.skip_dev_stack,
+    )
+    summary = render_project(options)
+
+    created = 0
+    for file in summary.files:
+        destination = target / file.path
+        if destination.exists():
+            raise SystemExit(f"Refusing to overwrite existing file {destination}")
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_text(file.content, encoding="utf-8")
+        created += 1
+
+    print(f"Created {created} files in {target}")
     return 0
 
 
