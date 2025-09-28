@@ -18,15 +18,14 @@ from time import monotonic
 from typing import Any, Generic, Protocol, TypeVar
 from xml.etree import ElementTree as ET
 
-from lxml import etree as LET
-
-from msgspec import Struct, structs
-
 from cryptography import x509
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.hazmat.primitives.serialization import load_der_public_key, load_pem_public_key
+from msgspec import Struct, structs
+
+import lxml.etree as LET
 
 try:  # pragma: no cover - optional dependency
     from argonautica import Hasher as ArgonauticaHasher  # type: ignore[import-not-found]
@@ -198,16 +197,8 @@ class AuthenticationRateLimiter:
         removable = [
             key
             for key, state in self._states.items()
-            if (
-                state.locked_until is None
-                and state.last_failure is None
-                and state.failures <= 0
-            )
-            or (
-                state.locked_until is None
-                and state.last_seen is not None
-                and state.last_seen <= stale_cutoff
-            )
+            if (state.locked_until is None and state.last_failure is None and state.failures <= 0)
+            or (state.locked_until is None and state.last_seen is not None and state.last_seen <= stale_cutoff)
         ]
         for key in removable:
             self._states.pop(key, None)
@@ -1328,7 +1319,12 @@ _XML_EXC_C14N_NS = "http://www.w3.org/2001/10/xml-exc-c14n#"
 _XML_ENVELOPED_SIGNATURE_URI = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
 
 
-_DIGEST_ALGORITHMS: dict[str, Callable[[bytes], object]] = {
+class _SupportsDigest(Protocol):
+    def digest(self) -> bytes:
+        """Return the digest of the hashed payload."""
+
+
+_DIGEST_ALGORITHMS: dict[str, Callable[[bytes], _SupportsDigest]] = {
     "http://www.w3.org/2001/04/xmlenc#sha256": hashlib.sha256,
     "http://www.w3.org/2001/04/xmlenc#sha512": hashlib.sha512,
     "http://www.w3.org/2000/09/xmldsig#sha1": hashlib.sha1,
@@ -1345,7 +1341,10 @@ _CANONICALIZATION_ALGORITHMS: dict[str, _CanonicalizationConfig] = {
     "http://www.w3.org/2001/10/xml-exc-c14n#": _CanonicalizationConfig(exclusive=True, with_comments=False),
     "http://www.w3.org/2001/10/xml-exc-c14n#WithComments": _CanonicalizationConfig(exclusive=True, with_comments=True),
     "http://www.w3.org/TR/2001/REC-xml-c14n-20010315": _CanonicalizationConfig(exclusive=False, with_comments=False),
-    "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments": _CanonicalizationConfig(exclusive=False, with_comments=True),
+    "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments": _CanonicalizationConfig(
+        exclusive=False,
+        with_comments=True,
+    ),
     "http://www.w3.org/2006/12/xml-c14n11": _CanonicalizationConfig(exclusive=False, with_comments=False),
     "http://www.w3.org/2006/12/xml-c14n11#WithComments": _CanonicalizationConfig(exclusive=False, with_comments=True),
 }
@@ -1389,7 +1388,7 @@ def _verify_reference_digests(document: LET._Element, signed_info: LET._Element)
     if not references:
         raise AuthenticationError("invalid_signature")
     for reference in references:
-        uri = reference.get("URI", "")
+        uri = reference.get("URI") or ""
         target = _resolve_reference(document, uri)
         transformed = _apply_reference_transforms(target, reference)
         digest_method = reference.find(f"{{{_XMLDSIG_NS}}}DigestMethod")
@@ -1437,7 +1436,9 @@ def _apply_reference_transforms(target: LET._Element, reference: LET._Element) -
         transforms_parent = reference.find("Transforms")
     data: bytes | LET._Element = _clone_element(target)
     if transforms_parent is not None:
-        transforms = list(transforms_parent.findall(f"{{{_XMLDSIG_NS}}}Transform")) or list(transforms_parent.findall("Transform"))
+        transforms = list(transforms_parent.findall(f"{{{_XMLDSIG_NS}}}Transform")) or list(
+            transforms_parent.findall("Transform")
+        )
         for transform in transforms:
             algorithm = transform.get("Algorithm") or ""
             if algorithm == _XML_ENVELOPED_SIGNATURE_URI:
@@ -1485,7 +1486,8 @@ def _inclusive_namespace_prefixes(element: LET._Element) -> tuple[str, ...]:
         node = element.find("InclusiveNamespaces")
     if node is None:
         return ()
-    prefix_list = node.get("PrefixList", "").split()
+    prefix_text = node.get("PrefixList") or ""
+    prefix_list = prefix_text.split()
     return tuple(prefix_list)
 
 

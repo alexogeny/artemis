@@ -9,11 +9,11 @@ from typing import Callable, Iterable
 import pytest
 from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, padding, rsa
+from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.x509.oid import NameOID
-from lxml import etree as LET
 
 import artemis.authentication as authentication_module
+import lxml.etree as LET
 from artemis.authentication import (
     AuthenticationError,
     AuthenticationRateLimiter,
@@ -27,7 +27,7 @@ from artemis.authentication import (
     SamlAuthenticator,
     compose_admin_secret,
     compose_tenant_secret,
-) 
+)
 from artemis.database import SecretRef
 from artemis.id57 import generate_id57
 from artemis.models import (
@@ -45,6 +45,8 @@ from artemis.models import (
     TenantUser,
 )
 from tests.support import StaticSecretResolver
+
+_SigningKey = rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey | ed448.Ed448PrivateKey
 
 
 def _b64url(data: bytes) -> str:
@@ -237,17 +239,17 @@ def _mutate_assertion_xml(assertion: str, mutator: Callable[[LET._Element], None
     return LET.tostring(document, encoding="unicode")
 
 
-def _sign_payload(key: object, payload: bytes) -> bytes:
+def _sign_payload(key: _SigningKey, payload: bytes) -> bytes:
     if isinstance(key, rsa.RSAPrivateKey):
         return key.sign(payload, padding.PKCS1v15(), hashes.SHA256())
     if isinstance(key, ec.EllipticCurvePrivateKey):
         return key.sign(payload, ec.ECDSA(hashes.SHA256()))
-    if isinstance(key, ed25519.Ed25519PrivateKey | ed448.Ed448PrivateKey):
+    if isinstance(key, (ed25519.Ed25519PrivateKey, ed448.Ed448PrivateKey)):
         return key.sign(payload)
     raise AssertionError(f"Unsupported signing key type: {type(key)!r}")
 
 
-def _signature_algorithm_uri_for_key(key: object) -> str:
+def _signature_algorithm_uri_for_key(key: _SigningKey) -> str:
     if isinstance(key, rsa.RSAPrivateKey):
         return _RSA_SHA256
     if isinstance(key, ec.EllipticCurvePrivateKey):
@@ -2012,9 +2014,12 @@ def test_saml_authenticator_requires_signature_element_in_payload() -> None:
         body="<Subject><NameID>{subject}</NameID></Subject>",
         subject="user@example.com",
     )
+
     def remove_signature_element(root: LET._Element) -> None:
         signature_node = root.xpath(".//*[local-name()='Signature']")[0]
-        signature_node.getparent().remove(signature_node)
+        parent = signature_node.getparent()
+        assert parent is not None
+        parent.remove(signature_node)
 
     invalid = _mutate_assertion_xml(assertion, remove_signature_element)
     with pytest.raises(AuthenticationError) as exc:
@@ -2389,7 +2394,7 @@ def test_saml_authenticator_rejects_unknown_signature_algorithm() -> None:
 
 def test_apply_reference_transforms_processes_transforms() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, certificate = _generate_saml_signing_material(now)
+    signing_key, _certificate = _generate_saml_signing_material(now)
     assertion = _render_signed_assertion(
         signing_key,
         body="<Subject><NameID>{subject}</NameID></Subject>",
@@ -2404,8 +2409,7 @@ def test_apply_reference_transforms_processes_transforms() -> None:
 
 def test_canonicalize_signed_info_requires_algorithm() -> None:
     signed_info = LET.fromstring(
-        "<SignedInfo xmlns='http://www.w3.org/2000/09/xmldsig#'>"
-        "<CanonicalizationMethod/></SignedInfo>"
+        "<SignedInfo xmlns='http://www.w3.org/2000/09/xmldsig#'><CanonicalizationMethod/></SignedInfo>"
     )
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._canonicalize_signed_info(signed_info)
@@ -2414,7 +2418,7 @@ def test_canonicalize_signed_info_requires_algorithm() -> None:
 
 def test_apply_reference_transforms_without_transforms_returns_c14n() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, certificate = _generate_saml_signing_material(now)
+    signing_key, _certificate = _generate_saml_signing_material(now)
     assertion = _render_signed_assertion(
         signing_key,
         body="<Subject><NameID>{subject}</NameID></Subject>",
@@ -2437,11 +2441,7 @@ def test_apply_reference_transforms_without_transforms_returns_c14n() -> None:
 
 def test_apply_reference_transforms_converts_bytes_before_stripping() -> None:
     document = LET.fromstring(
-        "<Wrapper>"
-        "<Signature xmlns='http://www.w3.org/2000/09/xmldsig#'>"
-        "<SignedInfo></SignedInfo>"
-        "</Signature>"
-        "</Wrapper>"
+        "<Wrapper><Signature xmlns='http://www.w3.org/2000/09/xmldsig#'><SignedInfo></SignedInfo></Signature></Wrapper>"
     )
     reference = LET.fromstring(
         "<Reference xmlns='http://www.w3.org/2000/09/xmldsig#'>"
@@ -2467,7 +2467,7 @@ def test_inclusive_namespace_prefixes_parses_prefix_list() -> None:
 
 def test_resolve_reference_with_empty_uri_returns_clone() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, certificate = _generate_saml_signing_material(now)
+    signing_key, _certificate = _generate_saml_signing_material(now)
     assertion = _render_signed_assertion(
         signing_key,
         body="<Subject><NameID>{subject}</NameID></Subject>",
@@ -2500,7 +2500,7 @@ def test_saml_authenticator_rejects_empty_canonicalization_algorithm() -> None:
 
 def test_apply_reference_transforms_handles_reordered_transforms() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, certificate = _generate_saml_signing_material(now)
+    signing_key, _certificate = _generate_saml_signing_material(now)
     assertion = _render_signed_assertion(
         signing_key,
         body="<Subject><NameID>{subject}</NameID></Subject>",
@@ -2521,7 +2521,7 @@ def test_apply_reference_transforms_handles_reordered_transforms() -> None:
 
 def test_strip_signatures_removes_nodes() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, certificate = _generate_saml_signing_material(now)
+    signing_key, _certificate = _generate_saml_signing_material(now)
     assertion = _render_signed_assertion(
         signing_key,
         body="<Subject><NameID>{subject}</NameID></Subject>",
@@ -2578,7 +2578,7 @@ def test_saml_authenticator_accepts_der_certificate() -> None:
 
 def test_saml_authenticator_accepts_public_key_material() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, pem_certificate = _generate_rsa_signing_material(now)
+    signing_key, _pem_certificate = _generate_rsa_signing_material(now)
     public_key = signing_key.public_key()
     public_pem = public_key.public_bytes(
         serialization.Encoding.PEM,
@@ -2598,7 +2598,7 @@ def test_saml_authenticator_accepts_public_key_material() -> None:
 
 def test_saml_authenticator_accepts_der_public_key() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    signing_key, pem_certificate = _generate_rsa_signing_material(now)
+    signing_key, _pem_certificate = _generate_rsa_signing_material(now)
     public_key = signing_key.public_key()
     der_key = public_key.public_bytes(
         serialization.Encoding.DER,
@@ -2842,7 +2842,8 @@ def test_saml_authenticator_rejects_future_subject_confirmation() -> None:
             "<Subject>"
             "<NameID>{subject}</NameID>"
             "<SubjectConfirmation>"
-            "<SubjectConfirmationData NotBefore='{confirmation_not_before}' NotOnOrAfter='{conditions_not_on_or_after}'/>"
+            "<SubjectConfirmationData NotBefore='{confirmation_not_before}' "
+            "NotOnOrAfter='{conditions_not_on_or_after}'/>"
             "</SubjectConfirmation>"
             "</Subject>"
             "<Conditions NotBefore='{conditions_not_before}' NotOnOrAfter='{conditions_not_on_or_after}'></Conditions>"
