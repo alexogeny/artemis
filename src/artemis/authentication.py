@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
-import copy
 import datetime as dt
 import hashlib
 import hmac
@@ -18,6 +17,8 @@ from hashlib import sha256
 from time import monotonic
 from typing import Any, Generic, Protocol, TypeVar
 from xml.etree import ElementTree as ET
+
+from lxml import etree as LET
 
 from msgspec import Struct, structs
 
@@ -1208,10 +1209,10 @@ class SamlAuthenticator:
         subject = tree.findtext(".//saml2:Subject/saml2:NameID", namespaces=ns)
         if not subject:
             raise AuthenticationError("missing_subject")
-        signature = tree.findtext(".//saml2:SignatureValue", namespaces=ns) or tree.findtext(".//SignatureValue")
-        if not signature:
+        signature_value = tree.findtext(".//{*}SignatureValue")
+        if not signature_value or not signature_value.strip():
             raise AuthenticationError("missing_signature")
-        self._verify_signature(tree, signature)
+        self._verify_signature(assertion)
         now = now or dt.datetime.now(dt.timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=dt.timezone.utc)
@@ -1267,23 +1268,32 @@ class SamlAuthenticator:
                 attributes[mapped] = value
         return {"subject": subject, "attributes": attributes}
 
-    def _verify_signature(self, tree: ET.Element, signature: str) -> None:
+    def _verify_signature(self, assertion: str) -> None:
         try:
-            decoded = _decode_signature(signature)
+            document = LET.fromstring(assertion.encode())
+        except (TypeError, ValueError, LET.XMLSyntaxError) as exc:
+            raise AuthenticationError("invalid_assertion") from exc
+        signature = document.find(".//{*}Signature")
+        if signature is None:
+            raise AuthenticationError("missing_signature")
+        signed_info = signature.find("{http://www.w3.org/2000/09/xmldsig#}SignedInfo")
+        if signed_info is None:
+            signed_info = signature.find("SignedInfo")
+        if signed_info is None:
+            raise AuthenticationError("invalid_signature")
+        signature_value_text = signature.findtext("{http://www.w3.org/2000/09/xmldsig#}SignatureValue")
+        if not signature_value_text:
+            signature_value_text = signature.findtext("SignatureValue")
+        if not signature_value_text:
+            raise AuthenticationError("invalid_signature")
+        try:
+            signature_bytes = _decode_signature(signature_value_text)
         except ValueError as exc:
             raise AuthenticationError("invalid_signature") from exc
-        payload = _canonicalize_saml_assertion(tree)
-        try:
-            if isinstance(self._public_key, rsa.RSAPublicKey):
-                self._public_key.verify(decoded, payload, padding.PKCS1v15(), hashes.SHA256())
-            elif isinstance(self._public_key, ec.EllipticCurvePublicKey):
-                self._public_key.verify(decoded, payload, ec.ECDSA(hashes.SHA256()))
-            elif isinstance(self._public_key, ed25519.Ed25519PublicKey | ed448.Ed448PublicKey):
-                self._public_key.verify(decoded, payload)
-            else:  # pragma: no cover - unsupported algorithm guard
-                raise AuthenticationError("unsupported_certificate")
-        except InvalidSignature as exc:
-            raise AuthenticationError("invalid_signature") from exc
+        payload = _canonicalize_signed_info(signed_info)
+        _verify_reference_digests(document, signed_info)
+        algorithm = _resolve_signature_algorithm(signed_info)
+        _verify_signature_payload(self._public_key, algorithm, signature_bytes, payload)
 
 
 class FederatedIdentityDirectory:
@@ -1313,19 +1323,205 @@ def _decode_signature(value: str) -> bytes:
     return base64.b64decode(normalized + padding, validate=True)
 
 
-def _canonicalize_saml_assertion(tree: ET.Element) -> bytes:
-    sanitized = copy.deepcopy(tree)
-    for parent in sanitized.iter():
-        for child in list(parent):
-            if _local_name(child.tag) in {"Signature", "SignatureValue"}:
-                parent.remove(child)
-    return ET.tostring(sanitized, encoding="utf-8", method="xml")
+_XMLDSIG_NS = "http://www.w3.org/2000/09/xmldsig#"
+_XML_EXC_C14N_NS = "http://www.w3.org/2001/10/xml-exc-c14n#"
+_XML_ENVELOPED_SIGNATURE_URI = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
 
 
-def _local_name(tag: str) -> str:
-    if "}" in tag:
-        return tag.split("}", 1)[1]
-    return tag
+_DIGEST_ALGORITHMS: dict[str, Callable[[bytes], object]] = {
+    "http://www.w3.org/2001/04/xmlenc#sha256": hashlib.sha256,
+    "http://www.w3.org/2001/04/xmlenc#sha512": hashlib.sha512,
+    "http://www.w3.org/2000/09/xmldsig#sha1": hashlib.sha1,
+}
+
+
+@dataclass(frozen=True)
+class _CanonicalizationConfig:
+    exclusive: bool
+    with_comments: bool
+
+
+_CANONICALIZATION_ALGORITHMS: dict[str, _CanonicalizationConfig] = {
+    "http://www.w3.org/2001/10/xml-exc-c14n#": _CanonicalizationConfig(exclusive=True, with_comments=False),
+    "http://www.w3.org/2001/10/xml-exc-c14n#WithComments": _CanonicalizationConfig(exclusive=True, with_comments=True),
+    "http://www.w3.org/TR/2001/REC-xml-c14n-20010315": _CanonicalizationConfig(exclusive=False, with_comments=False),
+    "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments": _CanonicalizationConfig(exclusive=False, with_comments=True),
+    "http://www.w3.org/2006/12/xml-c14n11": _CanonicalizationConfig(exclusive=False, with_comments=False),
+    "http://www.w3.org/2006/12/xml-c14n11#WithComments": _CanonicalizationConfig(exclusive=False, with_comments=True),
+}
+
+
+_SIGNATURE_VERIFIERS: dict[str, tuple[type[object], Callable[[object, bytes, bytes], None]]] = {
+    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256": (
+        rsa.RSAPublicKey,
+        lambda key, signature, payload: key.verify(signature, payload, padding.PKCS1v15(), hashes.SHA256()),
+    ),
+    "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256": (
+        ec.EllipticCurvePublicKey,
+        lambda key, signature, payload: key.verify(signature, payload, ec.ECDSA(hashes.SHA256())),
+    ),
+    "http://www.w3.org/2001/04/xmldsig-more#ed25519": (
+        ed25519.Ed25519PublicKey,
+        lambda key, signature, payload: key.verify(signature, payload),
+    ),
+    "http://www.w3.org/2001/04/xmldsig-more#ed448": (
+        ed448.Ed448PublicKey,
+        lambda key, signature, payload: key.verify(signature, payload),
+    ),
+}
+
+
+def _canonicalize_signed_info(signed_info: LET._Element) -> bytes:
+    method = signed_info.find(f"{{{_XMLDSIG_NS}}}CanonicalizationMethod")
+    if method is None:
+        method = signed_info.find("CanonicalizationMethod")
+    if method is None:
+        raise AuthenticationError("invalid_signature")
+    algorithm = method.get("Algorithm")
+    if not algorithm:
+        raise AuthenticationError("invalid_signature")
+    prefixes = _inclusive_namespace_prefixes(method)
+    return _canonicalize_element(signed_info, algorithm, prefixes)
+
+
+def _verify_reference_digests(document: LET._Element, signed_info: LET._Element) -> None:
+    references = list(signed_info.findall(f"{{{_XMLDSIG_NS}}}Reference")) or list(signed_info.findall("Reference"))
+    if not references:
+        raise AuthenticationError("invalid_signature")
+    for reference in references:
+        uri = reference.get("URI", "")
+        target = _resolve_reference(document, uri)
+        transformed = _apply_reference_transforms(target, reference)
+        digest_method = reference.find(f"{{{_XMLDSIG_NS}}}DigestMethod")
+        if digest_method is None:
+            digest_method = reference.find("DigestMethod")
+        digest_value = reference.findtext(f"{{{_XMLDSIG_NS}}}DigestValue") or reference.findtext("DigestValue")
+        if digest_method is None or not digest_value:
+            raise AuthenticationError("invalid_signature")
+        algorithm = digest_method.get("Algorithm")
+        if not algorithm:
+            raise AuthenticationError("invalid_signature")
+        expected = _compute_digest(transformed, algorithm)
+        if not hmac.compare_digest(expected, "".join(digest_value.split())):
+            raise AuthenticationError("invalid_signature")
+
+
+def _resolve_signature_algorithm(signed_info: LET._Element) -> str:
+    signature_method = signed_info.find(f"{{{_XMLDSIG_NS}}}SignatureMethod")
+    if signature_method is None:
+        signature_method = signed_info.find("SignatureMethod")
+    if signature_method is None:
+        raise AuthenticationError("invalid_signature")
+    algorithm = signature_method.get("Algorithm")
+    if not algorithm:
+        raise AuthenticationError("invalid_signature")
+    return algorithm
+
+
+def _verify_signature_payload(public_key: object, algorithm: str, signature: bytes, payload: bytes) -> None:
+    verifier_entry = _SIGNATURE_VERIFIERS.get(algorithm)
+    if verifier_entry is None:
+        raise AuthenticationError("invalid_signature")
+    expected_type, verifier = verifier_entry
+    if not isinstance(public_key, expected_type):
+        raise AuthenticationError("invalid_signature")
+    try:
+        verifier(public_key, signature, payload)
+    except InvalidSignature as exc:
+        raise AuthenticationError("invalid_signature") from exc
+
+
+def _apply_reference_transforms(target: LET._Element, reference: LET._Element) -> bytes:
+    transforms_parent = reference.find(f"{{{_XMLDSIG_NS}}}Transforms")
+    if transforms_parent is None:
+        transforms_parent = reference.find("Transforms")
+    data: bytes | LET._Element = _clone_element(target)
+    if transforms_parent is not None:
+        transforms = list(transforms_parent.findall(f"{{{_XMLDSIG_NS}}}Transform")) or list(transforms_parent.findall("Transform"))
+        for transform in transforms:
+            algorithm = transform.get("Algorithm") or ""
+            if algorithm == _XML_ENVELOPED_SIGNATURE_URI:
+                if isinstance(data, bytes):
+                    data = LET.fromstring(data)
+                _strip_signatures(data)
+            elif algorithm in _CANONICALIZATION_ALGORITHMS:
+                config = _CANONICALIZATION_ALGORITHMS[algorithm]
+                element = LET.fromstring(data) if isinstance(data, bytes) else data
+                prefixes = _inclusive_namespace_prefixes(transform)
+                data = LET.tostring(
+                    element,
+                    method="c14n",
+                    exclusive=config.exclusive,
+                    with_comments=config.with_comments,
+                    inclusive_ns_prefixes=list(prefixes) if prefixes else None,
+                )
+            else:  # pragma: no cover - unsupported transform guard
+                raise AuthenticationError("invalid_signature")
+    if isinstance(data, LET._Element):
+        data = LET.tostring(data, method="c14n", exclusive=False, with_comments=False)
+    return data
+
+
+def _canonicalize_element(
+    element: LET._Element,
+    algorithm: str,
+    prefixes: tuple[str, ...] = (),
+) -> bytes:
+    config = _CANONICALIZATION_ALGORITHMS.get(algorithm)
+    if config is None:
+        raise AuthenticationError("invalid_signature")
+    return LET.tostring(
+        element,
+        method="c14n",
+        exclusive=config.exclusive,
+        with_comments=config.with_comments,
+        inclusive_ns_prefixes=list(prefixes) if prefixes else None,
+    )
+
+
+def _inclusive_namespace_prefixes(element: LET._Element) -> tuple[str, ...]:
+    node = element.find(f"{{{_XML_EXC_C14N_NS}}}InclusiveNamespaces")
+    if node is None:
+        node = element.find("InclusiveNamespaces")
+    if node is None:
+        return ()
+    prefix_list = node.get("PrefixList", "").split()
+    return tuple(prefix_list)
+
+
+def _resolve_reference(document: LET._Element, uri: str) -> LET._Element:
+    if not uri:
+        return _clone_element(document)
+    if uri.startswith("#"):
+        reference_id = uri[1:]
+        matches = document.xpath(
+            "//*[@ID=$id or @Id=$id or @id=$id]",
+            id=reference_id,
+        )
+        if not matches:
+            raise AuthenticationError("invalid_signature")
+        target = matches[0]
+        return _clone_element(target)
+    raise AuthenticationError("invalid_signature")
+
+
+def _clone_element(element: LET._Element) -> LET._Element:
+    return LET.fromstring(LET.tostring(element))
+
+
+def _strip_signatures(element: LET._Element) -> None:
+    for signature in list(element.xpath(".//*[local-name()='Signature']")):
+        parent = signature.getparent()
+        if parent is not None:
+            parent.remove(signature)
+
+
+def _compute_digest(data: bytes, algorithm: str) -> str:
+    factory = _DIGEST_ALGORITHMS.get(algorithm)
+    if factory is None:
+        raise AuthenticationError("invalid_signature")
+    digest = factory(data).digest()
+    return base64.b64encode(digest).decode()
 
 
 def _load_public_key_from_certificate(certificate: str):
