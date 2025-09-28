@@ -359,6 +359,68 @@ async def test_staticfiles_direct_behaviors(tmp_path) -> None:
         await executor.shutdown()
 
 
+@pytest.mark.asyncio
+async def test_staticfiles_streams_large_assets(tmp_path) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    blob = assets / "large.txt"
+    blob.write_text("x" * 2048, encoding="utf-8")
+
+    executor = TaskExecutor()
+    server = StaticFiles(directory=assets, executor=executor, max_in_memory_bytes=0)
+    try:
+        response = await server.serve(
+            "large.txt",
+            method="GET",
+            headers={"accept-encoding": "gzip"},
+        )
+        assert response.body == b""
+        assert response.stream is not None
+        collected = bytearray()
+        async for chunk in response.stream:
+            collected.extend(chunk)
+        headers = dict(response.headers)
+        assert "content-encoding" not in headers
+        assert collected == blob.read_bytes()
+    finally:
+        await executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_staticfiles_non_cacheable_helpers(tmp_path) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    blob = assets / "item.bin"
+    blob.write_bytes(b"data")
+
+    executor = TaskExecutor()
+    server = StaticFiles(directory=assets, executor=executor, max_in_memory_bytes=0)
+    try:
+        target, metadata = await server._locate("item.bin")
+        entry = server._cached_asset(target, metadata)
+        raw = await server._ensure_raw(entry, target)
+        assert raw == blob.read_bytes()
+        with pytest.raises(RuntimeError):
+            await server._ensure_compressed(entry, target, "gzip", _gzip_compress)
+    finally:
+        await executor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_staticfiles_stream_bubbles_reader_errors(tmp_path) -> None:
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    executor = TaskExecutor()
+    server = StaticFiles(directory=assets, executor=executor)
+    try:
+        stream = server._stream_file(assets / "missing.bin")
+        with pytest.raises(FileNotFoundError):
+            async for _ in stream:
+                pass
+    finally:
+        await executor.shutdown()
+
+
 def test_static_available_compressors_handles_missing(monkeypatch) -> None:
     from artemis import static as static_module
 

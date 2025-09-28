@@ -88,7 +88,9 @@ class TenantResolver:
             tenant = hostname[: -len(suffix)]
             if "." in tenant:
                 raise TenantResolutionError(f"Ambiguous tenant hostname: {host}")
-            if self.allowed_tenants and tenant not in self.allowed_tenants:
+            if not self.allowed_tenants:
+                raise TenantResolutionError("No tenant hosts are configured")
+            if tenant not in self.allowed_tenants:
                 raise TenantResolutionError(f"Unknown tenant '{tenant}' for host {host}")
             return TenantContext(tenant=tenant, site=self.site, domain=self.domain, scope=TenantScope.TENANT)
         raise TenantResolutionError(f"Host {host} is not served by {expected_suffix}")
@@ -97,6 +99,11 @@ class TenantResolver:
         resolved_scope = scope or (TenantScope.ADMIN if tenant == self.admin_subdomain else TenantScope.TENANT)
         if resolved_scope is TenantScope.PUBLIC:
             tenant = self.marketing_tenant
+        if resolved_scope is TenantScope.TENANT:
+            if not self.allowed_tenants:
+                raise TenantResolutionError("No tenant hosts are configured")
+            if tenant not in self.allowed_tenants:
+                raise TenantResolutionError(f"Unknown tenant '{tenant}'")
         return TenantContext(tenant=tenant, site=self.site, domain=self.domain, scope=resolved_scope)
 
 

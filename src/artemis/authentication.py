@@ -18,7 +18,15 @@ from time import monotonic
 from typing import Any, Generic, Protocol, TypeVar
 from xml.etree import ElementTree as ET
 
+from lxml import etree as LET
+
 from msgspec import Struct, structs
+
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, padding, rsa
+from cryptography.hazmat.primitives.serialization import load_der_public_key, load_pem_public_key
 
 try:  # pragma: no cover - optional dependency
     from argonautica import Hasher as ArgonauticaHasher  # type: ignore[import-not-found]
@@ -100,6 +108,7 @@ class _RateLimitState:
     failures: int = 0
     last_failure: dt.datetime | None = None
     locked_until: dt.datetime | None = None
+    last_seen: dt.datetime | None = None
 
 
 class AuthenticationRateLimiter:
@@ -113,12 +122,14 @@ class AuthenticationRateLimiter:
         lockout_period: dt.timedelta = dt.timedelta(minutes=15),
         base_cooldown: dt.timedelta = dt.timedelta(seconds=1),
         max_cooldown: dt.timedelta = dt.timedelta(seconds=30),
+        max_entries: int = 1024,
     ) -> None:
         self.max_attempts = max_attempts
         self.window = window
         self.lockout_period = lockout_period
         self.base_cooldown = base_cooldown
         self.max_cooldown = max_cooldown
+        self.max_entries = max(1, max_entries)
         self._states: dict[str, _RateLimitState] = {}
         self._lock = asyncio.Lock()
 
@@ -126,14 +137,17 @@ class AuthenticationRateLimiter:
         """Ensure ``keys`` are allowed to attempt authentication."""
 
         async with self._lock:
+            self._prune(now)
             for key in keys:
                 state = self._states.get(key)
                 if state is None:
                     continue
-                self._refresh_state(state, now)
+                state.last_seen = now
+                if self._refresh_state(key, state, now):
+                    continue
                 if state.locked_until is not None and state.locked_until > now:
                     raise AuthenticationError("account_locked")
-                if state.failures > 0 and state.last_failure is not None:
+                if state.failures > 0 and state.last_failure is not None:  # pragma: no branch - dependent state
                     cooldown = self._cooldown(state.failures)
                     next_allowed = state.last_failure + cooldown
                     if next_allowed > now:
@@ -145,13 +159,17 @@ class AuthenticationRateLimiter:
         async with self._lock:
             for key in keys:
                 state = self._states.setdefault(key, _RateLimitState())
-                self._refresh_state(state, now)
+                state.last_seen = now
+                if self._refresh_state(key, state, now):
+                    state = self._states.setdefault(key, _RateLimitState())
+                    state.last_seen = now
                 state.failures += 1
                 state.last_failure = now
                 if state.failures >= self.max_attempts:
                     state.locked_until = now + self.lockout_period
                     state.failures = 0
                     state.last_failure = None
+            self._prune(now)
 
     async def record_success(self, keys: Iterable[str]) -> None:
         """Reset throttling state after a successful authentication."""
@@ -160,16 +178,48 @@ class AuthenticationRateLimiter:
             for key in keys:
                 self._states.pop(key, None)
 
-    def _refresh_state(self, state: _RateLimitState, now: dt.datetime) -> None:
+    def _refresh_state(self, key: str, state: _RateLimitState, now: dt.datetime) -> bool:
         if state.locked_until is not None and state.locked_until <= now:
             state.locked_until = None
         if state.last_failure is not None and now - state.last_failure >= self.window:
             state.failures = 0
             state.last_failure = None
+        if state.locked_until is None and state.last_failure is None and state.failures <= 0:
+            self._states.pop(key, None)
+            return True
+        return False
 
     def _cooldown(self, failures: int) -> dt.timedelta:
         scaled = self.base_cooldown * (2 ** max(failures - 1, 0))
         return scaled if scaled <= self.max_cooldown else self.max_cooldown
+
+    def _prune(self, now: dt.datetime) -> None:
+        stale_cutoff = now - self.window
+        removable = [
+            key
+            for key, state in self._states.items()
+            if (
+                state.locked_until is None
+                and state.last_failure is None
+                and state.failures <= 0
+            )
+            or (
+                state.locked_until is None
+                and state.last_seen is not None
+                and state.last_seen <= stale_cutoff
+            )
+        ]
+        for key in removable:
+            self._states.pop(key, None)
+        overflow = len(self._states) - self.max_entries
+        if overflow <= 0:
+            return
+        ordered = sorted(
+            self._states.items(),
+            key=lambda item: item[1].last_seen or dt.datetime.min,
+        )
+        for key, _ in ordered[:overflow]:
+            self._states.pop(key, None)
 
 
 class IssuedSessionToken(Struct, frozen=True):
@@ -1145,6 +1195,10 @@ class SamlAuthenticator:
 
     def __init__(self, provider: TenantSamlProvider) -> None:
         self.provider = provider
+        try:
+            self._public_key = _load_public_key_from_certificate(provider.certificate)
+        except ValueError as exc:  # pragma: no cover - defensive guard
+            raise AuthenticationError("invalid_certificate") from exc
 
     def validate(self, assertion: str, *, now: dt.datetime | None = None) -> Mapping[str, Any]:
         try:
@@ -1155,12 +1209,10 @@ class SamlAuthenticator:
         subject = tree.findtext(".//saml2:Subject/saml2:NameID", namespaces=ns)
         if not subject:
             raise AuthenticationError("missing_subject")
-        signature = tree.findtext(".//saml2:SignatureValue", namespaces=ns) or tree.findtext(".//SignatureValue")
-        if not signature:
+        signature_value = tree.findtext(".//{*}SignatureValue")
+        if not signature_value or not signature_value.strip():
             raise AuthenticationError("missing_signature")
-        expected = _b64url_encode(hmac.new(self.provider.certificate.encode(), subject.encode(), sha256).digest())
-        if not hmac.compare_digest(signature, expected):
-            raise AuthenticationError("invalid_signature")
+        self._verify_signature(assertion)
         now = now or dt.datetime.now(dt.timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=dt.timezone.utc)
@@ -1216,6 +1268,33 @@ class SamlAuthenticator:
                 attributes[mapped] = value
         return {"subject": subject, "attributes": attributes}
 
+    def _verify_signature(self, assertion: str) -> None:
+        try:
+            document = LET.fromstring(assertion.encode())
+        except (TypeError, ValueError, LET.XMLSyntaxError) as exc:
+            raise AuthenticationError("invalid_assertion") from exc
+        signature = document.find(".//{*}Signature")
+        if signature is None:
+            raise AuthenticationError("missing_signature")
+        signed_info = signature.find("{http://www.w3.org/2000/09/xmldsig#}SignedInfo")
+        if signed_info is None:
+            signed_info = signature.find("SignedInfo")
+        if signed_info is None:
+            raise AuthenticationError("invalid_signature")
+        signature_value_text = signature.findtext("{http://www.w3.org/2000/09/xmldsig#}SignatureValue")
+        if not signature_value_text:
+            signature_value_text = signature.findtext("SignatureValue")
+        if not signature_value_text:
+            raise AuthenticationError("invalid_signature")
+        try:
+            signature_bytes = _decode_signature(signature_value_text)
+        except ValueError as exc:
+            raise AuthenticationError("invalid_signature") from exc
+        payload = _canonicalize_signed_info(signed_info)
+        _verify_reference_digests(document, signed_info)
+        algorithm = _resolve_signature_algorithm(signed_info)
+        _verify_signature_payload(self._public_key, algorithm, signature_bytes, payload)
+
 
 class FederatedIdentityDirectory:
     """In-memory lookup for federated identities."""
@@ -1236,6 +1315,242 @@ class FederatedIdentityDirectory:
 def _decode_secret(secret: str) -> bytes:
     padding = "=" * ((4 - len(secret) % 4) % 4)
     return base64.urlsafe_b64decode(secret + padding)
+
+
+def _decode_signature(value: str) -> bytes:
+    normalized = "".join(value.split())
+    padding = "=" * ((4 - len(normalized) % 4) % 4)
+    return base64.b64decode(normalized + padding, validate=True)
+
+
+_XMLDSIG_NS = "http://www.w3.org/2000/09/xmldsig#"
+_XML_EXC_C14N_NS = "http://www.w3.org/2001/10/xml-exc-c14n#"
+_XML_ENVELOPED_SIGNATURE_URI = "http://www.w3.org/2000/09/xmldsig#enveloped-signature"
+
+
+_DIGEST_ALGORITHMS: dict[str, Callable[[bytes], object]] = {
+    "http://www.w3.org/2001/04/xmlenc#sha256": hashlib.sha256,
+    "http://www.w3.org/2001/04/xmlenc#sha512": hashlib.sha512,
+    "http://www.w3.org/2000/09/xmldsig#sha1": hashlib.sha1,
+}
+
+
+@dataclass(frozen=True)
+class _CanonicalizationConfig:
+    exclusive: bool
+    with_comments: bool
+
+
+_CANONICALIZATION_ALGORITHMS: dict[str, _CanonicalizationConfig] = {
+    "http://www.w3.org/2001/10/xml-exc-c14n#": _CanonicalizationConfig(exclusive=True, with_comments=False),
+    "http://www.w3.org/2001/10/xml-exc-c14n#WithComments": _CanonicalizationConfig(exclusive=True, with_comments=True),
+    "http://www.w3.org/TR/2001/REC-xml-c14n-20010315": _CanonicalizationConfig(exclusive=False, with_comments=False),
+    "http://www.w3.org/TR/2001/REC-xml-c14n-20010315#WithComments": _CanonicalizationConfig(exclusive=False, with_comments=True),
+    "http://www.w3.org/2006/12/xml-c14n11": _CanonicalizationConfig(exclusive=False, with_comments=False),
+    "http://www.w3.org/2006/12/xml-c14n11#WithComments": _CanonicalizationConfig(exclusive=False, with_comments=True),
+}
+
+
+_SIGNATURE_VERIFIERS: dict[str, tuple[type[object], Callable[[object, bytes, bytes], None]]] = {
+    "http://www.w3.org/2001/04/xmldsig-more#rsa-sha256": (
+        rsa.RSAPublicKey,
+        lambda key, signature, payload: key.verify(signature, payload, padding.PKCS1v15(), hashes.SHA256()),
+    ),
+    "http://www.w3.org/2001/04/xmldsig-more#ecdsa-sha256": (
+        ec.EllipticCurvePublicKey,
+        lambda key, signature, payload: key.verify(signature, payload, ec.ECDSA(hashes.SHA256())),
+    ),
+    "http://www.w3.org/2001/04/xmldsig-more#ed25519": (
+        ed25519.Ed25519PublicKey,
+        lambda key, signature, payload: key.verify(signature, payload),
+    ),
+    "http://www.w3.org/2001/04/xmldsig-more#ed448": (
+        ed448.Ed448PublicKey,
+        lambda key, signature, payload: key.verify(signature, payload),
+    ),
+}
+
+
+def _canonicalize_signed_info(signed_info: LET._Element) -> bytes:
+    method = signed_info.find(f"{{{_XMLDSIG_NS}}}CanonicalizationMethod")
+    if method is None:
+        method = signed_info.find("CanonicalizationMethod")
+    if method is None:
+        raise AuthenticationError("invalid_signature")
+    algorithm = method.get("Algorithm")
+    if not algorithm:
+        raise AuthenticationError("invalid_signature")
+    prefixes = _inclusive_namespace_prefixes(method)
+    return _canonicalize_element(signed_info, algorithm, prefixes)
+
+
+def _verify_reference_digests(document: LET._Element, signed_info: LET._Element) -> None:
+    references = list(signed_info.findall(f"{{{_XMLDSIG_NS}}}Reference")) or list(signed_info.findall("Reference"))
+    if not references:
+        raise AuthenticationError("invalid_signature")
+    for reference in references:
+        uri = reference.get("URI", "")
+        target = _resolve_reference(document, uri)
+        transformed = _apply_reference_transforms(target, reference)
+        digest_method = reference.find(f"{{{_XMLDSIG_NS}}}DigestMethod")
+        if digest_method is None:
+            digest_method = reference.find("DigestMethod")
+        digest_value = reference.findtext(f"{{{_XMLDSIG_NS}}}DigestValue") or reference.findtext("DigestValue")
+        if digest_method is None or not digest_value:
+            raise AuthenticationError("invalid_signature")
+        algorithm = digest_method.get("Algorithm")
+        if not algorithm:
+            raise AuthenticationError("invalid_signature")
+        expected = _compute_digest(transformed, algorithm)
+        if not hmac.compare_digest(expected, "".join(digest_value.split())):
+            raise AuthenticationError("invalid_signature")
+
+
+def _resolve_signature_algorithm(signed_info: LET._Element) -> str:
+    signature_method = signed_info.find(f"{{{_XMLDSIG_NS}}}SignatureMethod")
+    if signature_method is None:
+        signature_method = signed_info.find("SignatureMethod")
+    if signature_method is None:
+        raise AuthenticationError("invalid_signature")
+    algorithm = signature_method.get("Algorithm")
+    if not algorithm:
+        raise AuthenticationError("invalid_signature")
+    return algorithm
+
+
+def _verify_signature_payload(public_key: object, algorithm: str, signature: bytes, payload: bytes) -> None:
+    verifier_entry = _SIGNATURE_VERIFIERS.get(algorithm)
+    if verifier_entry is None:
+        raise AuthenticationError("invalid_signature")
+    expected_type, verifier = verifier_entry
+    if not isinstance(public_key, expected_type):
+        raise AuthenticationError("invalid_signature")
+    try:
+        verifier(public_key, signature, payload)
+    except InvalidSignature as exc:
+        raise AuthenticationError("invalid_signature") from exc
+
+
+def _apply_reference_transforms(target: LET._Element, reference: LET._Element) -> bytes:
+    transforms_parent = reference.find(f"{{{_XMLDSIG_NS}}}Transforms")
+    if transforms_parent is None:
+        transforms_parent = reference.find("Transforms")
+    data: bytes | LET._Element = _clone_element(target)
+    if transforms_parent is not None:
+        transforms = list(transforms_parent.findall(f"{{{_XMLDSIG_NS}}}Transform")) or list(transforms_parent.findall("Transform"))
+        for transform in transforms:
+            algorithm = transform.get("Algorithm") or ""
+            if algorithm == _XML_ENVELOPED_SIGNATURE_URI:
+                if isinstance(data, bytes):
+                    data = LET.fromstring(data)
+                _strip_signatures(data)
+            elif algorithm in _CANONICALIZATION_ALGORITHMS:
+                config = _CANONICALIZATION_ALGORITHMS[algorithm]
+                element = LET.fromstring(data) if isinstance(data, bytes) else data
+                prefixes = _inclusive_namespace_prefixes(transform)
+                data = LET.tostring(
+                    element,
+                    method="c14n",
+                    exclusive=config.exclusive,
+                    with_comments=config.with_comments,
+                    inclusive_ns_prefixes=list(prefixes) if prefixes else None,
+                )
+            else:  # pragma: no cover - unsupported transform guard
+                raise AuthenticationError("invalid_signature")
+    if isinstance(data, LET._Element):
+        data = LET.tostring(data, method="c14n", exclusive=False, with_comments=False)
+    return data
+
+
+def _canonicalize_element(
+    element: LET._Element,
+    algorithm: str,
+    prefixes: tuple[str, ...] = (),
+) -> bytes:
+    config = _CANONICALIZATION_ALGORITHMS.get(algorithm)
+    if config is None:
+        raise AuthenticationError("invalid_signature")
+    return LET.tostring(
+        element,
+        method="c14n",
+        exclusive=config.exclusive,
+        with_comments=config.with_comments,
+        inclusive_ns_prefixes=list(prefixes) if prefixes else None,
+    )
+
+
+def _inclusive_namespace_prefixes(element: LET._Element) -> tuple[str, ...]:
+    node = element.find(f"{{{_XML_EXC_C14N_NS}}}InclusiveNamespaces")
+    if node is None:
+        node = element.find("InclusiveNamespaces")
+    if node is None:
+        return ()
+    prefix_list = node.get("PrefixList", "").split()
+    return tuple(prefix_list)
+
+
+def _resolve_reference(document: LET._Element, uri: str) -> LET._Element:
+    if not uri:
+        return _clone_element(document)
+    if uri.startswith("#"):
+        reference_id = uri[1:]
+        matches = document.xpath(
+            "//*[@ID=$id or @Id=$id or @id=$id]",
+            id=reference_id,
+        )
+        if not matches:
+            raise AuthenticationError("invalid_signature")
+        target = matches[0]
+        return _clone_element(target)
+    raise AuthenticationError("invalid_signature")
+
+
+def _clone_element(element: LET._Element) -> LET._Element:
+    return LET.fromstring(LET.tostring(element))
+
+
+def _strip_signatures(element: LET._Element) -> None:
+    for signature in list(element.xpath(".//*[local-name()='Signature']")):
+        parent = signature.getparent()
+        if parent is not None:
+            parent.remove(signature)
+
+
+def _compute_digest(data: bytes, algorithm: str) -> str:
+    factory = _DIGEST_ALGORITHMS.get(algorithm)
+    if factory is None:
+        raise AuthenticationError("invalid_signature")
+    digest = factory(data).digest()
+    return base64.b64encode(digest).decode()
+
+
+def _load_public_key_from_certificate(certificate: str):
+    material = certificate.strip()
+    if not material:
+        raise ValueError("empty certificate")
+    errors: list[Exception] = []
+    try:
+        return x509.load_pem_x509_certificate(material.encode()).public_key()
+    except ValueError as exc:
+        errors.append(exc)
+    try:
+        der_cert = base64.b64decode(material, validate=True)
+        return x509.load_der_x509_certificate(der_cert).public_key()
+    except (ValueError, binascii.Error) as exc:
+        errors.append(exc)
+    for loader in (load_pem_public_key, load_der_public_key):
+        try:
+            return loader(material.encode())
+        except ValueError as exc:
+            errors.append(exc)
+    try:
+        der_key = base64.b64decode(material, validate=True)
+        return load_der_public_key(der_key)
+    except (ValueError, binascii.Error) as exc:
+        errors.append(exc)
+    if errors:
+        raise ValueError("unsupported_certificate_format") from errors[-1]
+    raise ValueError("unsupported_certificate_format")  # pragma: no cover - defensive fallback
 
 
 def _b64url_encode(data: bytes) -> str:

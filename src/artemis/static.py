@@ -6,16 +6,18 @@ because no mature Rust-backed Python bindings exist for these codecs today.
 
 from __future__ import annotations
 
+import asyncio
 import gzip
 import importlib
 import mimetypes
 import os
 import stat as stat_module
+from contextlib import suppress
 from dataclasses import dataclass
 from email.utils import formatdate
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Callable, Mapping, cast
+from typing import Any, AsyncIterator, Callable, Mapping, cast
 
 from .exceptions import HTTPError
 from .execution import TaskExecutor
@@ -84,6 +86,25 @@ def _read_path_bytes(path: str) -> bytes:
     return Path(path).read_bytes()
 
 
+def _stream_file_to_queue(
+    path: str,
+    chunk_size: int,
+    loop: asyncio.AbstractEventLoop,
+    queue: asyncio.Queue[Any],
+) -> None:
+    try:
+        with open(path, "rb") as file:
+            while True:
+                chunk = file.read(chunk_size)
+                if not chunk:
+                    break
+                loop.call_soon_threadsafe(queue.put_nowait, chunk)
+    except Exception as exc:  # pragma: no cover - defensive guard
+        loop.call_soon_threadsafe(queue.put_nowait, exc)
+    finally:
+        loop.call_soon_threadsafe(queue.put_nowait, None)
+
+
 @dataclass(slots=True, frozen=True)
 class _FileMetadata:
     st_size: int
@@ -104,6 +125,7 @@ class _AssetCacheEntry:
     metadata: _FileMetadata
     raw: bytes | None
     encodings: dict[str, bytes]
+    cacheable: bool
 
 
 class StaticFiles:
@@ -118,6 +140,8 @@ class StaticFiles:
         follow_symlinks: bool = False,
         cache_control: str | None = "public, max-age=3600",
         content_types: Mapping[str, str] | None = None,
+        max_in_memory_bytes: int = 1_048_576,
+        stream_chunk_size: int = 64 * 1024,
     ) -> None:
         root = Path(os.fspath(directory))
         if not root.is_dir():
@@ -133,6 +157,8 @@ class StaticFiles:
         self._compressors = _COMPRESSORS
         self._compressor_map = {name: func for name, func in self._compressors}
         self._asset_cache: dict[str, _AssetCacheEntry] = {}
+        self._max_in_memory_bytes = max(0, max_in_memory_bytes)
+        self._stream_chunk_size = max(1024, stream_chunk_size)
 
     async def serve(
         self,
@@ -160,6 +186,10 @@ class StaticFiles:
         body: bytes
         content_length: int
         content_encoding: tuple[str, str] | None = None
+        stream: AsyncIterator[bytes] | None = None
+        if compressor is not None and not cache_entry.cacheable:
+            compressor = None
+            negotiated = None
         if compressor is not None:
             compressed = await self._ensure_compressed(cache_entry, target, negotiated, compressor)
             body = compressed if method == "GET" else b""
@@ -169,8 +199,12 @@ class StaticFiles:
             content_encoding = ("content-encoding", negotiated)
         else:
             if method == "GET":
-                raw_body = await self._ensure_raw(cache_entry, target)
-                body = raw_body
+                if cache_entry.cacheable:
+                    raw_body = await self._ensure_raw(cache_entry, target)
+                    body = raw_body
+                else:
+                    body = b""
+                    stream = self._stream_file(target)
             else:
                 body = b""
             content_length = metadata.st_size
@@ -184,17 +218,20 @@ class StaticFiles:
             header_pairs.append(content_encoding)
         if self._cache_control:
             header_pairs.append(("cache-control", self._cache_control))
-        return Response(status=int(Status.OK), headers=tuple(header_pairs), body=body)
+        return Response(status=int(Status.OK), headers=tuple(header_pairs), body=body, stream=stream)
 
     def _cached_asset(self, path: Path, metadata: _FileMetadata) -> _AssetCacheEntry:
         key = os.fspath(path)
         entry = self._asset_cache.get(key)
-        if entry is None or entry.metadata != metadata:
-            entry = _AssetCacheEntry(metadata=metadata, raw=None, encodings={})
+        cacheable = metadata.st_size <= self._max_in_memory_bytes
+        if entry is None or entry.metadata != metadata or entry.cacheable != cacheable:
+            entry = _AssetCacheEntry(metadata=metadata, raw=None, encodings={}, cacheable=cacheable)
             self._asset_cache[key] = entry
         return entry
 
     async def _ensure_raw(self, entry: _AssetCacheEntry, path: Path) -> bytes:
+        if not entry.cacheable:
+            return await self._read_file(path)
         if entry.raw is None:
             entry.raw = await self._read_file(path)
         return entry.raw
@@ -206,6 +243,8 @@ class StaticFiles:
         encoding: str,
         compressor: CompressFunc,
     ) -> bytes:
+        if not entry.cacheable:
+            raise RuntimeError("compression requested for non-cacheable asset")
         cached = entry.encodings.get(encoding)
         if cached is not None:
             return cached
@@ -213,6 +252,35 @@ class StaticFiles:
         compressed = await self._executor.run(compressor, raw)
         entry.encodings[encoding] = compressed
         return compressed
+
+    def _stream_file(self, path: Path) -> AsyncIterator[bytes]:
+        async def iterator() -> AsyncIterator[bytes]:
+            loop = asyncio.get_running_loop()
+            queue: asyncio.Queue[bytes | Exception | None] = asyncio.Queue()
+
+            async def worker() -> None:
+                await self._executor.run(
+                    _stream_file_to_queue,
+                    os.fspath(path),
+                    self._stream_chunk_size,
+                    loop,
+                    queue,
+                )
+
+            task = asyncio.create_task(worker())
+            try:
+                while True:
+                    item = await queue.get()
+                    if item is None:
+                        break
+                    if isinstance(item, Exception):
+                        raise item
+                    yield item
+            finally:
+                with suppress(Exception):
+                    await task
+
+        return iterator()
 
     def _negotiate_encoding(self, header: str | None, *, compressible: bool) -> str | None:
         if not header or not self._compressors or not compressible:

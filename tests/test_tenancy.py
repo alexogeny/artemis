@@ -50,3 +50,19 @@ def test_tenant_resolution_errors() -> None:
         resolver.resolve("alpha.beta.demo.example.com")
     with pytest.raises(TenantResolutionError):
         resolver.resolve("example.org")
+
+
+def test_tenant_resolution_requires_allowlist() -> None:
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=())
+    context = resolver.resolve("demo.example.com")
+    assert context.scope is TenantScope.PUBLIC
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve("acme.demo.example.com")
+    with pytest.raises(TenantResolutionError):
+        resolver.context_for("acme")
+
+
+def test_context_for_unknown_tenant_rejected() -> None:
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    with pytest.raises(TenantResolutionError):
+        resolver.context_for("beta")
