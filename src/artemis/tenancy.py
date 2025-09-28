@@ -7,6 +7,10 @@ from typing import Iterable
 
 from msgspec import Struct
 
+_HOSTNAME_ALLOWED_CHARS = frozenset("abcdefghijklmnopqrstuvwxyz0123456789-.")
+_MAX_HOSTNAME_LENGTH = 253
+_MAX_LABEL_LENGTH = 63
+
 
 class TenantScope(str, Enum):
     TENANT = "tenant"
@@ -62,7 +66,8 @@ class TenantResolver:
         self.allowed_tenants = set(allowed_tenants or ())
 
     def resolve(self, host: str) -> TenantContext:
-        hostname = host.split(":", 1)[0].lower()
+        normalized = _normalize_host(host)
+        hostname = normalized.split(":", 1)[0]
         expected_suffix = f"{self.site}.{self.domain}"
         if hostname == expected_suffix:
             return TenantContext(
@@ -93,3 +98,35 @@ class TenantResolver:
         if resolved_scope is TenantScope.PUBLIC:
             tenant = self.marketing_tenant
         return TenantContext(tenant=tenant, site=self.site, domain=self.domain, scope=resolved_scope)
+
+
+def _normalize_host(raw: str) -> str:
+    if not raw:
+        raise TenantResolutionError("Host header is empty")
+    candidate = raw
+    if candidate != candidate.strip():
+        raise TenantResolutionError("Host header contains surrounding whitespace")
+    if any(ord(char) <= 31 or char == "\x7f" or char.isspace() for char in candidate):
+        raise TenantResolutionError("Host header contains control characters")
+    if "/" in candidate or "\\" in candidate:
+        raise TenantResolutionError("Host header contains illegal characters")
+    lower = candidate.lower()
+    hostname, sep, port = lower.partition(":")
+    if sep and not port:
+        raise TenantResolutionError("Host header contains an invalid port")
+    if not hostname or hostname.startswith(".") or hostname.endswith(".") or ".." in hostname:
+        raise TenantResolutionError("Host header is not a valid DNS name")
+    labels = hostname.split(".")
+    if any(len(label) > _MAX_LABEL_LENGTH for label in labels):
+        raise TenantResolutionError("Host header contains an overlong DNS label")
+    if len(hostname) > _MAX_HOSTNAME_LENGTH:
+        raise TenantResolutionError("Host header is too long")
+    if any(char not in _HOSTNAME_ALLOWED_CHARS for char in hostname):
+        raise TenantResolutionError("Host header contains invalid characters")
+    if port:
+        if not port.isdigit():
+            raise TenantResolutionError("Host header contains an invalid port")
+        port_value = int(port)
+        if port_value <= 0 or port_value > 65535:
+            raise TenantResolutionError("Host header contains an invalid port")
+    return hostname + (sep + port if port else "")

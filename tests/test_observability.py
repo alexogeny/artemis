@@ -21,6 +21,7 @@ from artemis import (
     TenantScope,
     TestClient,
 )
+from artemis.observability import _MAX_TRACESTATE_LENGTH
 from tests.observability_stubs import (
     setup_stub_datadog,
     setup_stub_opentelemetry,
@@ -594,7 +595,7 @@ def test_observability_request_start_handles_missing_traceparent_header() -> Non
 
     context = observability.on_request_start(cast(Request, StubRequest()))
     assert context is not None
-    assert calls["count"] >= 2
+    assert calls["count"] >= 1
     assert context.parent_span_id == "b" * 16
     assert context.traceparent is not None
     assert context.traceparent.startswith("00-" + ("a" * 32) + "-")
@@ -645,13 +646,39 @@ def test_observability_ensure_hex_behaviour() -> None:
 
 
 def test_observability_parse_traceparent_validation() -> None:
-    assert Observability._parse_traceparent(None) is None
-    assert Observability._parse_traceparent("invalid") is None
-    assert Observability._parse_traceparent("00-" + "a" * 31 + "-" + "b" * 16 + "-01") is None
-    assert Observability._parse_traceparent("00-" + "0" * 32 + "-" + "c" * 16 + "-01") is None
-    assert Observability._parse_traceparent("00-" + "a" * 32 + "-" + "0" * 16 + "-01") is None
+    invalid_headers = [
+        None,
+        "invalid",
+        "00-" + "a" * 31 + "-" + "b" * 16 + "-01",
+        "00-" + "0" * 32 + "-" + "c" * 16 + "-01",
+        "00-" + "a" * 32 + "-" + "0" * 16 + "-01",
+        "gg-" + "a" * 32 + "-" + "b" * 16 + "-01",
+        "00-" + "g" * 32 + "-" + "b" * 16 + "-01",
+        "00-" + "a" * 32 + "-" + "b" * 15 + "-01",
+        "00-" + "a" * 32 + "-" + "b" * 16 + "-zz",
+        "00-" + "a" * 32 + "-" + "b" * 16 + "-01\nset-cookie:hacked",
+        "00-" + "a" * 32 + "-" + "b" * 16 + "-01" + ("x" * 300),
+    ]
+    for header in invalid_headers:
+        assert Observability._parse_traceparent(header) is None
     valid = Observability._parse_traceparent("00-" + "a" * 32 + "-" + "b" * 16 + "-01")
-    assert valid is not None and valid.trace_id == "a" * 32 and valid.parent_span_id == "b" * 16
+    assert valid is not None
+    assert valid.version == "00"
+    assert valid.trace_id == "a" * 32
+    assert valid.parent_span_id == "b" * 16
+    assert valid.trace_flags == "01"
+    assert valid.header() == "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    uppercase = Observability._parse_traceparent("00-" + "A" * 32 + "-" + "B" * 16 + "-01")
+    assert uppercase is not None
+    assert uppercase.trace_id == "a" * 32
+
+
+def test_observability_tracestate_sanitization() -> None:
+    assert Observability._sanitize_tracestate(None) is None
+    assert Observability._sanitize_tracestate("") is None
+    assert Observability._sanitize_tracestate("x" * (_MAX_TRACESTATE_LENGTH + 1)) is None
+    assert Observability._sanitize_tracestate("vendor=1\n") is None
+    assert Observability._sanitize_tracestate(" vendor=1 ") == "vendor=1"
 
 
 def test_observability_log_disabled(caplog: pytest.LogCaptureFixture) -> None:

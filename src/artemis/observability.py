@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
-import random
+import secrets
 import time
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -128,20 +128,34 @@ class _ObservationContext:
 
 @dataclass(slots=True)
 class _TraceParent:
+    version: str
     trace_id: str
     parent_span_id: str
     trace_flags: str
 
+    def header(self) -> str:
+        return f"{self.version}-{self.trace_id}-{self.parent_span_id}-{self.trace_flags}"
+
+
+_TRACEPARENT_ALLOWED = frozenset("0123456789abcdef")
+_MAX_TRACEPARENT_LENGTH = 256
+_MAX_TRACESTATE_LENGTH = 512
+
+
+def _is_hex_segment(value: str, length: int) -> bool:
+    if len(value) != length:
+        return False
+    return all(char in _TRACEPARENT_ALLOWED for char in value)
+
 
 def _default_id_generator() -> Callable[[int], str]:
-    rng = random.Random(time.time_ns())
-
     def generate(size: int) -> str:
-        bits = max(size * 8, 1)
-        value = 0
-        while value == 0:
-            value = rng.getrandbits(bits)
-        return f"{value:0{size * 2}x}"
+        if size <= 0:
+            raise ValueError("size must be positive")
+        while True:
+            token = secrets.token_bytes(size)
+            if any(token):
+                return token.hex()
 
     return generate
 
@@ -268,18 +282,46 @@ class Observability:
     def _parse_traceparent(header: str | None) -> _TraceParent | None:
         if not header:
             return None
-        parts = header.strip().split("-")
+        candidate = header.strip()
+        if not candidate or len(candidate) > _MAX_TRACEPARENT_LENGTH:
+            return None
+        if any(ord(char) < 32 or char == "\x7f" for char in candidate):
+            return None
+        parts = candidate.split("-")
         if len(parts) < 4:
             return None
-        _, trace_id, parent_span_id, trace_flags, *_ = parts
+        version, trace_id, parent_span_id, trace_flags, *_ = parts
+        version = version.lower()
         trace_id = trace_id.lower()
         parent_span_id = parent_span_id.lower()
         trace_flags = trace_flags.lower()
-        if len(trace_id) != 32 or len(parent_span_id) != 16 or len(trace_flags) != 2:
+        if not _is_hex_segment(version, 2):
+            return None
+        if not _is_hex_segment(trace_id, 32):
+            return None
+        if not _is_hex_segment(parent_span_id, 16):
+            return None
+        if not _is_hex_segment(trace_flags, 2):
             return None
         if trace_id == "0" * 32 or parent_span_id == "0" * 16:
             return None
-        return _TraceParent(trace_id=trace_id, parent_span_id=parent_span_id, trace_flags=trace_flags)
+        return _TraceParent(
+            version=version,
+            trace_id=trace_id,
+            parent_span_id=parent_span_id,
+            trace_flags=trace_flags,
+        )
+
+    @staticmethod
+    def _sanitize_tracestate(header: str | None) -> str | None:
+        if not header:
+            return None
+        if any(ord(char) < 32 or char == "\x7f" for char in header):
+            return None
+        candidate = header.strip()
+        if not candidate or len(candidate) > _MAX_TRACESTATE_LENGTH:
+            return None
+        return candidate
 
     def _log(self, context: _ObservationContext | None, event: str, extra: Mapping[str, Any] | None = None) -> None:
         if not self.config.enabled:
@@ -620,12 +662,10 @@ class Observability:
             "http.scope": request.tenant.scope.value,
         }
         incoming_trace = self._parse_traceparent(request.header("traceparent"))
-        tracestate = request.header("tracestate")
+        tracestate = self._sanitize_tracestate(request.header("tracestate"))
         trace_context: dict[str, str] = {}
         if incoming_trace is not None:
-            header = request.header("traceparent")
-            if header:
-                trace_context["traceparent"] = header
+            trace_context["traceparent"] = incoming_trace.header()
             if tracestate:
                 trace_context["tracestate"] = tracestate
         context = self._start(
@@ -647,7 +687,7 @@ class Observability:
             trace_id=incoming_trace.trace_id if incoming_trace else None,
             parent_span_id=incoming_trace.parent_span_id if incoming_trace else None,
             trace_flags=incoming_trace.trace_flags if incoming_trace else None,
-            traceparent=request.header("traceparent"),
+            traceparent=incoming_trace.header() if incoming_trace else None,
             tracestate=tracestate,
             log_fields={
                 "http.method": request.method,

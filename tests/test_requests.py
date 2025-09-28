@@ -6,8 +6,9 @@ import msgspec
 import pytest
 
 from artemis.audit import audit_context, current_actor
+from artemis.exceptions import HTTPError
 from artemis.rbac import CedarEntity
-from artemis.requests import Request
+from artemis.requests import _MAX_QUERY_PARAMS, Request
 from artemis.serialization import json_encode
 from artemis.tenancy import TenantContext, TenantScope
 
@@ -79,6 +80,14 @@ def test_request_query_type_hints_cached(monkeypatch: pytest.MonkeyPatch) -> Non
     request.query(QueryModel)
     assert call_count == 1
     requests_module._model_type_hints.cache_clear()
+
+
+def test_request_rejects_excessive_query_parameters() -> None:
+    request = build_request(query_string="&".join(f"key{index}=value" for index in range(_MAX_QUERY_PARAMS + 1)))
+    with pytest.raises(HTTPError) as captured:
+        _ = request.query_params
+    assert captured.value.status == 400
+    assert captured.value.detail == {"detail": "too_many_query_parameters"}
 
 
 @pytest.mark.asyncio
