@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import copy
 import datetime as dt
 import hashlib
 import hmac
@@ -19,6 +20,12 @@ from typing import Any, Generic, Protocol, TypeVar
 from xml.etree import ElementTree as ET
 
 from msgspec import Struct, structs
+
+from cryptography import x509
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import hashes
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, padding, rsa
+from cryptography.hazmat.primitives.serialization import load_der_public_key, load_pem_public_key
 
 try:  # pragma: no cover - optional dependency
     from argonautica import Hasher as ArgonauticaHasher  # type: ignore[import-not-found]
@@ -100,6 +107,7 @@ class _RateLimitState:
     failures: int = 0
     last_failure: dt.datetime | None = None
     locked_until: dt.datetime | None = None
+    last_seen: dt.datetime | None = None
 
 
 class AuthenticationRateLimiter:
@@ -113,12 +121,14 @@ class AuthenticationRateLimiter:
         lockout_period: dt.timedelta = dt.timedelta(minutes=15),
         base_cooldown: dt.timedelta = dt.timedelta(seconds=1),
         max_cooldown: dt.timedelta = dt.timedelta(seconds=30),
+        max_entries: int = 1024,
     ) -> None:
         self.max_attempts = max_attempts
         self.window = window
         self.lockout_period = lockout_period
         self.base_cooldown = base_cooldown
         self.max_cooldown = max_cooldown
+        self.max_entries = max(1, max_entries)
         self._states: dict[str, _RateLimitState] = {}
         self._lock = asyncio.Lock()
 
@@ -126,14 +136,17 @@ class AuthenticationRateLimiter:
         """Ensure ``keys`` are allowed to attempt authentication."""
 
         async with self._lock:
+            self._prune(now)
             for key in keys:
                 state = self._states.get(key)
                 if state is None:
                     continue
-                self._refresh_state(state, now)
+                state.last_seen = now
+                if self._refresh_state(key, state, now):
+                    continue
                 if state.locked_until is not None and state.locked_until > now:
                     raise AuthenticationError("account_locked")
-                if state.failures > 0 and state.last_failure is not None:
+                if state.failures > 0 and state.last_failure is not None:  # pragma: no branch - dependent state
                     cooldown = self._cooldown(state.failures)
                     next_allowed = state.last_failure + cooldown
                     if next_allowed > now:
@@ -145,13 +158,17 @@ class AuthenticationRateLimiter:
         async with self._lock:
             for key in keys:
                 state = self._states.setdefault(key, _RateLimitState())
-                self._refresh_state(state, now)
+                state.last_seen = now
+                if self._refresh_state(key, state, now):
+                    state = self._states.setdefault(key, _RateLimitState())
+                    state.last_seen = now
                 state.failures += 1
                 state.last_failure = now
                 if state.failures >= self.max_attempts:
                     state.locked_until = now + self.lockout_period
                     state.failures = 0
                     state.last_failure = None
+            self._prune(now)
 
     async def record_success(self, keys: Iterable[str]) -> None:
         """Reset throttling state after a successful authentication."""
@@ -160,16 +177,48 @@ class AuthenticationRateLimiter:
             for key in keys:
                 self._states.pop(key, None)
 
-    def _refresh_state(self, state: _RateLimitState, now: dt.datetime) -> None:
+    def _refresh_state(self, key: str, state: _RateLimitState, now: dt.datetime) -> bool:
         if state.locked_until is not None and state.locked_until <= now:
             state.locked_until = None
         if state.last_failure is not None and now - state.last_failure >= self.window:
             state.failures = 0
             state.last_failure = None
+        if state.locked_until is None and state.last_failure is None and state.failures <= 0:
+            self._states.pop(key, None)
+            return True
+        return False
 
     def _cooldown(self, failures: int) -> dt.timedelta:
         scaled = self.base_cooldown * (2 ** max(failures - 1, 0))
         return scaled if scaled <= self.max_cooldown else self.max_cooldown
+
+    def _prune(self, now: dt.datetime) -> None:
+        stale_cutoff = now - self.window
+        removable = [
+            key
+            for key, state in self._states.items()
+            if (
+                state.locked_until is None
+                and state.last_failure is None
+                and state.failures <= 0
+            )
+            or (
+                state.locked_until is None
+                and state.last_seen is not None
+                and state.last_seen <= stale_cutoff
+            )
+        ]
+        for key in removable:
+            self._states.pop(key, None)
+        overflow = len(self._states) - self.max_entries
+        if overflow <= 0:
+            return
+        ordered = sorted(
+            self._states.items(),
+            key=lambda item: item[1].last_seen or dt.datetime.min,
+        )
+        for key, _ in ordered[:overflow]:
+            self._states.pop(key, None)
 
 
 class IssuedSessionToken(Struct, frozen=True):
@@ -1145,6 +1194,10 @@ class SamlAuthenticator:
 
     def __init__(self, provider: TenantSamlProvider) -> None:
         self.provider = provider
+        try:
+            self._public_key = _load_public_key_from_certificate(provider.certificate)
+        except ValueError as exc:  # pragma: no cover - defensive guard
+            raise AuthenticationError("invalid_certificate") from exc
 
     def validate(self, assertion: str, *, now: dt.datetime | None = None) -> Mapping[str, Any]:
         try:
@@ -1158,9 +1211,7 @@ class SamlAuthenticator:
         signature = tree.findtext(".//saml2:SignatureValue", namespaces=ns) or tree.findtext(".//SignatureValue")
         if not signature:
             raise AuthenticationError("missing_signature")
-        expected = _b64url_encode(hmac.new(self.provider.certificate.encode(), subject.encode(), sha256).digest())
-        if not hmac.compare_digest(signature, expected):
-            raise AuthenticationError("invalid_signature")
+        self._verify_signature(tree, signature)
         now = now or dt.datetime.now(dt.timezone.utc)
         if now.tzinfo is None:
             now = now.replace(tzinfo=dt.timezone.utc)
@@ -1216,6 +1267,24 @@ class SamlAuthenticator:
                 attributes[mapped] = value
         return {"subject": subject, "attributes": attributes}
 
+    def _verify_signature(self, tree: ET.Element, signature: str) -> None:
+        try:
+            decoded = _decode_signature(signature)
+        except ValueError as exc:
+            raise AuthenticationError("invalid_signature") from exc
+        payload = _canonicalize_saml_assertion(tree)
+        try:
+            if isinstance(self._public_key, rsa.RSAPublicKey):
+                self._public_key.verify(decoded, payload, padding.PKCS1v15(), hashes.SHA256())
+            elif isinstance(self._public_key, ec.EllipticCurvePublicKey):
+                self._public_key.verify(decoded, payload, ec.ECDSA(hashes.SHA256()))
+            elif isinstance(self._public_key, ed25519.Ed25519PublicKey | ed448.Ed448PublicKey):
+                self._public_key.verify(decoded, payload)
+            else:  # pragma: no cover - unsupported algorithm guard
+                raise AuthenticationError("unsupported_certificate")
+        except InvalidSignature as exc:
+            raise AuthenticationError("invalid_signature") from exc
+
 
 class FederatedIdentityDirectory:
     """In-memory lookup for federated identities."""
@@ -1236,6 +1305,56 @@ class FederatedIdentityDirectory:
 def _decode_secret(secret: str) -> bytes:
     padding = "=" * ((4 - len(secret) % 4) % 4)
     return base64.urlsafe_b64decode(secret + padding)
+
+
+def _decode_signature(value: str) -> bytes:
+    normalized = "".join(value.split())
+    padding = "=" * ((4 - len(normalized) % 4) % 4)
+    return base64.b64decode(normalized + padding, validate=True)
+
+
+def _canonicalize_saml_assertion(tree: ET.Element) -> bytes:
+    sanitized = copy.deepcopy(tree)
+    for parent in sanitized.iter():
+        for child in list(parent):
+            if _local_name(child.tag) in {"Signature", "SignatureValue"}:
+                parent.remove(child)
+    return ET.tostring(sanitized, encoding="utf-8", method="xml")
+
+
+def _local_name(tag: str) -> str:
+    if "}" in tag:
+        return tag.split("}", 1)[1]
+    return tag
+
+
+def _load_public_key_from_certificate(certificate: str):
+    material = certificate.strip()
+    if not material:
+        raise ValueError("empty certificate")
+    errors: list[Exception] = []
+    try:
+        return x509.load_pem_x509_certificate(material.encode()).public_key()
+    except ValueError as exc:
+        errors.append(exc)
+    try:
+        der_cert = base64.b64decode(material, validate=True)
+        return x509.load_der_x509_certificate(der_cert).public_key()
+    except (ValueError, binascii.Error) as exc:
+        errors.append(exc)
+    for loader in (load_pem_public_key, load_der_public_key):
+        try:
+            return loader(material.encode())
+        except ValueError as exc:
+            errors.append(exc)
+    try:
+        der_key = base64.b64decode(material, validate=True)
+        return load_der_public_key(der_key)
+    except (ValueError, binascii.Error) as exc:
+        errors.append(exc)
+    if errors:
+        raise ValueError("unsupported_certificate_format") from errors[-1]
+    raise ValueError("unsupported_certificate_format")  # pragma: no cover - defensive fallback
 
 
 def _b64url_encode(data: bytes) -> str:

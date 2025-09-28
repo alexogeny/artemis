@@ -17,6 +17,7 @@ dependencies = [
     "zstandard>=0.22.0",
     "cedarpy>=4.1.0",
     "id57>=1.0.0",
+    "cryptography>=42.0.5",
 ]
 
 [project.scripts]

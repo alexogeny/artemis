@@ -3504,6 +3504,9 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
 
     def sync_allowed_tenants(config: QuickstartAuthConfig) -> None:
         synced_configs.append(config)
+        app.tenant_resolver.allowed_tenants.update(tenant.slug for tenant in config.tenants)
+        app.tenant_resolver.allowed_tenants.discard(app.config.admin_subdomain)
+        app.tenant_resolver.allowed_tenants.discard(app.config.marketing_tenant)
 
     admin_control = QuickstartAdminControlPlane(
         app,

@@ -1,11 +1,19 @@
 import base64
 import datetime as dt
 import hashlib
+import base64
+import datetime as dt
+import hashlib
 import hmac
 import json
+import xml.etree.ElementTree as ET
 from typing import Iterable
 
 import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec, ed25519, ed448, padding, rsa
+from cryptography.x509.oid import NameOID
 
 import artemis.authentication as authentication_module
 from artemis.authentication import (
@@ -21,7 +29,7 @@ from artemis.authentication import (
     SamlAuthenticator,
     compose_admin_secret,
     compose_tenant_secret,
-)
+) 
 from artemis.database import SecretRef
 from artemis.id57 import generate_id57
 from artemis.models import (
@@ -80,6 +88,106 @@ def _make_tenant_secret(now: dt.datetime, *, purpose: str = "password") -> tuple
 def _resolver_for(pairs: Iterable[tuple[SecretRef, str]]) -> StaticSecretResolver:
     mapping = {(ref.provider, ref.name, ref.version): value for ref, value in pairs}
     return StaticSecretResolver(mapping)
+
+
+def _generate_saml_signing_material(now: dt.datetime) -> tuple[ed25519.Ed25519PrivateKey, str]:
+    private_key = ed25519.Ed25519PrivateKey.generate()
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "Test IdP")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .sign(private_key, algorithm=None)
+    )
+    certificate_pem = certificate.public_bytes(serialization.Encoding.PEM).decode()
+    return private_key, certificate_pem
+
+
+def _generate_rsa_signing_material(now: dt.datetime) -> tuple[rsa.RSAPrivateKey, str]:
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "RSA IdP")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .sign(private_key, hashes.SHA256())
+    )
+    return private_key, certificate.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def _generate_ecdsa_signing_material(now: dt.datetime) -> tuple[ec.EllipticCurvePrivateKey, str]:
+    private_key = ec.generate_private_key(ec.SECP256R1())
+    subject = issuer = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "EC IdP")])
+    certificate = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(issuer)
+        .public_key(private_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now - dt.timedelta(days=1))
+        .not_valid_after(now + dt.timedelta(days=1))
+        .sign(private_key, hashes.SHA256())
+    )
+    return private_key, certificate.public_bytes(serialization.Encoding.PEM).decode()
+
+
+def _make_saml_provider(
+    now: dt.datetime,
+    *,
+    certificate: str,
+    **overrides: object,
+) -> TenantSamlProvider:
+    return TenantSamlProvider(
+        id=generate_id57(),
+        entity_id="urn:example",
+        metadata_url="https://example.com/metadata",
+        certificate=certificate,
+        acs_url="https://app.example.com/acs",
+        created_at=now,
+        updated_at=now,
+        **overrides,
+    )
+
+
+def _sign_assertion(template: str, key: object) -> str:
+    tree = ET.fromstring(template)
+    canonical = authentication_module._canonicalize_saml_assertion(tree)
+    if isinstance(key, ed25519.Ed25519PrivateKey | ed448.Ed448PrivateKey):
+        signature_bytes = key.sign(canonical)
+    elif isinstance(key, rsa.RSAPrivateKey):
+        signature_bytes = key.sign(canonical, padding.PKCS1v15(), hashes.SHA256())
+    elif isinstance(key, ec.EllipticCurvePrivateKey):
+        signature_bytes = key.sign(canonical, ec.ECDSA(hashes.SHA256()))
+    else:  # pragma: no cover - unsupported test key
+        raise AssertionError(f"Unsupported signing key type: {type(key)!r}")
+    signature = base64.b64encode(signature_bytes).decode()
+    return template.replace("{{signature}}", signature)
+
+
+def _wrap_assertion(body: str) -> str:
+    return (
+        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
+        f"{body}"
+        "<SignatureValue>{{signature}}</SignatureValue>"
+        "</Assertion>"
+    )
+
+
+def _render_signed_assertion(
+    signing_key: ed25519.Ed25519PrivateKey,
+    *,
+    body: str,
+    **context: object,
+) -> str:
+    return _sign_assertion(_wrap_assertion(body.format(**context)), signing_key)
 
 
 def test_customer_secret_resolves_with_secret_ref() -> None:
@@ -456,32 +564,29 @@ def test_oidc_authenticator_client_secret_key_rejects_non_hmac() -> None:
 
 def test_saml_authenticator_validates_and_maps_attributes() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(
+        now,
+        certificate=certificate,
         attribute_mapping={"email": "mail"},
     )
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        f"<Subject><NameID>{subject}</NameID></Subject>"
-        "<Attribute Name='email'><AttributeValue>user@example.com</AttributeValue></Attribute>"
-        "<Attribute><AttributeValue>ignored</AttributeValue></Attribute>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject><NameID>{subject}</NameID></Subject>"
+            "<Attribute Name='email'><AttributeValue>user@example.com</AttributeValue></Attribute>"
+            "<Attribute><AttributeValue>ignored</AttributeValue></Attribute>"
+        ),
+        subject=subject,
     )
     authenticator = SamlAuthenticator(provider)
     result = authenticator.validate(assertion)
     assert result["subject"] == subject
     assert result["attributes"]["mail"] == subject
     assert "ignored" not in result["attributes"].values()
-    tampered = assertion.replace(signature, "invalid")
+    signature_value = ET.fromstring(assertion).findtext(".//{*}SignatureValue") or ""
+    tampered = assertion.replace(signature_value, "invalid")
     with pytest.raises(AuthenticationError):
         authenticator.validate(tampered)
 
@@ -814,6 +919,51 @@ async def test_authentication_rate_limiter_locks_after_failures() -> None:
     assert session.id == session.record.id
     assert session.expires_at == session.record.expires_at
     assert session.revoked_at is None
+
+
+@pytest.mark.asyncio
+async def test_authentication_rate_limiter_prunes_inactive_states() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    rate_limiter = AuthenticationRateLimiter(window=dt.timedelta(seconds=1))
+    await rate_limiter.record_failure(["user"], now)
+    assert "user" in rate_limiter._states
+    await rate_limiter.enforce(["user"], now + dt.timedelta(seconds=2))
+    assert "user" not in rate_limiter._states
+
+
+@pytest.mark.asyncio
+async def test_authentication_rate_limiter_bounds_entry_count() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    rate_limiter = AuthenticationRateLimiter(max_entries=5, window=dt.timedelta(seconds=60))
+    for index in range(10):
+        await rate_limiter.record_failure([f"user-{index}"], now + dt.timedelta(seconds=index))
+    assert len(rate_limiter._states) <= 5
+
+
+@pytest.mark.asyncio
+async def test_authentication_rate_limiter_rate_limited_branch() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    rate_limiter = AuthenticationRateLimiter(
+        window=dt.timedelta(seconds=10),
+        base_cooldown=dt.timedelta(seconds=5),
+        max_cooldown=dt.timedelta(seconds=5),
+    )
+    await rate_limiter.record_failure(["user"], now)
+    with pytest.raises(AuthenticationError) as exc:
+        await rate_limiter.enforce(["user"], now + dt.timedelta(seconds=2))
+    assert str(exc.value) == "rate_limited"
+    await rate_limiter.enforce(["user"], now + dt.timedelta(seconds=6))
+    rate_limiter._states["idle"] = authentication_module._RateLimitState()
+    await rate_limiter.enforce(["idle"], now + dt.timedelta(seconds=6))
+
+
+@pytest.mark.asyncio
+async def test_authentication_rate_limiter_resets_after_window() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    rate_limiter = AuthenticationRateLimiter(window=dt.timedelta(seconds=2))
+    await rate_limiter.record_failure(["user"], now)
+    state = rate_limiter._states["user"]
+    assert rate_limiter._refresh_state("user", state, now + dt.timedelta(seconds=3))
 
 
 def test_passkey_authentication_failures() -> None:
@@ -1721,42 +1871,47 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_saml_authenticator_error_paths() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-    )
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate)
     authenticator = SamlAuthenticator(provider)
     with pytest.raises(AuthenticationError):
         authenticator.validate("<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'></Assertion>")
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject><NameID>user@example.com</NameID></Subject>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body="<Subject><NameID>{subject}</NameID></Subject>",
+        subject=subject,
     )
-    tampered = assertion.replace(signature, "bad")
+    signature_value = ET.fromstring(assertion).findtext(".//{*}SignatureValue") or ""
+    tampered = assertion.replace(signature_value, "bad")
     with pytest.raises(AuthenticationError):
         authenticator.validate(tampered)
 
 
+def test_saml_authenticator_rejects_invalid_certificate() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _make_saml_provider(now, certificate="")
+    with pytest.raises(AuthenticationError) as exc:
+        SamlAuthenticator(provider)
+    assert str(exc.value) == "invalid_certificate"
+
+
+def test_saml_authenticator_rejects_invalid_signature_encoding() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate)
+    authenticator = SamlAuthenticator(provider)
+    invalid = _wrap_assertion("<Subject><NameID>user@example.com</NameID></Subject>")
+    invalid = invalid.replace("{{signature}}", "-!")
+    with pytest.raises(AuthenticationError) as exc:
+        authenticator.validate(invalid)
+    assert str(exc.value) == "invalid_signature"
+
+
 def test_saml_authenticator_requires_signature() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-    )
+    _, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate)
     authenticator = SamlAuthenticator(provider)
     assertion = (
         "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
@@ -1768,42 +1923,127 @@ def test_saml_authenticator_requires_signature() -> None:
     assert str(exc.value) == "missing_signature"
 
 
+def test_saml_authenticator_accepts_der_certificate() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    signing_key, pem_certificate = _generate_rsa_signing_material(now)
+    der_bytes = x509.load_pem_x509_certificate(pem_certificate.encode()).public_bytes(serialization.Encoding.DER)
+    provider = _make_saml_provider(now, certificate=base64.b64encode(der_bytes).decode())
+    authenticator = SamlAuthenticator(provider)
+    subject = "user@example.com"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body="<Subject><NameID>{subject}</NameID></Subject>",
+        subject=subject,
+    )
+    result = authenticator.validate(assertion)
+    assert result["subject"] == subject
+
+
+def test_saml_authenticator_accepts_public_key_material() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    signing_key, pem_certificate = _generate_rsa_signing_material(now)
+    public_key = signing_key.public_key()
+    public_pem = public_key.public_bytes(
+        serialization.Encoding.PEM,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    ).decode()
+    provider = _make_saml_provider(now, certificate=public_pem)
+    authenticator = SamlAuthenticator(provider)
+    subject = "user@example.com"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body="<Subject><NameID>{subject}</NameID></Subject>",
+        subject=subject,
+    )
+    result = authenticator.validate(assertion)
+    assert result["subject"] == subject
+
+
+def test_saml_authenticator_accepts_der_public_key() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    signing_key, pem_certificate = _generate_rsa_signing_material(now)
+    public_key = signing_key.public_key()
+    der_key = public_key.public_bytes(
+        serialization.Encoding.DER,
+        serialization.PublicFormat.SubjectPublicKeyInfo,
+    )
+    provider = _make_saml_provider(now, certificate=base64.b64encode(der_key).decode())
+    authenticator = SamlAuthenticator(provider)
+    subject = "user@example.com"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body="<Subject><NameID>{subject}</NameID></Subject>",
+        subject=subject,
+    )
+    result = authenticator.validate(assertion)
+    assert result["subject"] == subject
+
+
+def test_saml_authenticator_accepts_ecdsa_certificates() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    signing_key, certificate = _generate_ecdsa_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate)
+    authenticator = SamlAuthenticator(provider)
+    assertion = _render_signed_assertion(
+        signing_key,
+        body="<Subject><NameID>{subject}</NameID></Subject>",
+        subject="user@example.com",
+    )
+    result = authenticator.validate(assertion)
+    assert result["subject"] == "user@example.com"
+
+
+def test_saml_authenticator_rejects_unsupported_certificate_format() -> None:
+    now = dt.datetime.now(dt.timezone.utc)
+    provider = _make_saml_provider(now, certificate="not-a-certificate")
+    with pytest.raises(AuthenticationError) as exc:
+        SamlAuthenticator(provider)
+    assert str(exc.value) == "invalid_certificate"
+
+
+def test_canonicalize_saml_assertion_removes_unqualified_signature() -> None:
+    xml = (
+        "<Assertion><Subject><NameID>user@example.com</NameID></Subject>"
+        "<SignatureValue>sig</SignatureValue></Assertion>"
+    )
+    tree = ET.fromstring(xml)
+    canonical = authentication_module._canonicalize_saml_assertion(tree)
+    assert b"SignatureValue" not in canonical
+
+
 def test_saml_authenticator_enforces_temporal_conditions_and_audience() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(
+        now,
+        certificate=certificate,
         clock_skew_seconds=0,
         allowed_audiences=["urn:example:aud"],
     )
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     not_before = (now - dt.timedelta(minutes=5)).replace(microsecond=0, tzinfo=None)
     not_on_or_after = (now + dt.timedelta(minutes=5)).replace(microsecond=0, tzinfo=None)
     nb = not_before.isoformat()
     noa = not_on_or_after.isoformat()
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation>"
-        f"<SubjectConfirmationData NotBefore='{nb}' "
-        f"NotOnOrAfter='{noa}'/>"
-        "</SubjectConfirmation>"
-        "</Subject>"
-        f"<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
-        "<AudienceRestriction>"
-        "<Audience>urn:example:aud</Audience>"
-        "</AudienceRestriction>"
-        "</Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation>"
+            "<SubjectConfirmationData NotBefore='{nb}' NotOnOrAfter='{noa}'/>"
+            "</SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
+            "<AudienceRestriction>"
+            "<Audience>urn:example:aud</Audience>"
+            "</AudienceRestriction>"
+            "</Conditions>"
+        ),
+        subject=subject,
+        nb=nb,
+        noa=noa,
     )
     result = authenticator.validate(assertion, now=now.replace(tzinfo=None))
     assert result["subject"] == subject
@@ -1812,36 +2052,28 @@ def test_saml_authenticator_enforces_temporal_conditions_and_audience() -> None:
 
 def test_saml_authenticator_rejects_future_conditions() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-        clock_skew_seconds=0,
-    )
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate, clock_skew_seconds=0)
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     not_before = now + dt.timedelta(minutes=5)
     not_on_or_after = now + dt.timedelta(minutes=10)
     nb = _saml_instant(not_before)
     noa = _saml_instant(not_on_or_after)
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation>"
-        f"<SubjectConfirmationData NotBefore='{nb}' "
-        f"NotOnOrAfter='{noa}'/>"
-        "</SubjectConfirmation>"
-        "</Subject>"
-        f"<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
-        "</Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation>"
+            "<SubjectConfirmationData NotBefore='{nb}' NotOnOrAfter='{noa}'/>"
+            "</SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'></Conditions>"
+        ),
+        subject=subject,
+        nb=nb,
+        noa=noa,
     )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(assertion, now=now)
@@ -1850,36 +2082,28 @@ def test_saml_authenticator_rejects_future_conditions() -> None:
 
 def test_saml_authenticator_rejects_expired_conditions() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-        clock_skew_seconds=0,
-    )
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate, clock_skew_seconds=0)
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     not_before = now - dt.timedelta(minutes=10)
     not_on_or_after = now - dt.timedelta(minutes=5)
     nb = _saml_instant(not_before)
     noa = _saml_instant(not_on_or_after)
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation>"
-        f"<SubjectConfirmationData NotBefore='{nb}' "
-        f"NotOnOrAfter='{noa}'/>"
-        "</SubjectConfirmation>"
-        "</Subject>"
-        f"<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
-        "</Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation>"
+            "<SubjectConfirmationData NotBefore='{nb}' NotOnOrAfter='{noa}'/>"
+            "</SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'></Conditions>"
+        ),
+        subject=subject,
+        nb=nb,
+        noa=noa,
     )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(assertion, now=now)
@@ -1888,37 +2112,30 @@ def test_saml_authenticator_rejects_expired_conditions() -> None:
 
 def test_saml_authenticator_rejects_expired_subject_confirmation() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-        clock_skew_seconds=0,
-    )
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate, clock_skew_seconds=0)
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     conditions_not_before = now - dt.timedelta(minutes=5)
     conditions_not_on_or_after = now + dt.timedelta(minutes=5)
     nb = _saml_instant(conditions_not_before)
     noa = _saml_instant(conditions_not_on_or_after)
     expired = _saml_instant(now - dt.timedelta(minutes=1))
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation>"
-        f"<SubjectConfirmationData NotBefore='{nb}' "
-        f"NotOnOrAfter='{expired}'/>"
-        "</SubjectConfirmation>"
-        "</Subject>"
-        f"<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
-        "</Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation>"
+            "<SubjectConfirmationData NotBefore='{nb}' NotOnOrAfter='{expired}'/>"
+            "</SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'></Conditions>"
+        ),
+        subject=subject,
+        nb=nb,
+        expired=expired,
+        noa=noa,
     )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(assertion, now=now)
@@ -1927,38 +2144,35 @@ def test_saml_authenticator_rejects_expired_subject_confirmation() -> None:
 
 def test_saml_authenticator_rejects_invalid_audience() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(
+        now,
+        certificate=certificate,
         clock_skew_seconds=0,
         allowed_audiences=["urn:example:aud"],
     )
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     nb = _saml_instant(now - dt.timedelta(minutes=5))
     noa = _saml_instant(now + dt.timedelta(minutes=5))
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation>"
-        f"<SubjectConfirmationData NotBefore='{nb}' "
-        f"NotOnOrAfter='{noa}'/>"
-        "</SubjectConfirmation>"
-        "</Subject>"
-        f"<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
-        "<AudienceRestriction>"
-        "<Audience>urn:example:other</Audience>"
-        "</AudienceRestriction>"
-        "</Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation>"
+            "<SubjectConfirmationData NotBefore='{nb}' NotOnOrAfter='{noa}'/>"
+            "</SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions NotBefore='{nb}' NotOnOrAfter='{noa}'>"
+            "<AudienceRestriction>"
+            "<Audience>urn:example:other</Audience>"
+            "</AudienceRestriction>"
+            "</Conditions>"
+        ),
+        subject=subject,
+        nb=nb,
+        noa=noa,
     )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(assertion, now=now)
@@ -1967,28 +2181,20 @@ def test_saml_authenticator_rejects_invalid_audience() -> None:
 
 def test_saml_authenticator_allows_missing_temporal_attributes() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-        clock_skew_seconds=0,
-    )
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate, clock_skew_seconds=0)
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation><SubjectConfirmationData/></SubjectConfirmation>"
-        "</Subject>"
-        "<Conditions></Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation><SubjectConfirmationData/></SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions></Conditions>"
+        ),
+        subject=subject,
     )
     result = authenticator.validate(assertion, now=now)
     assert result["subject"] == subject
@@ -1996,35 +2202,28 @@ def test_saml_authenticator_allows_missing_temporal_attributes() -> None:
 
 def test_saml_authenticator_rejects_future_subject_confirmation() -> None:
     now = dt.datetime.now(dt.timezone.utc)
-    provider = TenantSamlProvider(
-        id=generate_id57(),
-        entity_id="urn:example",
-        metadata_url="https://example.com/metadata",
-        certificate="saml-secret",
-        acs_url="https://app.example.com/acs",
-        created_at=now,
-        updated_at=now,
-        clock_skew_seconds=0,
-    )
+    signing_key, certificate = _generate_saml_signing_material(now)
+    provider = _make_saml_provider(now, certificate=certificate, clock_skew_seconds=0)
     authenticator = SamlAuthenticator(provider)
     subject = "user@example.com"
-    signature = _b64url(hmac.new(provider.certificate.encode(), subject.encode(), hashlib.sha256).digest())
     conditions_not_before = _saml_instant(now - dt.timedelta(minutes=5))
     conditions_not_on_or_after = _saml_instant(now + dt.timedelta(minutes=5))
     confirmation_not_before = _saml_instant(now + dt.timedelta(minutes=5))
-    assertion = (
-        "<Assertion xmlns='urn:oasis:names:tc:SAML:2.0:assertion'>"
-        "<Subject>"
-        f"<NameID>{subject}</NameID>"
-        "<SubjectConfirmation>"
-        f"<SubjectConfirmationData NotBefore='{confirmation_not_before}' "
-        f"NotOnOrAfter='{conditions_not_on_or_after}'/>"
-        "</SubjectConfirmation>"
-        "</Subject>"
-        f"<Conditions NotBefore='{conditions_not_before}' NotOnOrAfter='{conditions_not_on_or_after}'>"
-        "</Conditions>"
-        f"<SignatureValue>{signature}</SignatureValue>"
-        "</Assertion>"
+    assertion = _render_signed_assertion(
+        signing_key,
+        body=(
+            "<Subject>"
+            "<NameID>{subject}</NameID>"
+            "<SubjectConfirmation>"
+            "<SubjectConfirmationData NotBefore='{confirmation_not_before}' NotOnOrAfter='{conditions_not_on_or_after}'/>"
+            "</SubjectConfirmation>"
+            "</Subject>"
+            "<Conditions NotBefore='{conditions_not_before}' NotOnOrAfter='{conditions_not_on_or_after}'></Conditions>"
+        ),
+        subject=subject,
+        confirmation_not_before=confirmation_not_before,
+        conditions_not_on_or_after=conditions_not_on_or_after,
+        conditions_not_before=conditions_not_before,
     )
     with pytest.raises(AuthenticationError) as exc:
         authenticator.validate(assertion, now=now)
