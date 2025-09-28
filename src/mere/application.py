@@ -328,7 +328,23 @@ class MereApp:
             else:
                 query_string = extra
         tenant = self.tenant_resolver.resolve(host)
-        match = self.router.find(method, path)
+        try:
+            match = self.router.find(method, path)
+        except LookupError:
+            request = Request(
+                method=method,
+                path=path,
+                headers=headers or {},
+                tenant=tenant,
+                path_params={},
+                query_string=query_string or "",
+                body=body if body is not None else None,
+                body_loader=None if body is not None else body_loader,
+            )
+            observation = self.observability.on_request_start(request)
+            error = HTTPError(Status.NOT_FOUND, {"detail": "route_not_found"})
+            response = exception_to_response(error)
+            return self.observability.on_request_success(observation, response)
         request = Request(
             method=method,
             path=path,
