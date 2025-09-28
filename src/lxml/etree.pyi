@@ -1,0 +1,76 @@
+from __future__ import annotations
+
+from typing import Any, Iterator, Literal, Mapping, MutableMapping, Sequence, overload
+
+class XMLSyntaxError(Exception): ...
+
+class _Element:
+    tag: str
+    attrib: MutableMapping[str, str]
+    text: str | None
+    tail: str | None
+
+    def __init__(self, tag: str, attrib: MutableMapping[str, str] | None = ..., **extra: str) -> None: ...
+    def get(self, key: str, default: str | None = ...) -> str | None: ...
+    def set(self, key: str, value: str) -> None: ...
+    def find(self, path: str) -> _Element | None: ...
+    def findall(self, path: str) -> list[_Element]: ...
+    def findtext(self, path: str, default: str | None = ...) -> str | None: ...
+    def xpath(self, path: str, **kwargs: Any) -> list[_Element]: ...
+    def iter(self, tag: str | None = ...) -> Iterator[_Element]: ...
+    def getparent(self) -> _Element | None: ...
+    def remove(self, element: _Element) -> None: ...
+    def append(self, element: _Element) -> None: ...
+    def insert(self, index: int, element: _Element) -> None: ...
+    def __iter__(self) -> Iterator[_Element]: ...
+    def __getitem__(self, index: int) -> _Element: ...
+
+class _ElementTree:
+    def getroot(self) -> _Element: ...
+
+def Element(
+    tag: str,
+    attrib: MutableMapping[str, str] | None = ...,
+    nsmap: Mapping[str, str] | None = ...,
+    **extra: str,
+) -> _Element: ...
+def SubElement(
+    parent: _Element,
+    tag: str,
+    attrib: MutableMapping[str, str] | None = ...,
+    nsmap: Mapping[str, str] | None = ...,
+    **extra: str,
+) -> _Element: ...
+def fromstring(text: bytes | str, parser: Any | None = ...) -> _Element: ...
+@overload
+def tostring(
+    element: _Element | bytes,
+    *,
+    method: str | None = ...,
+    exclusive: bool | None = ...,
+    with_comments: bool | None = ...,
+    xml_declaration: bool | None = ...,
+    pretty_print: bool | None = ...,
+    inclusive_ns_prefixes: Sequence[str] | None = ...,
+    encoding: Literal["unicode"],
+) -> str: ...
+@overload
+def tostring(
+    element: _Element | bytes,
+    *,
+    method: str | None = ...,
+    exclusive: bool | None = ...,
+    with_comments: bool | None = ...,
+    xml_declaration: bool | None = ...,
+    pretty_print: bool | None = ...,
+    inclusive_ns_prefixes: Sequence[str] | None = ...,
+    encoding: str | None = ...,
+) -> bytes: ...
+def canonicalize(
+    element_or_tree: _Element | _ElementTree,
+    *,
+    exclusive: bool = ...,
+    with_comments: bool = ...,
+    inclusive_ns_prefixes: Sequence[str] | None = ...,
+) -> bytes: ...
+def XMLParser(**kwargs: Any) -> Any: ...
