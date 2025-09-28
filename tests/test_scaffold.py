@@ -93,9 +93,9 @@ def test_compose_and_ops_templates() -> None:
 @pytest.mark.parametrize(
     "backbone, expected_snippets",
     [
-        ("aws", ("variable \"region\"",)),
-        ("gcp", ("variable \"region\"", "variable \"project\"")),
-        ("cloudflare", ("variable \"api_token\"",)),
+        ("aws", ('variable "region"',)),
+        ("gcp", ('variable "region"', 'variable "project"')),
+        ("cloudflare", ('variable "api_token"',)),
     ],
 )
 def test_terraform_variables_template_declares_backbone_inputs(
@@ -108,6 +108,6 @@ def test_terraform_variables_template_declares_backbone_inputs(
 
 def test_terraform_variables_template_excludes_unused_inputs() -> None:
     rendered = scaffold._terraform_variables_template(_options(backbone="digitalocean"))
-    assert "variable \"region\"" not in rendered
-    assert "variable \"project\"" not in rendered
-    assert "variable \"api_token\"" not in rendered
+    assert 'variable "region"' not in rendered
+    assert 'variable "project"' not in rendered
+    assert 'variable "api_token"' not in rendered

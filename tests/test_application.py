@@ -160,6 +160,17 @@ async def test_security_headers_present(app: MereApp) -> None:
             assert headers.get(name) == value
 
 
+@pytest.mark.asyncio
+async def test_missing_route_returns_not_found(app: MereApp) -> None:
+    async with TestClient(app) as client:
+        response = await client.get("/missing", tenant="acme")
+        assert response.status == Status.NOT_FOUND
+        payload = json_decode(response.body)
+        assert payload == {
+            "error": {"status": 404, "reason": "Not Found", "detail": {"detail": "route_not_found"}}
+        }
+
+
 def test_security_middleware_ordering() -> None:
     app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
 
@@ -1119,3 +1130,112 @@ async def test_dispatch_binds_audit_actor_from_principal(monkeypatch: pytest.Mon
         headers={"x-user": "admin"},
     )
     assert json_decode(admin.body) == {"actor": "admin"}
+
+
+@pytest.mark.asyncio
+async def test_mount_asgi_serves_root_and_named_route() -> None:
+    config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
+    app = MereApp(config=config)
+
+    recorded: dict[str, object] = {}
+
+    async def simple(scope, receive, send):  # type: ignore[no-untyped-def]
+        recorded["path"] = scope["path"]
+        recorded["root_path"] = scope.get("root_path")
+        recorded["query_string"] = scope.get("query_string")
+        body = scope["path"].encode("latin-1")
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 200,
+                "headers": [(b"content-type", b"text/plain"), (b"content-length", str(len(body)).encode())],
+            }
+        )
+        await send({"type": "http.response.body", "body": body})
+
+    app.mount_asgi("legacy/", simple, name="legacy-asgi")
+    await app.startup()
+    response = await app.dispatch("GET", "/legacy?id=5", host="acme.demo.example.com")
+    await app.shutdown()
+
+    assert response.status == 200
+    assert response.body == b"/legacy"
+    assert recorded == {
+        "path": "/legacy",
+        "root_path": "/legacy",
+        "query_string": b"id=5",
+    }
+    assert app.url_path_for("legacy-asgi") == "/legacy"
+
+
+def test_mount_asgi_rejects_empty_path() -> None:
+    config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
+    app = MereApp(config=config)
+
+    async def simple(scope, receive, send):  # type: ignore[no-untyped-def]
+        raise AssertionError("should not run")
+
+    with pytest.raises(ValueError):
+        app.mount_asgi("   ", simple)
+
+
+@pytest.mark.asyncio
+async def test_mount_asgi_root_prefix_handles_receive_and_headers() -> None:
+    config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
+    app = MereApp(config=config)
+
+    recorded: dict[str, object] = {}
+
+    async def root_app(scope, receive, send):  # type: ignore[no-untyped-def]
+        recorded["path"] = scope["path"]
+        recorded["root_path"] = scope.get("root_path")
+        recorded["query_string"] = scope.get("query_string")
+        first = await receive()
+        recorded["first_message"] = first["type"]
+        second = await receive()
+        recorded["second_message"] = second["type"]
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 204,
+                "headers": [("x-answer", "42"), ("x-count", 5)],
+            }
+        )
+        await send({"type": "http.response.body", "body": b"", "more_body": True})
+        await send({"type": "http.response.trailers"})
+        await send({"type": "http.response.body", "body": b"", "more_body": False})
+
+    app.mount_asgi("/", root_app)
+    await app.startup()
+    response = await app.dispatch(
+        "GET",
+        "/?existing=1",
+        host="acme.demo.example.com",
+        query_string="extra=2",
+    )
+    await app.shutdown()
+
+    assert response.status == 204
+    assert response.body == b""
+    assert recorded == {
+        "path": "/",
+        "root_path": "",
+        "query_string": b"extra=2&existing=1",
+        "first_message": "http.request",
+        "second_message": "http.disconnect",
+    }
+
+
+@pytest.mark.asyncio
+async def test_mount_asgi_requires_response_start() -> None:
+    config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
+    app = MereApp(config=config)
+
+    async def broken(scope, receive, send):  # type: ignore[no-untyped-def]
+        await send({"type": "http.response.body", "body": b""})
+
+    app.mount_asgi("/broken", broken)
+    await app.startup()
+    with pytest.raises(RuntimeError):
+        await app.dispatch("GET", "/broken", host="acme.demo.example.com")
+    await app.shutdown()

@@ -43,8 +43,9 @@ All routes live under `/__mere` by default (configurable via `base_path`).
 ### Documentation
 
 The documentation lives in the [`docs/`](docs/) directory and is rendered with MkDocs using the
-`mkdocs-shadcn` theme. Preview changes locally with `uv run mkdocs serve` and publish to GitHub Pages
-via `uv run mkdocs gh-deploy --force`.
+`mkdocs-shadcn` theme. Preview changes locally with `uv run mkdocs serve`. Pushes to `main` publish the
+site automatically through the GitHub Pages workflow; trigger a manual deploy with `uv run mkdocs gh-deploy --force`
+when needed.
 
 ## CLI project generator
 

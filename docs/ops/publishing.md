@@ -23,13 +23,23 @@ The output lives in `site/` and matches what GitHub Pages will host.
 
 ## Deploy to GitHub Pages
 
-Use the MkDocs deployment helper:
+The CI pipeline builds the site with `mkdocs build --strict`, uploads the `site/` folder as an artifact,
+and publishes it using the official `actions/deploy-pages` workflow. The repository's GitHub Pages settings
+should point at the workflow source (the `GitHub Pages` environment) rather than the legacy `gh-pages` branch.
+
+### Troubleshooting
+
+If the workflow finishes successfully but the site does not update, double-check the repository settings under
+**Settings → Pages**. When the source is still configured to `gh-pages` (or another branch), GitHub ignores the
+artifact published by `actions/deploy-pages`. Switch the source to **GitHub Actions**, or explicitly select the
+`GitHub Pages` environment created by the workflow, and the next pipeline run will publish the built site.
+
+To trigger a manual deploy outside CI you can still use MkDocs' helper. The command below builds the
+site locally and pushes a `gh-pages` branch:
 
 ```shell
 uv run mkdocs gh-deploy --force
 ```
 
-The command builds the site and pushes it to the `gh-pages` branch. Configure the repository's GitHub
-Pages settings to serve content from that branch. Subsequent deployments reuse the same command. The
-automation pipeline also runs this command after every push to `main`, ensuring that docs in GitHub Pages stay
-in sync with the default branch.
+When deploying manually, confirm that repository settings allow publishing from the `gh-pages` branch or
+switch back to workflow-driven deploys by re-enabling the GitHub Pages environment.
