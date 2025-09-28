@@ -30,4 +30,6 @@ uv run mkdocs gh-deploy --force
 ```
 
 The command builds the site and pushes it to the `gh-pages` branch. Configure the repository's GitHub
-Pages settings to serve content from that branch. Subsequent deployments reuse the same command.
+Pages settings to serve content from that branch. Subsequent deployments reuse the same command. The
+automation pipeline also runs this command after every push to `main`, ensuring that docs in GitHub Pages stay
+in sync with the default branch.
