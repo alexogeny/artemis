@@ -487,40 +487,56 @@ class ArtemisApp:
         send: Callable[[Mapping[str, Any]], Awaitable[None]],
     ) -> None:
         headers, header_errors = self._decode_scope_headers(scope.get("headers", []))
-        if header_errors:
-            error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_header_encoding"})
+        async def send_http_error(error: HTTPError) -> None:
             response = exception_to_response(error)
             await send(
                 {
                     "type": "http.response.start",
                     "status": response.status,
                     "headers": [
-                        (k.encode("latin-1"), v.encode("latin-1")) for k, v in response.headers
+                        (name.encode("latin-1"), value.encode("latin-1"))
+                        for name, value in response.headers
                     ],
                 }
             )
             await _send_response_body(response, send)
+
+        if header_errors:
+            error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_header_encoding"})
+            await send_http_error(error)
             return
         host = headers.get("host")
         if not host:
             error = HTTPError(Status.BAD_REQUEST, {"detail": "missing_host_header"})
-            response = exception_to_response(error)
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": response.status,
-                    "headers": [
-                        (k.encode("latin-1"), v.encode("latin-1")) for k, v in response.headers
-                    ],
-                }
-            )
-            await _send_response_body(response, send)
+            await send_http_error(error)
             return
+        max_body_bytes = self.config.max_request_body_bytes
+        if max_body_bytes is not None:
+            content_length = headers.get("content-length")
+            if content_length:
+                try:
+                    declared_length = int(content_length)
+                except ValueError:
+                    error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_content_length"})
+                    await send_http_error(error)
+                    return
+                if declared_length < 0:
+                    error = HTTPError(Status.BAD_REQUEST, {"detail": "invalid_content_length"})
+                    await send_http_error(error)
+                    return
+                if declared_length > max_body_bytes:
+                    error = HTTPError(
+                        Status.PAYLOAD_TOO_LARGE,
+                        {"detail": "request_body_too_large"},
+                    )
+                    await send_http_error(error)
+                    return
         body_state: dict[str, Any] = {
             "buffer": bytearray(),
             "cached": None,
             "done": False,
         }
+        query_string = self._decode_query_string(scope.get("query_string"))
 
         async def load_body() -> bytes:
             cached = body_state["cached"]
@@ -538,7 +554,18 @@ class ArtemisApp:
                     continue
                 chunk = message.get("body", b"")
                 if chunk:
-                    body_state["buffer"].extend(chunk)
+                    chunk_bytes = bytes(chunk)
+                    if max_body_bytes is not None:
+                        projected = len(body_state["buffer"]) + len(chunk_bytes)
+                        if projected > max_body_bytes:
+                            body_state["done"] = True
+                            body_state["cached"] = None
+                            body_state["buffer"] = bytearray()
+                            raise HTTPError(
+                                Status.PAYLOAD_TOO_LARGE,
+                                {"detail": "request_body_too_large"},
+                            )
+                    body_state["buffer"].extend(chunk_bytes)
                 if not message.get("more_body", False):
                     body_state["done"] = True
                     continue
@@ -552,7 +579,7 @@ class ArtemisApp:
                 scope["method"],
                 scope["path"],
                 host=host,
-                query_string=(scope.get("query_string") or b"").decode(),
+                query_string=query_string,
                 headers=headers,
                 body_loader=load_body,
             )
@@ -599,7 +626,7 @@ class ArtemisApp:
             headers=headers,
             tenant=tenant,
             path_params=match.params,
-            query_string=(scope.get("query_string") or b"").decode(),
+            query_string=self._decode_query_string(scope.get("query_string")),
         )
         scope_obj = self.dependencies.scope(request)
         websocket = WebSocket(
@@ -653,6 +680,16 @@ class ArtemisApp:
                 continue
             decoded[name.lower()] = value
         return decoded, had_errors
+
+    @staticmethod
+    def _decode_query_string(raw: object | None) -> str:
+        if raw is None:
+            return ""
+        if isinstance(raw, str):
+            return raw
+        if isinstance(raw, (bytes, bytearray, memoryview)):
+            return bytes(raw).decode("latin-1")
+        return str(raw)  # pragma: no cover - defensive fallback
 
 
 class Artemis(ArtemisApp):

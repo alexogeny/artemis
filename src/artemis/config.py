@@ -18,6 +18,7 @@ class AppConfig(Struct, frozen=True):
     admin_subdomain: str = "admin"
     marketing_tenant: str = "public"
     allowed_tenants: tuple[str, ...] = ()
+    max_request_body_bytes: int | None = 1_048_576
     execution: ExecutionConfig = ExecutionConfig()
     database: DatabaseConfig | None = None
     chatops: ChatOpsConfig = ChatOpsConfig()
