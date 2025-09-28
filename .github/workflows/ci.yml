@@ -55,6 +55,11 @@ jobs:
       - name: Sync project dependencies
         run: uv sync --dev --frozen
 
+      - name: Configure git identity for deployment
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
       - name: Deploy MkDocs site
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
