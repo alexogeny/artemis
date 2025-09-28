@@ -20,6 +20,7 @@ nav:
       - HTTP utilities: reference/http.md
   - Operations:
       - Publishing docs: ops/publishing.md
+      - Secret hygiene: ops/security.md
 
 theme:
   name: shadcn

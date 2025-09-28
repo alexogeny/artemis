@@ -33,3 +33,34 @@ jobs:
 
       - name: Run test suite
         run: uv run pytest
+
+  docs:
+    name: Deploy documentation
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v2
+
+      - name: Sync project dependencies
+        run: uv sync --dev --frozen
+
+      - name: Configure git identity for deployment
+        run: |
+          git config --global user.name 'github-actions[bot]'
+          git config --global user.email '41898282+github-actions[bot]@users.noreply.github.com'
+
+      - name: Deploy MkDocs site
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: uv run mkdocs gh-deploy --force

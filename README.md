@@ -5,7 +5,10 @@
 `attach_quickstart` wires production-grade authentication and tenancy scaffolding for a multi-tenant Mere
 deployment in a few lines of code. The helper defaults to development/staging domains so the sample tenants
 (`acme`, `beta`) stay out of production, but the login engine and routes it exposes are the same ones you would
-run for real customers. When enabled it provides:
+run for real customers. Configuration is driven entirely through environment variables so each developer can
+point the quickstart at tenant data that matches their sandbox. Copy `.env.example` to `.env`, adjust the
+payload, and run local services with `uv run --env-file .env <command>` (or export the variables directly in
+your shell). When enabled it provides:
 
 * **Diagnostics:** `/__mere/ping`, OpenAPI JSON, and a generated TypeScript client that all resolve for
   every tenant host (`*.site.domain`), including the admin control plane (`admin.site.domain`).
@@ -64,13 +67,11 @@ config = await repository.load()
 Pass a `QuickstartAuthConfig` into `attach_quickstart` to model your own tenants, users, and credentials.
 When a database is attached the seeder writes those identities into the quickstart tables so you can iterate
 with realistic storage. Construct `MereApp` with a `Database`/`ORM` to persist the data, or omit them to stay
-purely in-memory. You can also point `attach_quickstart` at configuration stored in environment variables:
-
-* `MERE_QUICKSTART_AUTH` — JSON payload matching `QuickstartAuthConfig`.
-* `MERE_QUICKSTART_AUTH_FILE` — path to a JSON file containing the same payload.
-
-Both inputs support secrets mounted from your secret manager; the loader resolves `_FILE` first so you can
-mount them as one-off files.
+purely in-memory. You can also point `attach_quickstart` at configuration stored in environment variables. The
+helper first checks `MERE_QUICKSTART_AUTH_FILE` (pointing to a JSON file) and then `MERE_QUICKSTART_AUTH`
+(inline JSON). The `.env.example` file documents both options so teams can either mount secrets from their
+manager into files or export them inline. The loader resolves `_FILE` first so you can keep real credentials
+outside the repository.
 
 Example using inline configuration:
 
