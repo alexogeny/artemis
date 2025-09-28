@@ -14,6 +14,7 @@ nav:
       - Tenant routing: guides/tenancy.md
       - Observability: guides/observability.md
       - Database and ORM: guides/database.md
+      - Migrating from FastAPI: guides/migrating-from-fastapi.md
   - Reference:
       - API reference: reference/api.md
       - CLI: reference/cli.md

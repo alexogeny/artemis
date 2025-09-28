@@ -1,5 +1,6 @@
 """Mere asynchronous multi-tenant web framework."""
 
+from .adapters.fastapi import mount_fastapi
 from .application import Mere, MereApp
 from .audit import AuditActor, AuditTrail, audit_context
 from .authentication import (
@@ -260,6 +261,7 @@ __all__ = [
     "is_server_error",
     "is_success",
     "model",
+    "mount_fastapi",
     "post",
     "reason_phrase",
     "route",

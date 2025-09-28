@@ -178,3 +178,9 @@ class Request:
                 )
             )
         return self
+
+    @property
+    def raw_query(self) -> str:
+        """Return the raw query string for the request."""
+
+        return self._raw_query

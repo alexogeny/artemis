@@ -42,6 +42,13 @@ Handler = Callable[[Request], Awaitable[Response]]
 
 HeaderPart = bytes | bytearray | memoryview | str
 
+ASGIApp = Callable[
+    [Mapping[str, Any], Callable[[], Awaitable[Mapping[str, Any]]], Callable[[Mapping[str, Any]], Awaitable[None]]],
+    Awaitable[None],
+]
+
+_ALL_HTTP_METHODS: tuple[str, ...] = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE")
+
 
 class MereApp:
     """Central application object."""
@@ -219,6 +226,41 @@ class MereApp:
         if name is not None:
             self._named_routes[name] = mount_path
 
+    def mount_asgi(
+        self,
+        path: str,
+        app: ASGIApp,
+        *,
+        name: str | None = None,
+        methods: Sequence[str] | None = None,
+        startup: Callable[[], Awaitable[None] | None] | None = None,
+        shutdown: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> None:
+        """Mount an ASGI application under ``path``."""
+
+        mount_path = _normalize_mount_prefix(path)
+        proxy = _ASGIProxy(app, root_path=mount_path)
+        route_methods = tuple(dict.fromkeys(methods or _ALL_HTTP_METHODS))
+
+        if startup is not None:
+            self.on_startup(startup)
+        if shutdown is not None:
+            self.on_shutdown(shutdown)
+
+        async def _serve_root(request: Request) -> Response:
+            scope_path = _resolve_mounted_scope_path(request.path, mount_path)
+            return await proxy.dispatch(request, scope_path)
+
+        async def _serve_path(remaining: str, request: Request) -> Response:
+            suffix = "/" if not remaining else f"/{remaining}"
+            return await proxy.dispatch(request, suffix)
+
+        self.router.add_route(mount_path, methods=route_methods, endpoint=_serve_root, name=name)
+        pattern = f"{mount_path}/{{remaining:path}}" if mount_path != "/" else "/{remaining:path}"
+        self.router.add_route(pattern, methods=route_methods, endpoint=_serve_path)
+        if name is not None:
+            self._named_routes[name] = mount_path
+
     def include(self, *handlers: Callable[..., Awaitable[Any] | Any]) -> None:
         self.router.include(handlers)
 
@@ -279,6 +321,12 @@ class MereApp:
         body: bytes | None = None,
         body_loader: Callable[[], Awaitable[bytes]] | None = None,
     ) -> Response:
+        if "?" in path:
+            path, extra = path.split("?", 1)
+            if query_string:
+                query_string = f"{query_string}&{extra}"
+            else:
+                query_string = extra
         tenant = self.tenant_resolver.resolve(host)
         match = self.router.find(method, path)
         request = Request(
@@ -753,6 +801,118 @@ class Mere(MereApp):
         if isinstance(config, AppConfig):
             return cls(config=config)
         return cls(config=msgspec.convert(config, type=AppConfig))
+
+
+class _ASGIProxy:
+    __slots__ = ("_app", "_root_path")
+
+    def __init__(self, app: ASGIApp, *, root_path: str) -> None:
+        self._app = app
+        self._root_path = "" if root_path == "/" else root_path
+
+    async def dispatch(self, request: Request, scope_path: str) -> Response:
+        return await _call_asgi_app(
+            self._app,
+            request,
+            scope_path,
+            root_path=self._root_path,
+        )
+
+
+def _normalize_mount_prefix(path: str) -> str:
+    normalized = path.strip()
+    if not normalized:
+        raise ValueError("ASGI mount path cannot be empty")
+    if not normalized.startswith("/"):
+        normalized = "/" + normalized
+    if normalized != "/":
+        normalized = normalized.rstrip("/")
+    return normalized or "/"
+
+
+def _resolve_mounted_scope_path(full_path: str, mount_path: str) -> str:
+    if mount_path == "/":
+        target = full_path
+    else:
+        target = full_path[len(mount_path) :]
+    if not target:
+        return "/"
+    return target if target.startswith("/") else "/" + target
+
+
+async def _call_asgi_app(
+    asgi_app: ASGIApp,
+    request: Request,
+    scope_path: str,
+    *,
+    root_path: str,
+) -> Response:
+    path = scope_path or "/"
+    body = await request.body()
+    request_sent = False
+
+    async def receive() -> Mapping[str, Any]:
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": body, "more_body": False}
+        return {"type": "http.disconnect"}
+
+    status_code: int | None = None
+    headers: list[tuple[str, str]] = []
+    payload = bytearray()
+
+    async def send(message: Mapping[str, Any]) -> None:
+        nonlocal status_code, headers
+        message_type = message.get("type")
+        if message_type == "http.response.start":
+            status_code = int(message.get("status", int(Status.OK)))
+            raw_headers = message.get("headers") or []
+            decoded: list[tuple[str, str]] = []
+            for name, value in raw_headers:
+                decoded.append((_decode_asgi_component(name), _decode_asgi_component(value)))
+            headers = decoded
+        elif message_type == "http.response.body":
+            chunk = message.get("body", b"") or b""
+            if chunk:
+                payload.extend(bytes(chunk))
+
+    scope_headers = [(key.encode("latin-1"), value.encode("latin-1")) for key, value in request.headers.items()]
+    if root_path:
+        normalized_root = root_path.rstrip("/") or "/"
+        if path == "/":
+            full_path = normalized_root
+        else:
+            full_path = normalized_root + path
+    else:
+        full_path = path
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0"},
+        "http_version": "1.1",
+        "method": request.method,
+        "scheme": request.header("x-forwarded-proto", "https"),
+        "path": full_path,
+        "raw_path": full_path.encode("latin-1", errors="ignore"),
+        "root_path": root_path,
+        "query_string": request.raw_query.encode("latin-1", errors="ignore"),
+        "headers": scope_headers,
+        "client": None,
+        "server": None,
+        "state": {},
+    }
+    await asgi_app(scope, receive, send)
+    if status_code is None:
+        raise RuntimeError("Mounted ASGI application did not send a response start message")
+    return Response(status=status_code, headers=tuple(headers), body=bytes(payload))
+
+
+def _decode_asgi_component(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).decode("latin-1", errors="ignore")
+    return str(value)
 
 
 def _decode_header_component(component: object) -> tuple[str, bool]:

@@ -21,6 +21,9 @@ dependencies = [
     "lxml>=6.0.0",
 ]
 
+[project.optional-dependencies]
+fastapi = ["fastapi>=0.110"]
+
 [project.scripts]
 mere = "mere.cli:main"
 quality = "mere.cli:quality"
@@ -38,6 +41,7 @@ dev-dependencies = [
     "mkdocs>=1.5",
     "mkdocs-shadcn>=0.9.5",
     "mkdocstrings[python]>=0.24",
+    "fastapi>=0.110",
 ]
 
 [tool.uv.sources]
