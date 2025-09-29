@@ -166,9 +166,7 @@ async def test_missing_route_returns_not_found(app: MereApp) -> None:
         response = await client.get("/missing", tenant="acme")
         assert response.status == Status.NOT_FOUND
         payload = json_decode(response.body)
-        assert payload == {
-            "error": {"status": 404, "reason": "Not Found", "detail": {"detail": "route_not_found"}}
-        }
+        assert payload == {"error": {"status": 404, "reason": "Not Found", "detail": {"detail": "route_not_found"}}}
 
 
 def test_security_middleware_ordering() -> None:
