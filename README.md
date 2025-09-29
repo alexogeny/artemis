@@ -10,6 +10,18 @@ point the quickstart at tenant data that matches their sandbox. Copy `.env.examp
 payload, and run local services with `uv run --env-file .env <command>` (or export the variables directly in
 your shell). When enabled it provides:
 
+The repository ships with [`example.py`](example.py) so you can kick the tyres immediately:
+
+```bash
+uv sync
+uv run example.py
+```
+
+The script starts a Granian server with the quickstart bundle wired in. Override `MERE_SITE`, `MERE_DOMAIN`,
+`MERE_ALLOWED_TENANTS`, `MERE_HOST`, or `MERE_PORT` to tailor the tenancy hostnames and bind address. Provide a
+`DATABASE_URL` when you want the quickstart tables to persist in PostgreSQL; otherwise the demo operates purely
+in memory.
+
 * **Diagnostics:** `/__mere/ping`, OpenAPI JSON, and a generated TypeScript client that all resolve for
   every tenant host (`*.site.domain`), including the admin control plane (`admin.site.domain`).
 * **Authentication flows:** fully tenant-aware login endpoints that model SSO, passkey, password, and MFA
