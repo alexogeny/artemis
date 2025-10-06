@@ -156,3 +156,30 @@ def test_gdpr_sentry_tags_redacted_for_incident_reports() -> None:
     assert tags is not None
     assert tags["tenant"] == "[redacted]"
     assert tags["issue"] == "timeout"
+
+
+def test_gdpr_rejects_hosts_with_path_delimiters() -> None:
+    """Article 32(1)(c) blocks host headers containing path delimiters."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve("acme/demo.example.com")
+
+
+def test_gdpr_rejects_overlong_dns_labels() -> None:
+    """Article 32(2) enforces DNS label length checks for tenant hosts."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    overlong_label = "a" * 64
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve(f"{overlong_label}.demo.example.com")
+
+
+def test_gdpr_datadog_tags_can_be_hashed() -> None:
+    """Article 28(3)(c) requires processors to pseudonymise monitoring exports."""
+
+    config = ObservabilityConfig(tenant=TenantRedactionConfig(datadog_tags="hash"))
+    observability = Observability(config)
+    tags = observability._sanitize_datadog_tags(("tenant:acme", "chatops.site:demo"))
+    assert tags[0].startswith("tenant:[hash:")
+    assert tags[1].startswith("chatops.site:[hash:")

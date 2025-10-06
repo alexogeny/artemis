@@ -13,6 +13,8 @@ from mere.audit import INSERT, AuditActor, AuditTrail, audit_context
 from mere.database import Database, DatabaseConfig, PoolConfig
 from mere.models import AdminAuditLogEntry, TenantAuditLogEntry, TenantUser
 from mere.orm import default_registry
+from mere.responses import Response, security_headers_middleware
+from mere.routing import RouteGuard, Router
 from mere.server import (
     ServerConfig,
     _clear_current_app,
@@ -273,3 +275,44 @@ def test_soc2_failed_bootstrap_rolls_back_registration(tmp_path: Path) -> None:
         _current_app_loader()
 
     _clear_current_app()
+
+
+def test_soc2_global_guards_apply_consistently() -> None:
+    """SOC 2 CC6.3 enforces consistent access policies across all routes."""
+
+    router = Router()
+    guard = RouteGuard(action="read", resource_type="tenant", principal_type="user")
+    router.guard(guard)
+
+    def handler(_: object) -> Response:
+        return Response(status=204)
+
+    route = router.add_route("/secure", methods=("GET",), endpoint=handler)
+    assert guard in route.guards
+
+
+def test_soc2_security_headers_middleware_is_pinned_last() -> None:
+    """SOC 2 CC7.3 keeps HTTP hardening middleware anchored in the stack."""
+
+    app = MereApp()
+
+    async def noop_middleware(request: object, handler: object) -> Response:  # type: ignore[override]
+        del request, handler
+        return Response(status=204)
+
+    app.add_middleware(noop_middleware)
+
+    assert app._middlewares[-1] is security_headers_middleware
+    assert app._middlewares[0] is noop_middleware
+
+
+def test_soc2_router_include_rejects_undecorated_handlers() -> None:
+    """SOC 2 CC6.8 requires formal change control before publishing handlers."""
+
+    router = Router()
+
+    async def undecorated(_: object) -> Response:
+        return Response(status=200)
+
+    with pytest.raises(ValueError):
+        router.include([undecorated])

@@ -177,3 +177,39 @@ def test_iso27001_environment_flags_require_explicit_opt_in(
     assert observability._opentelemetry_enabled is True
     assert observability._sentry_enabled is True
     assert observability._datadog_enabled is True
+
+
+def test_iso27001_log_fields_mask_tenant_metadata() -> None:
+    """Annex A.8.15 protects monitoring logs by hashing tenant identifiers."""
+
+    config = ObservabilityConfig(tenant=TenantRedactionConfig(log_fields="hash"))
+    observability = Observability(config)
+
+    fields = observability._sanitize_log_fields(
+        {
+            "tenant": "acme",
+            "http.site": "demo.example.com",
+            "event": "login",
+        }
+    )
+    assert fields is not None
+    assert fields["tenant"].startswith("[hash:")
+    assert fields["http.site"].startswith("[hash:")
+    assert fields["event"] == "login"
+
+
+def test_iso27001_traceparent_rejects_zero_identifiers() -> None:
+    """Annex A.8.16 rejects telemetry headers with null trace identifiers."""
+
+    header = "00-" + ("0" * 32) + "-" + ("0" * 16) + "-01"
+    assert Observability._parse_traceparent(header) is None
+
+
+def test_iso27001_datadog_hashes_chatops_tags() -> None:
+    """Annex A.5.23 protects SaaS monitoring exports through hashed tenant tags."""
+
+    config = ObservabilityConfig(tenant=TenantRedactionConfig(datadog_tags="hash"))
+    observability = Observability(config)
+    tags = observability._sanitize_datadog_tags(("chatops.site:demo", "tenant:acme"))
+    assert tags[0].startswith("chatops.site:[hash:")
+    assert tags[1].startswith("tenant:[hash:")

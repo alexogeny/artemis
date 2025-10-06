@@ -217,3 +217,61 @@ async def test_hipaa_rate_limiter_caps_cooldown_to_policy_maximum() -> None:
 
     # Once the capped eight second cooldown has elapsed the retry is authorised.
     await rate_limiter.enforce(key, now + dt.timedelta(seconds=12))
+
+
+@pytest.mark.asyncio
+async def test_hipaa_rate_limiter_resets_after_monitoring_window() -> None:
+    """164.308(a)(5)(ii)(A) resumes access once login monitoring window elapses."""
+
+    rate_limiter = AuthenticationRateLimiter(
+        max_attempts=5,
+        window=dt.timedelta(seconds=2),
+        base_cooldown=dt.timedelta(seconds=1),
+    )
+    now = dt.datetime(2024, 5, 4, 11, tzinfo=dt.timezone.utc)
+    key = ["tenant:beta:resident"]
+
+    await rate_limiter.record_failure(key, now)
+    await rate_limiter.record_failure(key, now + dt.timedelta(seconds=1))
+
+    with pytest.raises(AuthenticationError) as excinfo:
+        await rate_limiter.enforce(key, now + dt.timedelta(seconds=1))
+    assert str(excinfo.value) == "rate_limited"
+
+    # After the monitoring window ends the resident may attempt again.
+    await rate_limiter.enforce(key, now + dt.timedelta(seconds=5))
+
+
+@pytest.mark.asyncio
+async def test_hipaa_audit_entries_capture_actor_identity() -> None:
+    """164.312(d) logs the authenticated entity associated with disclosures."""
+
+    now = dt.datetime(2024, 5, 5, tzinfo=dt.timezone.utc)
+    connection = FakeConnection()
+    pool = FakePool(connection)
+    database = Database(DatabaseConfig(pool=PoolConfig(dsn="postgres://")), pool=pool)
+    trail = AuditTrail(database, registry=default_registry(), clock=lambda: now)
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    tenant = resolver.context_for("acme")
+
+    actor = AuditActor(id="auditor-7", type="ComplianceOfficer")
+    before = {"email": "patient@example.com"}
+    user = TenantUser(email="patient@example.com", hashed_password="secret")
+    row = msgspec.to_builtins(user)
+
+    async with audit_context(tenant=tenant, actor=actor):
+        await trail.record_model_change(
+            info=default_registry().info_for(TenantUser),
+            action=UPDATE,
+            tenant=tenant,
+            data=row,
+            changes=row,
+            before=before,
+        )
+
+    _, _, params, _ = connection.calls[-1]
+    info = default_registry().info_for(TenantAuditLogEntry)
+    inserted = {field.name: value for field, value in zip(info.fields, params)}
+    assert inserted["actor_id"] == "auditor-7"
+    assert inserted["actor_type"] == "ComplianceOfficer"
+    assert inserted["metadata"]["tenant"] == "acme"
