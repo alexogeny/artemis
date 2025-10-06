@@ -158,9 +158,11 @@ class BootstrapPasskeyCipher:
 
         return self._fernet.encrypt(secret).decode("utf-8")
 
-    def decrypt(self, ciphertext: str) -> bytearray:
+    def decrypt(self, ciphertext: str | None) -> bytearray:
         """Decrypt ``ciphertext`` returning a mutable buffer for wiping."""
 
+        if ciphertext is None:
+            raise ValueError("Bootstrap passkey ciphertext is required for decryption")
         try:
             plaintext = self._fernet.decrypt(ciphertext.encode("utf-8"))
         except InvalidToken as exc:  # pragma: no cover - defensive guard
