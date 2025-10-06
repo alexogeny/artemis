@@ -9,13 +9,16 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import os
 import secrets
+import ssl
 from collections.abc import Callable, Iterable, Mapping, MutableMapping
 from dataclasses import dataclass
 from enum import Enum
 from hashlib import sha256
 from time import monotonic
 from typing import Any, Generic, Protocol, TypeVar
+from urllib.parse import urlparse
 from xml.etree import ElementTree as ET
 
 from cryptography import x509
@@ -1209,12 +1212,48 @@ def _ensure_utc(moment: dt.datetime | None) -> dt.datetime:
     return moment.astimezone(dt.timezone.utc)
 
 
-def _default_jwks_fetcher(uri: str) -> Mapping[str, Any]:
+def _default_jwks_fetcher(
+    uri: str,
+    *,
+    allowed_hosts: Iterable[str] | None = None,
+) -> Mapping[str, Any]:
     from urllib.request import urlopen
 
+    parsed = urlparse(uri)
+    scheme = (parsed.scheme or "").lower()
+    if scheme != "https":
+        raise AuthenticationError("jwks_insecure_uri")
+    host = (parsed.hostname or "").lower()
+    if not host:
+        raise AuthenticationError("jwks_invalid_host")
+
+    normalized_hosts: set[str] = set()
+    if allowed_hosts:
+        normalized_hosts.update(value.strip().lower() for value in allowed_hosts if value and value.strip())
+    env_hosts = os.getenv("MERE_OIDC_JWKS_ALLOWED_HOSTS", "")
+    if env_hosts:
+        normalized_hosts.update(
+            value.strip().lower() for value in env_hosts.split(",") if value.strip()
+        )
+    if normalized_hosts and host not in normalized_hosts:
+        raise AuthenticationError("jwks_disallowed_host")
+
+    context = ssl.create_default_context()
     try:
-        with urlopen(uri, timeout=5) as response:  # type: ignore[call-arg]
-            status = getattr(response, "status", 200)
+        with urlopen(uri, timeout=5, context=context) as response:  # type: ignore[call-arg]
+            final_url = getattr(response, "geturl", lambda: uri)()
+            final_parsed = urlparse(final_url)
+            final_scheme = (final_parsed.scheme or "").lower()
+            if final_scheme != "https":
+                raise AuthenticationError("jwks_insecure_redirect")
+            final_host = (final_parsed.hostname or "").lower()
+            if not final_host:
+                raise AuthenticationError("jwks_invalid_host")
+            if normalized_hosts and final_host not in normalized_hosts:
+                raise AuthenticationError("jwks_disallowed_host")
+            status = getattr(response, "status", None)
+            if status is None:
+                status = getattr(response, "getcode", lambda: 200)()
             if status != 200:
                 raise AuthenticationError("jwks_fetch_failed")
             payload = response.read()
