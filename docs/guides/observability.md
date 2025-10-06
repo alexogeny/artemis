@@ -26,6 +26,26 @@ The observability hooks expose async context managers for span creation, structu
 emitting metrics. The default implementation writes JSON events to stdout, but you can inject custom
 providers to integrate with OpenTelemetry, Honeycomb, or any other tracing system.
 
+### Controlling sensitive fields
+
+By default Mere redacts request paths and exception messages from structured logs. Override the
+behaviour by configuring `LoggingRedactionConfig` on the observability settings:
+
+```python
+from mere.observability import LoggingRedactionConfig, ObservabilityConfig
+
+config = ObservabilityConfig(
+    logging=LoggingRedactionConfig(
+        request_path="hash",  # "redact", "hash", or "raw"
+        exception_message="raw",
+        hash_salt="deploy-secret",  # optional salt to stabilise hashes
+    )
+)
+```
+
+`hash` mode keeps correlation while avoiding raw values, and `raw` opt-in restores the previous
+behaviour.
+
 ## Audit trails
 
 Audit trails capture sensitive operations in admin and tenant scopes. Use `AuditTrail` to wrap critical

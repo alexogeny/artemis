@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import secrets
@@ -38,6 +39,17 @@ class RequestObservabilityConfig(msgspec.Struct, frozen=True):
     datadog_metric_timing: str = "mere.request.duration"
 
 
+class LoggingRedactionConfig(msgspec.Struct, frozen=True):
+    """Configure how sensitive values are logged."""
+
+    request_path: str = "redact"
+    exception_message: str = "redact"
+    hash_salt: str | None = None
+
+
+_LOGGING_STRATEGIES = frozenset({"redact", "hash", "raw"})
+
+
 class ObservabilityConfig(msgspec.Struct, frozen=True):
     """Top-level observability configuration."""
 
@@ -53,6 +65,7 @@ class ObservabilityConfig(msgspec.Struct, frozen=True):
     datadog_tags: tuple[tuple[str, str], ...] = ()
     chatops: ChatOpsObservabilityConfig = ChatOpsObservabilityConfig()
     request: RequestObservabilityConfig = RequestObservabilityConfig()
+    logging: LoggingRedactionConfig = LoggingRedactionConfig()
 
 
 class _ObservationContext:
@@ -170,6 +183,10 @@ class Observability:
         id_generator: Callable[[int], str] | None = None,
     ) -> None:
         self.config = config or ObservabilityConfig()
+        if self.config.logging.request_path not in _LOGGING_STRATEGIES:
+            raise ValueError("logging.request_path must be one of 'redact', 'hash', or 'raw'")
+        if self.config.logging.exception_message not in _LOGGING_STRATEGIES:
+            raise ValueError("logging.exception_message must be one of 'redact', 'hash', or 'raw'")
         self._tracer = None
         self._client_span_kind = None
         self._server_span_kind = None
@@ -184,6 +201,9 @@ class Observability:
         self._logger = logging.getLogger("mere.observability")
         self._id_generator = id_generator or _default_id_generator()
         self._base_datadog_tags = tuple(f"{key}:{value}" for key, value in self.config.datadog_tags)
+        self._request_path_strategy = self.config.logging.request_path
+        self._exception_strategy = self.config.logging.exception_message
+        self._hash_salt = (self.config.logging.hash_salt or "").encode()
         if self.config.enabled:
             self._prepare_opentelemetry()
             self._prepare_sentry()
@@ -323,6 +343,42 @@ class Observability:
             return None
         return candidate
 
+    def _hash_value(self, *, category: str, value: str) -> str:
+        digest = hashlib.sha256()
+        digest.update(category.encode())
+        digest.update(b":")
+        digest.update(value.encode())
+        if self._hash_salt:
+            digest.update(b":")
+            digest.update(self._hash_salt)
+        return f"[hash:{digest.hexdigest()[:16]}]"
+
+    def _sanitize_request_path_for_logs(self, path: str | None) -> str | None:
+        if not path:
+            return path
+        if self._request_path_strategy == "raw":
+            return path
+        if self._request_path_strategy == "hash":
+            return self._hash_value(category="request-path", value=path)
+        return "[redacted]"
+
+    def _sanitize_exception_message_for_logs(self, message: str | None) -> str | None:
+        if message is None:
+            return None
+        if self._exception_strategy == "raw":
+            return message
+        if self._exception_strategy == "hash":
+            return self._hash_value(category="exception", value=message)
+        return "[redacted]"
+
+    def _sanitize_log_payload(self, payload: dict[str, Any]) -> None:
+        if "http.path" in payload:
+            payload["http.path"] = self._sanitize_request_path_for_logs(payload.get("http.path"))
+        if "http.target" in payload:
+            payload["http.target"] = self._sanitize_request_path_for_logs(payload.get("http.target"))
+        if "error_message" in payload:
+            payload["error_message"] = self._sanitize_exception_message_for_logs(payload.get("error_message"))
+
     def _log(self, context: _ObservationContext | None, event: str, extra: Mapping[str, Any] | None = None) -> None:
         if not self.config.enabled:
             return
@@ -342,6 +398,7 @@ class Observability:
                 if value is not None:
                     payload[key] = value
         payload["event"] = event
+        self._sanitize_log_payload(payload)
         self._logger.info(json.dumps(payload, separators=(",", ":")))
 
     @staticmethod
@@ -784,6 +841,7 @@ class Observability:
 
 __all__ = [
     "ChatOpsObservabilityConfig",
+    "LoggingRedactionConfig",
     "Observability",
     "ObservabilityConfig",
     "RequestObservabilityConfig",
