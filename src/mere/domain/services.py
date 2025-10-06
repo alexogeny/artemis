@@ -55,6 +55,23 @@ class TileRecord(msgspec.Struct, frozen=True, omit_defaults=True):
 class TileService(Protocol):
     """Manage dashboard tiles while enforcing RBAC."""
 
+    async def list_tiles(
+        self,
+        *,
+        tenant: TenantContext,
+        workspace_id: str,
+        principal: CedarEntity | None,
+    ) -> tuple[TileRecord, ...]: ...
+
+    async def get_tile(
+        self,
+        *,
+        tenant: TenantContext,
+        workspace_id: str,
+        tile_id: str,
+        principal: CedarEntity | None,
+    ) -> TileRecord: ...
+
     async def create_tile(
         self,
         *,

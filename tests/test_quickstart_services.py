@@ -316,6 +316,42 @@ async def test_tile_service_crud_cycle_covers_admin_and_tenant_scopes(
 
 
 @pytest.mark.asyncio
+async def test_tile_service_list_and_get_include_permissions(
+    tenant_alpha: TenantContext,
+) -> None:
+    tiles = InMemoryTable(DashboardTile)
+    permissions = InMemoryTable(DashboardTilePermission)
+    orm = FakeORM(tenants={"dashboard_tiles": tiles, "dashboard_tile_permissions": permissions}, admin={})
+    service = QuickstartTileService(orm)  # type: ignore[arg-type]
+
+    record = DashboardTile(
+        workspace_id=tenant_alpha.tenant,
+        title="Ops Overview",
+        layout={"kind": "chart"},
+    )
+    created = await tiles.create(record, tenant=tenant_alpha)
+    await permissions.create(
+        DashboardTilePermission(tile_id=created.id, roles=("analyst",), users=()),
+        tenant=tenant_alpha,
+    )
+
+    listing = await service.list_tiles(
+        tenant=tenant_alpha,
+        workspace_id=tenant_alpha.tenant,
+        principal=None,
+    )
+    assert len(listing) == 1
+    assert listing[0].permissions is not None
+    fetched = await service.get_tile(
+        tenant=tenant_alpha,
+        workspace_id=tenant_alpha.tenant,
+        tile_id=created.id,
+        principal=None,
+    )
+    assert fetched.id == created.id
+
+
+@pytest.mark.asyncio
 async def test_rbac_service_creates_roles_and_assigns_users(
     admin_ctx: TenantContext, tenant_alpha: TenantContext
 ) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import (
     TYPE_CHECKING,
@@ -58,12 +58,15 @@ from .domain.services import (
     AuditLogExportQuery,
     AuditService,
     DelegationGrant,
+    DelegationRecord,
     DelegationService,
     PermissionSetCreate,
+    PermissionSetRecord,
     RbacService,
     RoleAssignment,
     TileCreate,
     TilePermissions,
+    TileRecord,
     TileService,
     TileUpdate,
 )
@@ -185,6 +188,63 @@ class QuickstartSlashCommand(Struct, frozen=True):
     aliases: tuple[str, ...] = ()
 
 
+class QuickstartKanbanCard(Struct, frozen=True, omit_defaults=True):
+    """Card rendered within the workspace kanban board."""
+
+    id: str
+    title: str
+    status: Literal["backlog", "in_progress", "done"]
+    created_at: datetime = field(name="createdAt")
+    updated_at: datetime = field(name="updatedAt")
+    assignee: str | None = None
+    tags: tuple[str, ...] = ()
+    summary: str | None = None
+    severity: Literal["low", "medium", "high"] = "low"
+
+
+class QuickstartKanbanColumn(Struct, frozen=True, omit_defaults=True):
+    """Column on the kanban board with associated cards."""
+
+    key: Literal["backlog", "in_progress", "done"]
+    title: str
+    cards: tuple[QuickstartKanbanCard, ...]
+
+
+class QuickstartKanbanBoard(Struct, frozen=True, omit_defaults=True):
+    """Workspace kanban board summarizing support efforts."""
+
+    workspace_id: str = field(name="workspaceId")
+    columns: tuple[QuickstartKanbanColumn, ...]
+    updated_at: datetime = field(name="updatedAt")
+
+
+class QuickstartWorkspaceSettings(Struct, frozen=True, omit_defaults=True):
+    """Workspace configuration payload returned to the UI."""
+
+    workspace_id: str = field(name="workspaceId")
+    name: str
+    timezone: str
+    currency: str
+    features: tuple[str, ...]
+    tile_count: int = field(name="tileCount")
+    ai_insights_enabled: bool = field(name="aiInsightsEnabled")
+    alerts: tuple[str, ...] = ()
+
+
+class QuickstartNotification(Struct, frozen=True, omit_defaults=True):
+    """Notification entry surfaced to workspace operators."""
+
+    id: str
+    workspace_id: str = field(name="workspaceId")
+    kind: Literal["system", "support", "billing", "trial"]
+    title: str
+    message: str
+    occurred_at: datetime = field(name="occurredAt")
+    actor: str | None = None
+    severity: Literal["info", "warning", "critical"] = "info"
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+
+
 def _default_slash_commands() -> tuple[QuickstartSlashCommand, ...]:
     return (
         QuickstartSlashCommand(
@@ -218,6 +278,137 @@ def _default_slash_commands() -> tuple[QuickstartSlashCommand, ...]:
             aliases=("quickstart-ticket-update",),
         ),
     )
+
+
+_KANBAN_COLUMN_TITLES: Mapping[str, str] = {
+    "backlog": "Backlog",
+    "in_progress": "In Progress",
+    "done": "Done",
+}
+
+_KANBAN_STATUS_BY_TICKET: Mapping[SupportTicketStatus, str] = {
+    SupportTicketStatus.OPEN: "backlog",
+    SupportTicketStatus.RESPONDED: "in_progress",
+    SupportTicketStatus.RESOLVED: "done",
+}
+
+_KANBAN_SEVERITY_BY_KIND: Mapping[SupportTicketKind, str] = {
+    SupportTicketKind.GENERAL: "low",
+    SupportTicketKind.FEEDBACK: "medium",
+    SupportTicketKind.ISSUE: "high",
+}
+
+_SAMPLE_FEED_BASE = datetime(2024, 1, 1, tzinfo=timezone.utc)
+
+
+def _register_response_model(
+    handler: Callable[..., Any],
+    *,
+    status: int,
+    model: Any | None,
+    description: str = "Success",
+    media_type: str = "application/json",
+) -> None:
+    """Attach response metadata to ``handler`` for OpenAPI generation."""
+
+    existing = getattr(handler, "__mere_response_models__", {})
+    updated = dict(existing)
+    updated[int(status)] = {
+        "model": model,
+        "description": description,
+        "media_type": media_type,
+    }
+    setattr(handler, "__mere_response_models__", updated)
+
+
+def _sample_notification_feed(workspace_id: str) -> tuple[QuickstartNotification, ...]:
+    """Return a canned notification feed for empty workspaces."""
+
+    base = _SAMPLE_FEED_BASE
+    return (
+        QuickstartNotification(
+            id=f"{workspace_id}-welcome",
+            workspace_id=workspace_id,
+            kind="system",
+            title="Workspace provisioned",
+            message=f"Workspace {workspace_id} is ready to go.",
+            occurred_at=base,
+            severity="info",
+            metadata={"workspace": workspace_id},
+        ),
+        QuickstartNotification(
+            id=f"{workspace_id}-first-ticket",
+            workspace_id=workspace_id,
+            kind="support",
+            title="Track customer feedback",
+            message="Create your first support ticket to populate the kanban board.",
+            occurred_at=base + timedelta(hours=1),
+            severity="info",
+        ),
+        QuickstartNotification(
+            id=f"{workspace_id}-billing-setup",
+            workspace_id=workspace_id,
+            kind="billing",
+            title="Connect billing",
+            message="Add a billing record to unlock usage reporting.",
+            occurred_at=base + timedelta(hours=2),
+            severity="warning",
+        ),
+    )
+
+
+def _sample_kanban_board(workspace_id: str) -> QuickstartKanbanBoard:
+    """Build a predictable kanban board when no data exists."""
+
+    base = _SAMPLE_FEED_BASE
+    cards = {
+        "backlog": (
+            QuickstartKanbanCard(
+                id=f"{workspace_id}-kb-1",
+                title="Gather product requirements",
+                status="backlog",
+                created_at=base,
+                updated_at=base,
+                tags=("research",),
+                summary="Capture the top customer requests for the next release.",
+            ),
+        ),
+        "in_progress": (
+            QuickstartKanbanCard(
+                id=f"{workspace_id}-kb-2",
+                title="Triage onboarding ticket",
+                status="in_progress",
+                created_at=base + timedelta(hours=1),
+                updated_at=base + timedelta(hours=4),
+                assignee="ops@demo.test",
+                tags=("support",),
+                summary="Customer reported slow workspace provisioning.",
+                severity="medium",
+            ),
+        ),
+        "done": (
+            QuickstartKanbanCard(
+                id=f"{workspace_id}-kb-3",
+                title="Resolve billing anomaly",
+                status="done",
+                created_at=base + timedelta(hours=2),
+                updated_at=base + timedelta(hours=6),
+                tags=("billing",),
+                summary="Investigated duplicate invoice and issued refund.",
+                severity="high",
+            ),
+        ),
+    }
+    columns = tuple(
+        QuickstartKanbanColumn(
+            key=key,
+            title=_KANBAN_COLUMN_TITLES[key],
+            cards=cards[key],
+        )
+        for key in ("backlog", "in_progress", "done")
+    )
+    latest = max(card.updated_at for column in columns for card in column.cards)
+    return QuickstartKanbanBoard(workspace_id=workspace_id, columns=columns, updated_at=latest)
 
 
 class QuickstartChatOpsSettings(Struct, frozen=True):
@@ -1203,6 +1394,9 @@ def attach_quickstart(
     tiles_collection_path = f"{workspaces_path}/{{wsId}}/tiles"
     tile_item_path = f"{tiles_collection_path}/{{tileId}}"
     tile_permissions_path = f"{tile_item_path}/permissions"
+    workspace_settings_path = f"{workspaces_path}/{{wsId}}/settings"
+    workspace_notifications_path = f"{workspaces_path}/{{wsId}}/notifications"
+    workspace_kanban_path = f"{workspaces_path}/{{wsId}}/kanban"
     rbac_permission_sets_path = f"{workspaces_path}/{{wsId}}/rbac/permission-sets"
     rbac_role_assign_path = f"{workspaces_path}/{{wsId}}/rbac/roles/{{roleId}}/assign"
     delegations_path = f"{normalized}/delegations" if normalized else "/delegations"
@@ -1296,6 +1490,156 @@ def attach_quickstart(
             contexts = list(tenants_map.values())
             await ensure_tenant_schemas(database, contexts)
             await runner.run_all(tenants=contexts)
+
+        def _assert_workspace_access(request: Request, workspace_id: str) -> None:
+            if request.tenant.scope is TenantScope.TENANT and request.tenant.tenant != workspace_id:
+                raise HTTPError(Status.FORBIDDEN, {"detail": "workspace_forbidden"})
+
+        def _resolve_workspace_context(workspace_id: str) -> TenantContext:
+            context = tenants_map.get(workspace_id)
+            if context is None:
+                context = TenantContext(
+                    tenant=workspace_id,
+                    site=app.config.site,
+                    domain=app.config.domain,
+                    scope=TenantScope.TENANT,
+                )
+                tenants_map[workspace_id] = context
+            return context
+
+        async def _collect_workspace_notifications(
+            orm: ORM | None,
+            workspace_id: str,
+        ) -> tuple[QuickstartNotification, ...]:
+            if orm is None:
+                return _sample_notification_feed(workspace_id)
+            notifications: list[QuickstartNotification] = []
+            trials = await orm.admin.quickstart_trial_extensions.list(
+                filters={"tenant_slug": workspace_id},
+                order_by=("created_at desc",),
+            )
+            for record in trials:
+                notifications.append(
+                    QuickstartNotification(
+                        id=f"trial-{record.id}",
+                        workspace_id=workspace_id,
+                        kind="trial",
+                        title="Trial extended",
+                        message=f"Trial extended by {record.extended_days} days",
+                        occurred_at=record.updated_at,
+                        actor=record.requested_by,
+                        severity="info",
+                        metadata={"days": record.extended_days},
+                    )
+                )
+            tickets = await orm.admin.support_tickets.list(
+                filters={"tenant_slug": workspace_id},
+                order_by=("updated_at desc",),
+            )
+            for ticket in tickets:
+                latest_note = ticket.updates[-1].note if ticket.updates else ticket.message
+                severity = "info"
+                if ticket.status is SupportTicketStatus.RESPONDED:
+                    severity = "warning"
+                elif ticket.status is SupportTicketStatus.RESOLVED:
+                    severity = "info"
+                notifications.append(
+                    QuickstartNotification(
+                        id=f"ticket-{ticket.id}",
+                        workspace_id=workspace_id,
+                        kind="support",
+                        title=ticket.subject,
+                        message=latest_note or ticket.message,
+                        occurred_at=ticket.updated_at,
+                        actor=ticket.updated_by,
+                        severity="critical" if ticket.status is SupportTicketStatus.OPEN else severity,
+                        metadata={
+                            "ticketId": ticket.id,
+                            "status": ticket.status.value,
+                        },
+                    )
+                )
+            billing_records = await orm.admin.billing.list(
+                filters={"customer_id": workspace_id},
+                order_by=("updated_at desc",),
+            )
+            for record in billing_records:
+                if record.status is BillingStatus.PAST_DUE:
+                    severity = "critical"
+                    message = "Subscription payment is past due"
+                elif record.status is BillingStatus.CANCELED:
+                    severity = "warning"
+                    message = "Subscription canceled"
+                else:
+                    severity = "info"
+                    message = f"Plan {record.plan_code} is {record.status.value}"
+                notifications.append(
+                    QuickstartNotification(
+                        id=f"billing-{record.id}",
+                        workspace_id=workspace_id,
+                        kind="billing",
+                        title="Billing update",
+                        message=message,
+                        occurred_at=record.updated_at,
+                        severity=severity,
+                        metadata={
+                            "status": record.status.value,
+                            "amountDueCents": record.amount_due_cents,
+                        },
+                    )
+                )
+            if not notifications:
+                return _sample_notification_feed(workspace_id)
+            notifications.sort(key=lambda item: item.occurred_at, reverse=True)
+            return tuple(notifications)
+
+        async def _load_workspace_board(
+            orm: ORM | None,
+            workspace_id: str,
+            tenant_ctx: TenantContext,
+        ) -> QuickstartKanbanBoard:
+            if orm is None:
+                return _sample_kanban_board(workspace_id)
+            tickets = await orm.tenants.support_tickets.list(
+                tenant=tenant_ctx,
+                order_by=("updated_at desc",),
+            )
+            if not tickets:
+                return _sample_kanban_board(workspace_id)
+            columns: dict[str, list[QuickstartKanbanCard]] = {key: [] for key in _KANBAN_COLUMN_TITLES}
+            latest = _SAMPLE_FEED_BASE
+            for ticket in tickets:
+                column_key = _KANBAN_STATUS_BY_TICKET.get(ticket.status, "backlog")
+                severity = _KANBAN_SEVERITY_BY_KIND.get(ticket.kind, "low")
+                card = QuickstartKanbanCard(
+                    id=ticket.id,
+                    title=ticket.subject,
+                    status=column_key,
+                    created_at=ticket.created_at,
+                    updated_at=ticket.updated_at,
+                    assignee=ticket.updated_by,
+                    tags=(ticket.kind.value,),
+                    summary=ticket.message,
+                    severity=severity,
+                )
+                columns[column_key].append(card)
+                if card.updated_at > latest:
+                    latest = card.updated_at
+            if not any(columns.values()):
+                return _sample_kanban_board(workspace_id)
+            column_payload = tuple(
+                QuickstartKanbanColumn(
+                    key=key,
+                    title=_KANBAN_COLUMN_TITLES[key],
+                    cards=tuple(columns[key]),
+                )
+                for key in ("backlog", "in_progress", "done")
+            )
+            return QuickstartKanbanBoard(
+                workspace_id=workspace_id,
+                columns=column_payload,
+                updated_at=latest,
+            )
 
         async def _bootstrap_quickstart() -> None:
             await _ensure_contexts_for(tenants_map.keys())
@@ -1487,6 +1831,19 @@ def attach_quickstart(
                 "ticket": to_builtins(ticket),
             }
 
+        @app.get(tiles_collection_path, name="quickstart_tiles_list")
+        async def quickstart_tiles_list(
+            request: Request,
+            wsId: str,
+            service: TileService,
+        ) -> tuple[TileRecord, ...]:
+            _assert_workspace_access(request, wsId)
+            return await service.list_tiles(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                principal=request.principal,
+            )
+
         @app.post(tiles_collection_path, name="quickstart_tiles_create")
         async def quickstart_tiles_create(
             request: Request,
@@ -1494,6 +1851,7 @@ def attach_quickstart(
             payload: TileCreate,
             service: TileService,
         ) -> Response:
+            _assert_workspace_access(request, wsId)
             result = await service.create_tile(
                 tenant=request.tenant,
                 workspace_id=wsId,
@@ -1502,6 +1860,28 @@ def attach_quickstart(
             )
             return JSONResponse(to_builtins(result), status=int(Status.CREATED))
 
+        _register_response_model(
+            quickstart_tiles_create,
+            status=int(Status.CREATED),
+            model=TileRecord,
+            description="Tile created",
+        )
+
+        @app.get(tile_item_path, name="quickstart_tiles_read")
+        async def quickstart_tiles_read(
+            request: Request,
+            wsId: str,
+            tileId: str,
+            service: TileService,
+        ) -> TileRecord:
+            _assert_workspace_access(request, wsId)
+            return await service.get_tile(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                tile_id=tileId,
+                principal=request.principal,
+            )
+
         @app.route(tile_item_path, methods=("PATCH",), name="quickstart_tiles_update")
         async def quickstart_tiles_update(
             request: Request,
@@ -1509,7 +1889,8 @@ def attach_quickstart(
             tileId: str,
             payload: TileUpdate,
             service: TileService,
-        ) -> Response:
+        ) -> TileRecord:
+            _assert_workspace_access(request, wsId)
             result = await service.update_tile(
                 tenant=request.tenant,
                 workspace_id=wsId,
@@ -1517,7 +1898,7 @@ def attach_quickstart(
                 principal=request.principal,
                 payload=payload,
             )
-            return JSONResponse(to_builtins(result))
+            return result
 
         @app.route(tile_item_path, methods=("DELETE",), name="quickstart_tiles_delete")
         async def quickstart_tiles_delete(
@@ -1525,14 +1906,15 @@ def attach_quickstart(
             wsId: str,
             tileId: str,
             service: TileService,
-        ) -> Response:
+        ) -> None:
+            _assert_workspace_access(request, wsId)
             await service.delete_tile(
                 tenant=request.tenant,
                 workspace_id=wsId,
                 tile_id=tileId,
                 principal=request.principal,
             )
-            return Response(status=int(Status.NO_CONTENT))
+            return None
 
         @app.route(
             tile_permissions_path,
@@ -1545,7 +1927,8 @@ def attach_quickstart(
             tileId: str,
             payload: TilePermissions,
             service: TileService,
-        ) -> Response:
+        ) -> TilePermissions:
+            _assert_workspace_access(request, wsId)
             result = await service.set_permissions(
                 tenant=request.tenant,
                 workspace_id=wsId,
@@ -1553,7 +1936,58 @@ def attach_quickstart(
                 principal=request.principal,
                 permissions=payload,
             )
-            return JSONResponse(to_builtins(result))
+            return result
+
+        @app.get(workspace_settings_path, name="quickstart_workspace_settings")
+        async def quickstart_workspace_settings(
+            request: Request,
+            wsId: str,
+            orm: ORM,
+            service: TileService,
+        ) -> QuickstartWorkspaceSettings:
+            _assert_workspace_access(request, wsId)
+            tiles = await service.list_tiles(
+                tenant=request.tenant,
+                workspace_id=wsId,
+                principal=request.principal,
+            )
+            tile_count = len(tiles)
+            ai_enabled = any(tile.ai_insights_enabled for tile in tiles)
+            tenant_record = await orm.admin.quickstart_tenants.get(filters={"slug": wsId})
+            workspace_name = tenant_record.name if tenant_record else wsId.replace("-", " ").title()
+            notifications = await _collect_workspace_notifications(orm, wsId)
+            alerts = tuple(
+                notification.id for notification in notifications if notification.severity in {"warning", "critical"}
+            )
+            return QuickstartWorkspaceSettings(
+                workspace_id=wsId,
+                name=workspace_name,
+                timezone="UTC",
+                currency="USD",
+                features=("analytics", "kanban", "support", "delegations"),
+                tile_count=tile_count,
+                ai_insights_enabled=ai_enabled,
+                alerts=alerts,
+            )
+
+        @app.get(workspace_notifications_path, name="quickstart_workspace_notifications")
+        async def quickstart_workspace_notifications(
+            request: Request,
+            wsId: str,
+            orm: ORM,
+        ) -> tuple[QuickstartNotification, ...]:
+            _assert_workspace_access(request, wsId)
+            return await _collect_workspace_notifications(orm, wsId)
+
+        @app.get(workspace_kanban_path, name="quickstart_workspace_kanban")
+        async def quickstart_workspace_kanban(
+            request: Request,
+            wsId: str,
+            orm: ORM,
+        ) -> QuickstartKanbanBoard:
+            _assert_workspace_access(request, wsId)
+            tenant_context = _resolve_workspace_context(wsId)
+            return await _load_workspace_board(orm, wsId, tenant_context)
 
         @app.post(
             rbac_permission_sets_path,
@@ -1573,6 +2007,13 @@ def attach_quickstart(
                 payload=payload,
             )
             return JSONResponse(to_builtins(result), status=int(Status.CREATED))
+
+        _register_response_model(
+            quickstart_rbac_permission_sets_create,
+            status=int(Status.CREATED),
+            model=PermissionSetRecord,
+            description="Permission set created",
+        )
 
         @app.post(rbac_role_assign_path, name="quickstart_rbac_assign_role")
         async def quickstart_rbac_assign_role(
@@ -1606,6 +2047,13 @@ def attach_quickstart(
                 payload=payload,
             )
             return JSONResponse(to_builtins(delegation), status=int(Status.CREATED))
+
+        _register_response_model(
+            quickstart_delegations_grant,
+            status=int(Status.CREATED),
+            model=DelegationRecord,
+            description="Delegation granted",
+        )
 
         @app.route(
             delegation_item_path,
@@ -1709,6 +2157,13 @@ def attach_quickstart(
                     },
                 )
             return JSONResponse(record_payload, status=201)
+
+        _register_response_model(
+            quickstart_admin_create_billing,
+            status=int(Status.CREATED),
+            model=BillingRecord,
+            description="Billing record created",
+        )
 
         @app.get(metrics_path, name="quickstart_admin_metrics")
         async def quickstart_admin_metrics(request: Request, orm: ORM) -> Response:
@@ -1908,28 +2363,30 @@ def attach_quickstart(
     @app.post(login_start_path, name="quickstart_login_start")
     async def quickstart_login_start(
         request: Request, payload: LoginStartRequest, engine: QuickstartAuthEngine
-    ) -> Response:
+    ) -> QuickstartLoginResponse:
         result = await engine.start(request.tenant, email=payload.email)
-        return JSONResponse(result)
+        return result
 
     @app.post(passkey_path, name="quickstart_login_passkey")
     async def quickstart_login_passkey(
         request: Request, payload: PasskeyAttempt, engine: QuickstartAuthEngine
-    ) -> Response:
+    ) -> QuickstartLoginResponse:
         result = await engine.passkey(request.tenant, payload)
-        return JSONResponse(result)
+        return result
 
     @app.post(password_path, name="quickstart_login_password")
     async def quickstart_login_password(
         request: Request, payload: PasswordAttempt, engine: QuickstartAuthEngine
-    ) -> Response:
+    ) -> QuickstartLoginResponse:
         result = await engine.password(request.tenant, payload)
-        return JSONResponse(result)
+        return result
 
     @app.post(mfa_path, name="quickstart_login_mfa")
-    async def quickstart_login_mfa(request: Request, payload: MfaAttempt, engine: QuickstartAuthEngine) -> Response:
+    async def quickstart_login_mfa(
+        request: Request, payload: MfaAttempt, engine: QuickstartAuthEngine
+    ) -> QuickstartLoginResponse:
         result = await engine.mfa(request.tenant, payload)
-        return JSONResponse(result)
+        return result
 
 
 __all__ = [
@@ -1947,7 +2404,11 @@ __all__ = [
     "QuickstartChatOpsControlPlane",
     "QuickstartChatOpsNotificationChannels",
     "QuickstartChatOpsSettings",
+    "QuickstartKanbanBoard",
+    "QuickstartKanbanCard",
+    "QuickstartKanbanColumn",
     "QuickstartLoginResponse",
+    "QuickstartNotification",
     "QuickstartPasskey",
     "QuickstartPasskeyRecord",
     "QuickstartRepository",
@@ -1968,6 +2429,7 @@ __all__ = [
     "QuickstartTenantUserRecord",
     "QuickstartTrialExtensionRecord",
     "QuickstartUser",
+    "QuickstartWorkspaceSettings",
     "attach_quickstart",
     "ensure_tenant_schemas",
     "load_quickstart_auth_from_env",
