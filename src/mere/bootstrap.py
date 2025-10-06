@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import os
 from datetime import datetime, timedelta, timezone
@@ -21,6 +22,7 @@ from typing import (
 )
 
 import rure
+from cryptography.fernet import Fernet, InvalidToken
 from msgspec import Struct, convert, field, json, to_builtins
 
 from .application import MereApp
@@ -46,7 +48,7 @@ from .chatops import (
     parse_slash_command_args,
 )
 from .codegen import generate_typescript_client
-from .database import Database, _quote_identifier
+from .database import Database, SecretResolver, SecretValue, _quote_identifier
 from .domain.bootstrap_services import (
     BootstrapAuditService,
     BootstrapDelegationService,
@@ -132,8 +134,38 @@ class BootstrapPasskey(Struct, frozen=True):
     """Passkey configuration for the bootstrap."""
 
     credential_id: str
-    secret: str
+    secret_ciphertext: SecretValue
     label: str | None = None
+
+
+class BootstrapPasskeyCipher:
+    """Encrypt and decrypt bootstrap passkey material."""
+
+    def __init__(self, *, key_material: bytes) -> None:
+        if not key_material:
+            raise ValueError("Bootstrap passkey cipher requires non-empty key material")
+        digest = hashlib.sha256(key_material).digest()
+        fernet_key = base64.urlsafe_b64encode(digest)
+        self._fernet = Fernet(fernet_key)
+
+    @classmethod
+    def from_secret(cls, secret: str | bytes) -> "BootstrapPasskeyCipher":
+        material = secret.encode("utf-8") if isinstance(secret, str) else bytes(secret)
+        return cls(key_material=material)
+
+    def encrypt(self, secret: bytes) -> str:
+        """Encrypt ``secret`` returning a UTF-8 ciphertext."""
+
+        return self._fernet.encrypt(secret).decode("utf-8")
+
+    def decrypt(self, ciphertext: str) -> bytearray:
+        """Decrypt ``ciphertext`` returning a mutable buffer for wiping."""
+
+        try:
+            plaintext = self._fernet.decrypt(ciphertext.encode("utf-8"))
+        except InvalidToken as exc:  # pragma: no cover - defensive guard
+            raise RuntimeError("Invalid bootstrap passkey ciphertext") from exc
+        return bytearray(plaintext)
 
 
 class BootstrapUser(Struct, frozen=True):
@@ -452,7 +484,7 @@ class BootstrapPasskeyRecord(Struct, frozen=True):
     """Database representation of a bootstrap passkey."""
 
     credential_id: str
-    secret: str
+    secret_ciphertext: str
     label: str | None = None
 
 
@@ -632,9 +664,16 @@ class BootstrapSeeder:
 
     _STATE_KEY: Final[str] = "bootstrap_auth"
 
-    def __init__(self, orm: ORM, *, clock: Callable[[], datetime] | None = None) -> None:
+    def __init__(
+        self,
+        orm: ORM,
+        *,
+        clock: Callable[[], datetime] | None = None,
+        secret_resolver: SecretResolver | None = None,
+    ) -> None:
         self._orm = orm
         self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._secret_resolver = secret_resolver
 
     async def apply(
         self,
@@ -711,16 +750,25 @@ class BootstrapSeeder:
             filters={"id": existing_state.id},
         )
 
-    @staticmethod
-    def _passkeys_to_records(passkeys: tuple[BootstrapPasskey, ...]) -> tuple[BootstrapPasskeyRecord, ...]:
-        return tuple(
-            BootstrapPasskeyRecord(
-                credential_id=item.credential_id,
-                secret=item.secret,
-                label=item.label,
+    def _passkeys_to_records(self, passkeys: tuple[BootstrapPasskey, ...]) -> tuple[BootstrapPasskeyRecord, ...]:
+        if not passkeys:
+            return ()
+        records: list[BootstrapPasskeyRecord] = []
+        for item in passkeys:
+            ciphertext = item.secret_ciphertext.resolve(
+                self._secret_resolver,
+                field="bootstrap.passkeys.secret_ciphertext",
             )
-            for item in passkeys
-        )
+            if ciphertext is None:
+                raise RuntimeError("Bootstrap passkey ciphertext could not be resolved")
+            records.append(
+                BootstrapPasskeyRecord(
+                    credential_id=item.credential_id,
+                    secret_ciphertext=ciphertext,
+                    label=item.label,
+                )
+            )
+        return tuple(records)
 
     @staticmethod
     def _fingerprint(config: BootstrapAuthConfig) -> str:
@@ -731,10 +779,20 @@ class BootstrapSeeder:
 class BootstrapRepository:
     """Load bootstrap identities from the database."""
 
-    def __init__(self, orm: ORM, *, site: str, domain: str) -> None:
+    def __init__(
+        self,
+        orm: ORM,
+        *,
+        site: str,
+        domain: str,
+        secret_resolver: SecretResolver | None = None,
+        passkey_cipher: BootstrapPasskeyCipher | None = None,
+    ) -> None:
         self._orm = orm
         self._site = site
         self._domain = domain
+        self._secret_resolver = secret_resolver
+        self._passkey_cipher = passkey_cipher
 
     async def load(self) -> BootstrapAuthConfig | None:
         tenants = await self._orm.admin.bootstrap_tenants.list(order_by=("slug",))
@@ -767,37 +825,68 @@ class BootstrapRepository:
             max_attempts=DEFAULT_BOOTSTRAP_AUTH.max_attempts,
         )
 
-    @staticmethod
-    def _convert_user(record: BootstrapTenantUserRecord) -> BootstrapUser:
+    def _convert_user(self, record: BootstrapTenantUserRecord) -> BootstrapUser:
         return BootstrapUser(
             id=record.id,
             email=record.email,
             password=record.password,
-            passkeys=BootstrapRepository._records_to_passkeys(record.passkeys),
+            passkeys=self._records_to_passkeys(record.passkeys),
             mfa_code=record.mfa_code,
             sso=record.sso_provider,
         )
 
-    @staticmethod
-    def _convert_admin(record: BootstrapAdminUserRecord) -> BootstrapUser:
+    def _convert_admin(self, record: BootstrapAdminUserRecord) -> BootstrapUser:
         return BootstrapUser(
             id=record.id,
             email=record.email,
             password=record.password,
-            passkeys=BootstrapRepository._records_to_passkeys(record.passkeys),
+            passkeys=self._records_to_passkeys(record.passkeys),
             mfa_code=record.mfa_code,
         )
 
-    @staticmethod
-    def _records_to_passkeys(records: tuple[BootstrapPasskeyRecord, ...]) -> tuple[BootstrapPasskey, ...]:
+    def _records_to_passkeys(self, records: tuple[BootstrapPasskeyRecord, ...]) -> tuple[BootstrapPasskey, ...]:
         return tuple(
             BootstrapPasskey(
                 credential_id=record.credential_id,
-                secret=record.secret,
+                secret_ciphertext=SecretValue(literal=record.secret_ciphertext),
                 label=record.label,
             )
             for record in records
         )
+
+    def decrypt_passkeys(
+        self,
+        users: Iterable[BootstrapUser],
+    ) -> dict[str, tuple[str, bytearray]]:
+        return self.extract_passkey_material(
+            users,
+            cipher=self._passkey_cipher,
+            resolver=self._secret_resolver,
+        )
+
+    @staticmethod
+    def extract_passkey_material(
+        users: Iterable[BootstrapUser],
+        *,
+        cipher: BootstrapPasskeyCipher | None,
+        resolver: SecretResolver | None = None,
+    ) -> dict[str, tuple[str, bytearray]]:
+        """Decrypt passkeys for ``users`` returning mutable buffers."""
+
+        if cipher is None:
+            return {}
+        material: dict[str, tuple[str, bytearray]] = {}
+        for user in users:
+            for passkey in user.passkeys:
+                ciphertext = passkey.secret_ciphertext.resolve(
+                    resolver,
+                    field="bootstrap.passkeys.secret_ciphertext",
+                )
+                if ciphertext is None:
+                    raise RuntimeError("Bootstrap passkey ciphertext could not be resolved")
+                secret = cipher.decrypt(ciphertext)
+                material[passkey.credential_id] = (user.id, secret)
+        return material
 
 
 def _read_env_blob(name: str, env: Mapping[str, str]) -> str | None:
@@ -812,6 +901,15 @@ def _read_env_blob(name: str, env: Mapping[str, str]) -> str | None:
     if value:
         return value
     return None
+
+
+def load_bootstrap_passkey_cipher(*, env: Mapping[str, str] | None = None) -> BootstrapPasskeyCipher | None:
+    """Instantiate a passkey cipher from environment configuration."""
+
+    secret = _read_env_blob("MERE_BOOTSTRAP_PASSPHRASE", env or os.environ)
+    if secret is None:
+        return None
+    return BootstrapPasskeyCipher.from_secret(secret.strip())
 
 
 def load_bootstrap_auth_from_env(*, env: Mapping[str, str] | None = None) -> BootstrapAuthConfig | None:
@@ -833,12 +931,20 @@ def load_bootstrap_auth_from_env(*, env: Mapping[str, str] | None = None) -> Boo
 class BootstrapAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, BootstrapSession]):
     """Bootstrap authentication engine built on the shared flow orchestration."""
 
-    def __init__(self, config: BootstrapAuthConfig) -> None:
+    def __init__(
+        self,
+        config: BootstrapAuthConfig,
+        *,
+        passkey_cipher: BootstrapPasskeyCipher | None = None,
+        secret_resolver: SecretResolver | None = None,
+    ) -> None:
         super().__init__(
             flow_ttl_seconds=config.flow_ttl_seconds,
             session_ttl_seconds=config.session_ttl_seconds,
             max_attempts=config.max_attempts,
         )
+        self._passkey_cipher = passkey_cipher
+        self._secret_resolver = secret_resolver
         self.config = config
         self._apply_config(config)
 
@@ -871,7 +977,24 @@ class BootstrapAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, Boots
         self.flow_ttl_seconds = config.flow_ttl_seconds
         self.session_ttl_seconds = config.session_ttl_seconds
         self.max_attempts = config.max_attempts
-        self.reset(records)
+        passkey_material = self._collect_passkey_material(records)
+        try:
+            self.reset(records, passkey_material=passkey_material)
+        finally:
+            for _, secret in passkey_material.values():
+                secret[:] = b"\x00" * len(secret)
+
+    def _collect_passkey_material(
+        self, records: Iterable[AuthenticationLoginRecord[AuthenticationFlowUser]]
+    ) -> dict[str, tuple[str, bytearray]]:
+        if self._passkey_cipher is None:
+            return {}
+        users = [record.user for record in records]
+        return BootstrapRepository.extract_passkey_material(
+            users,
+            cipher=self._passkey_cipher,
+            resolver=self._secret_resolver,
+        )
 
     def _issue_session(self, flow: Any, level: SessionLevel) -> BootstrapSession:
         return BootstrapSession(
@@ -886,6 +1009,12 @@ class BootstrapAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, Boots
 def _default_auth_config() -> BootstrapAuthConfig:
     """Return the built-in bootstrap auth configuration."""
 
+    beta_passkey_ciphertext = _read_env_blob("MERE_BOOTSTRAP_BETA_PASSKEY_CIPHERTEXT", os.environ)
+    beta_password = _read_env_blob("MERE_BOOTSTRAP_BETA_PASSWORD", os.environ)
+    beta_mfa = _read_env_blob("MERE_BOOTSTRAP_BETA_MFA", os.environ)
+    admin_password = _read_env_blob("MERE_BOOTSTRAP_ADMIN_PASSWORD", os.environ)
+    admin_mfa = _read_env_blob("MERE_BOOTSTRAP_ADMIN_MFA", os.environ)
+
     acme_owner = BootstrapUser(
         id="usr_acme_owner",
         email="founder@acme.test",
@@ -896,24 +1025,27 @@ def _default_auth_config() -> BootstrapAuthConfig:
             redirect_url="https://id.acme.test/sso/start",
         ),
     )
+    beta_passkeys: tuple[BootstrapPasskey, ...] = ()
+    if beta_passkey_ciphertext:
+        beta_passkeys = (
+            BootstrapPasskey(
+                credential_id="beta-passkey",
+                secret_ciphertext=SecretValue(literal=beta_passkey_ciphertext.strip()),
+                label="YubiKey 5",
+            ),
+        )
     beta_ops = BootstrapUser(
         id="usr_beta_ops",
         email="ops@beta.test",
-        password="beta-password",
-        passkeys=(
-            BootstrapPasskey(
-                credential_id="beta-passkey",
-                secret="beta-passkey-secret",
-                label="YubiKey 5",
-            ),
-        ),
-        mfa_code="654321",
+        password=beta_password,
+        passkeys=beta_passkeys,
+        mfa_code=beta_mfa,
     )
     admin_root = BootstrapUser(
         id="adm_root",
         email="root@admin.test",
-        password="admin-password",
-        mfa_code="123456",
+        password=admin_password,
+        mfa_code=admin_mfa,
     )
     return BootstrapAuthConfig(
         tenants=(
@@ -1411,6 +1543,8 @@ def attach_bootstrap(
 
     env_auth_config = load_bootstrap_auth_from_env()
     seed_hint = auth_config or env_auth_config or DEFAULT_BOOTSTRAP_AUTH
+    passkey_cipher = load_bootstrap_passkey_cipher()
+    secret_resolver = getattr(app.database, "_secret_resolver", None) if app.database else None
 
     def _sync_allowed_tenants(config: BootstrapAuthConfig) -> None:
         resolver = app.tenant_resolver
@@ -1420,7 +1554,11 @@ def attach_bootstrap(
 
     _sync_allowed_tenants(seed_hint)
 
-    engine = BootstrapAuthEngine(seed_hint)
+    engine = BootstrapAuthEngine(
+        seed_hint,
+        passkey_cipher=passkey_cipher,
+        secret_resolver=secret_resolver,
+    )
     app.dependencies.provide(BootstrapAuthEngine, lambda: engine)
 
     if app.database and app.orm:
@@ -1449,8 +1587,14 @@ def attach_bootstrap(
             migrations=bootstrap_migrations(),
             tenant_provider=lambda: list(tenants_map.values()),
         )
-        seeder = BootstrapSeeder(orm)
-        repository = BootstrapRepository(orm, site=app.config.site, domain=app.config.domain)
+        seeder = BootstrapSeeder(orm, secret_resolver=secret_resolver)
+        repository = BootstrapRepository(
+            orm,
+            site=app.config.site,
+            domain=app.config.domain,
+            secret_resolver=secret_resolver,
+            passkey_cipher=passkey_cipher,
+        )
 
         tile_domain = BootstrapTileService(orm)
         rbac_domain = BootstrapRbacService(orm)
@@ -2411,6 +2555,7 @@ __all__ = [
     "BootstrapLoginResponse",
     "BootstrapNotification",
     "BootstrapPasskey",
+    "BootstrapPasskeyCipher",
     "BootstrapPasskeyRecord",
     "BootstrapRepository",
     "BootstrapSeedStateRecord",
@@ -2439,4 +2584,5 @@ __all__ = [
     "bootstrap_migrations",
     "ensure_tenant_schemas",
     "load_bootstrap_auth_from_env",
+    "load_bootstrap_passkey_cipher",
 ]

@@ -122,7 +122,12 @@ auth_config = BootstrapAuthConfig(
                     id="usr_acme_owner",
                     email="founder@acme.test",
                     password="founder-pass",
-                    passkeys=(BootstrapPasskey(credential_id="key-1", secret="founder-secret"),),
+                    passkeys=(
+                        BootstrapPasskey(
+                            credential_id="key-1",
+                            secret_ciphertext=SecretValue(literal="<encrypted-passkey>")
+                        ),
+                    ),
                     mfa_code="654321",
                 ),
             ),
