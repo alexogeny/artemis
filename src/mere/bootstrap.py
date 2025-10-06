@@ -663,9 +663,10 @@ def bootstrap_migrations() -> tuple[Migration, ...]:
 
 
 async def ensure_tenant_schemas(database: Database, tenants: Sequence[TenantContext]) -> None:
-    """Create tenant schemas for the bootstrap if they do not already exist."""
+    """Create the admin and tenant schemas required by the bootstrap."""
 
-    schemas = {database.config.schema_for_tenant(tenant) for tenant in tenants}
+    schemas = {database.config.admin_schema}
+    schemas.update(database.config.schema_for_tenant(tenant) for tenant in tenants)
     async with database.connection(schema=database.config.admin_schema) as connection:
         for schema in sorted(schemas):
             await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_quote_identifier(schema)}")
