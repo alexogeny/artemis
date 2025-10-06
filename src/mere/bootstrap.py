@@ -484,8 +484,18 @@ class BootstrapPasskeyRecord(Struct, frozen=True):
     """Database representation of a bootstrap passkey."""
 
     credential_id: str
-    secret_ciphertext: str
+    secret_ciphertext: str | None = None
     label: str | None = None
+    _legacy_secret: str | None = field(default=None, name="secret")
+
+    def resolved_secret_ciphertext(self) -> str:
+        """Return the ciphertext, accepting legacy ``secret`` fields."""
+
+        if self.secret_ciphertext:
+            return self.secret_ciphertext
+        if self._legacy_secret:
+            return self._legacy_secret
+        raise RuntimeError("Bootstrap passkey record missing ciphertext")
 
 
 @model(scope=ModelScope.ADMIN, table="bootstrap_tenants")
@@ -848,7 +858,7 @@ class BootstrapRepository:
         return tuple(
             BootstrapPasskey(
                 credential_id=record.credential_id,
-                secret_ciphertext=SecretValue(literal=record.secret_ciphertext),
+                secret_ciphertext=SecretValue(literal=record.resolved_secret_ciphertext()),
                 label=record.label,
             )
             for record in records
