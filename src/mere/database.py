@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+import shlex
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any, AsyncIterator, Callable, Mapping, Protocol, Sequence
@@ -377,7 +378,11 @@ def _pool_kwargs(config: PoolConfig, *, resolver: "SecretResolver | None" = None
 def _default_pool_factory(options: Mapping[str, Any]) -> Any:  # pragma: no cover - exercised in integration
     if _PsqlpyConnectionPool is None:
         raise DatabaseError("psqlpy is not installed; install psqlpy to use the default pool")
-    return _PsqlpyConnectionPool(**options)
+    payload = dict(options)
+    raw_options = payload.get("options")
+    if isinstance(raw_options, Mapping):
+        payload["options"] = _format_pool_options(raw_options)
+    return _PsqlpyConnectionPool(**payload)
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -396,6 +401,24 @@ def _preferred_pool_key(source: str) -> str | None:
         if candidate in _PSQLPY_POOL_PARAMETERS:
             return candidate
     return None
+
+
+def _format_pool_options(options: Mapping[str, Any]) -> str:
+    """Serialize connection ``options`` mapping into libpq-compatible string."""
+
+    parts: list[str] = []
+    for key, value in options.items():
+        for entry in _iter_option_values(value):
+            parts.append(f"{key}={shlex.quote(str(entry))}")
+    return " ".join(parts)
+
+
+def _iter_option_values(value: Any) -> Sequence[Any]:
+    if isinstance(value, (list, tuple, set)):
+        return tuple(entry for entry in value if entry is not None)
+    if value is None:
+        return ()
+    return (value,)
 
 
 __all__ = [

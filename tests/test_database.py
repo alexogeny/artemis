@@ -312,3 +312,24 @@ def test_preferred_pool_key_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(database_module, "_PSQLPY_POOL_PARAMETERS", set())
     assert database_module._preferred_pool_key("sslmode") == "ssl_mode"
+
+
+def test_format_pool_options_handles_sequences() -> None:
+    formatted = database_module._format_pool_options({"search_path": "admin,public", "pin": ("a", "b"), "ignore": None})
+    assert "search_path=admin,public" in formatted
+    assert "pin=a" in formatted
+    assert "pin=b" in formatted
+
+
+def test_default_pool_factory_serializes_options(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class StubPool:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(database_module, "_PsqlpyConnectionPool", StubPool)
+    options = {"dsn": "postgres://demo", "options": {"search_path": "public", "pin": ("a",)}}
+    database_module._default_pool_factory(options)
+    assert captured["dsn"] == "postgres://demo"
+    assert captured["options"] == "search_path=public pin=a"
