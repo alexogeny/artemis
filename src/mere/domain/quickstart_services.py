@@ -90,6 +90,39 @@ class QuickstartTileService(TileService):
     def __init__(self, orm: ORM) -> None:
         self._orm = orm
 
+    async def list_tiles(
+        self,
+        *,
+        tenant: TenantContext,
+        workspace_id: str,
+        principal,
+    ) -> tuple[TileRecord, ...]:
+        target = _tenant_for_workspace(tenant, workspace_id)
+        records = await self._orm.tenants.dashboard_tiles.list(
+            tenant=target,
+            filters={"workspace_id": workspace_id},
+            order_by=("created_at",),
+        )
+        tile_ids = {record.id for record in records}
+        permissions = await self._orm.tenants.dashboard_tile_permissions.list(
+            tenant=target,
+        )
+        permission_map = {
+            permission.tile_id: permission for permission in permissions if permission.tile_id in tile_ids
+        }
+        return tuple(_to_tile_record(record, permission_map.get(record.id)) for record in records)
+
+    async def get_tile(
+        self,
+        *,
+        tenant: TenantContext,
+        workspace_id: str,
+        tile_id: str,
+        principal,
+    ) -> TileRecord:
+        target = _tenant_for_workspace(tenant, workspace_id)
+        return await self._load_tile(target, tile_id)
+
     async def create_tile(
         self,
         *,

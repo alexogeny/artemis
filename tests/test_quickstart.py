@@ -6,7 +6,7 @@ import types
 from collections import defaultdict
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Iterable, Mapping, Sequence, cast
+from typing import Any, Iterable, Mapping, Sequence, cast
 
 import msgspec
 import pytest
@@ -47,8 +47,10 @@ from mere.migrations import MigrationRunner
 from mere.models import (
     BillingRecord,
     BillingStatus,
+    SupportTicket,
     SupportTicketKind,
     SupportTicketStatus,
+    SupportTicketUpdate,
 )
 from mere.orm import ORM
 from mere.quickstart import (
@@ -64,6 +66,7 @@ from mere.quickstart import (
     QuickstartAuthEngine,
     QuickstartChatOpsControlPlane,
     QuickstartChatOpsSettings,
+    QuickstartKanbanCard,
     QuickstartPasskey,
     QuickstartPasskeyRecord,
     QuickstartRepository,
@@ -3683,6 +3686,8 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
 class StubTileService:
     def __init__(self) -> None:
         self.calls: list[tuple[str, dict[str, object]]] = []
+        self.list_tiles_result: tuple[TileRecord, ...] = ()
+        self.tile_records: dict[str, TileRecord] = {}
 
     async def create_tile(
         self,
@@ -3703,7 +3708,7 @@ class StubTileService:
                 },
             )
         )
-        return TileRecord(
+        created = TileRecord(
             id="tile-created",
             workspace_id=workspace_id,
             title=payload.title,
@@ -3712,6 +3717,47 @@ class StubTileService:
             data_sources=payload.data_sources,
             ai_insights_enabled=payload.ai_insights_enabled,
         )
+        self.tile_records[created.id] = created
+        return created
+
+    async def list_tiles(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        principal,
+    ) -> tuple[TileRecord, ...]:
+        self.calls.append(("list", {"workspace": workspace_id}))
+        if self.list_tiles_result:
+            return self.list_tiles_result
+        default = TileRecord(
+            id="tile-default",
+            workspace_id=workspace_id,
+            title="Default",
+            layout={"kind": "chart"},
+        )
+        return (default,)
+
+    async def get_tile(
+        self,
+        *,
+        tenant,
+        workspace_id: str,
+        tile_id: str,
+        principal,
+    ) -> TileRecord:
+        self.calls.append(("get", {"workspace": workspace_id, "tile": tile_id}))
+        record = self.tile_records.get(tile_id)
+        if record is not None:
+            return record
+        fallback = TileRecord(
+            id=tile_id,
+            workspace_id=workspace_id,
+            title="Fetched",
+            layout={"kind": "chart"},
+        )
+        self.tile_records[tile_id] = fallback
+        return fallback
 
     async def update_tile(
         self,
@@ -3732,12 +3778,15 @@ class StubTileService:
                 },
             )
         )
-        return TileRecord(
+        record = TileRecord(
             id=tile_id,
             workspace_id=workspace_id,
             title=payload.title or "updated",
             layout=payload.layout or {"kind": "chart"},
+            description=payload.description,
         )
+        self.tile_records[tile_id] = record
+        return record
 
     async def delete_tile(
         self,
@@ -3748,6 +3797,7 @@ class StubTileService:
         principal,
     ) -> None:
         self.calls.append(("delete", {"workspace": workspace_id, "tile": tile_id}))
+        self.tile_records.pop(tile_id, None)
 
     async def set_permissions(
         self,
@@ -3904,12 +3954,74 @@ class StubAuditService:
         )
 
 
-def _build_quickstart_app(monkeypatch: pytest.MonkeyPatch) -> MereApp:
+class _StubManager:
+    def __init__(self, records: Sequence[Any]) -> None:
+        self._records = list(records)
+
+    @staticmethod
+    def _matches(record: Any, filters: dict[str, object] | None) -> bool:
+        if not filters:
+            return True
+        for key, value in filters.items():
+            if getattr(record, key) != value:
+                return False
+        return True
+
+    async def list(
+        self,
+        *,
+        tenant: TenantContext | None = None,
+        filters: dict[str, object] | None = None,
+        order_by: Iterable[str] | None = None,
+    ) -> list[Any]:
+        items = [record for record in self._records if self._matches(record, filters)]
+        if order_by:
+            field_parts = next(iter(order_by)).split()
+            field = field_parts[0]
+            reverse = any(part.lower() == "desc" for part in field_parts[1:])
+            items.sort(key=lambda item: getattr(item, field), reverse=reverse)
+        return list(items)
+
+    async def get(
+        self,
+        *,
+        tenant: TenantContext | None = None,
+        filters: dict[str, object] | None = None,
+    ) -> Any | None:
+        for record in reversed(self._records):
+            if self._matches(record, filters):
+                return record
+        return None
+
+
+class StubWorkspaceOrm:
+    def __init__(
+        self,
+        *,
+        admin_records: Mapping[str, Sequence[Any]],
+        tenant_records: Mapping[str, Sequence[Any]],
+    ) -> None:
+        self.admin = SimpleNamespace(
+            quickstart_tenants=_StubManager(admin_records.get("quickstart_tenants", ())),
+            quickstart_trial_extensions=_StubManager(admin_records.get("quickstart_trial_extensions", ())),
+            support_tickets=_StubManager(admin_records.get("support_tickets", ())),
+            billing=_StubManager(admin_records.get("billing", ())),
+        )
+        self.tenants = SimpleNamespace(
+            support_tickets=_StubManager(tenant_records.get("support_tickets", ())),
+        )
+
+
+def _build_quickstart_app(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    allowed_tenants: tuple[str, ...] = ("acme",),
+) -> MereApp:
     connection = FakeConnection()
     pool = FakePool(connection)
     db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
     database = Database(db_config, pool=pool)
-    config = AppConfig(site="demo", domain="local.test", allowed_tenants=("acme",), database=db_config)
+    config = AppConfig(site="demo", domain="local.test", allowed_tenants=allowed_tenants, database=db_config)
     app = MereApp(config=config, database=database)
 
     async def _noop_apply(
@@ -3948,38 +4060,410 @@ async def test_quickstart_tile_routes_delegate_to_service(
     app = _build_quickstart_app(monkeypatch)
     stub = StubTileService()
     app.dependencies.provide(TileService, lambda: stub)
+    stub.list_tiles_result = (
+        TileRecord(
+            id="tile-list",
+            workspace_id="acme",
+            title="Pipeline",
+            layout={"kind": "chart"},
+        ),
+    )
+    stub.tile_records["tile-1"] = TileRecord(
+        id="tile-1",
+        workspace_id="acme",
+        title="Existing",
+        layout={"kind": "table"},
+    )
 
     async with TestClient(app) as client:
+        listing = await client.get(
+            "/__mere/workspaces/acme/tiles",
+            tenant="acme",
+        )
+        assert listing.status == Status.OK
+        listing_payload = json.loads(listing.body.decode())
+        assert listing_payload[0]["id"] == "tile-list"
+
+        detail = await client.get(
+            "/__mere/workspaces/acme/tiles/tile-1",
+            tenant="acme",
+        )
+        assert detail.status == Status.OK
+        detail_payload = json.loads(detail.body.decode())
+        assert detail_payload["id"] == "tile-1"
+
         create = await client.post(
-            "/__mere/workspaces/ws-1/tiles",
+            "/__mere/workspaces/acme/tiles",
             tenant="acme",
             json={"title": "Sales", "layout": {"type": "chart"}},
         )
         assert create.status == Status.CREATED
         update = await client.request(
             "PATCH",
-            "/__mere/workspaces/ws-1/tiles/tile-1",
+            "/__mere/workspaces/acme/tiles/tile-1",
             tenant="acme",
             json={"description": "Updated"},
         )
         assert update.status == 200
         delete = await client.request(
             "DELETE",
-            "/__mere/workspaces/ws-1/tiles/tile-1",
+            "/__mere/workspaces/acme/tiles/tile-1",
             tenant="acme",
         )
         assert delete.status == Status.NO_CONTENT
         permissions = await client.request(
             "PUT",
-            "/__mere/workspaces/ws-1/tiles/tile-1/permissions",
+            "/__mere/workspaces/acme/tiles/tile-1/permissions",
             tenant="acme",
             json={"roles": ["viewer"], "users": ["user-1"]},
         )
         assert permissions.status == 200
-        assert stub.calls[0][0] == "create"
-        assert stub.calls[1][0] == "update"
-        assert stub.calls[2][0] == "delete"
-        assert stub.calls[3][0] == "permissions"
+        assert [call[0] for call in stub.calls] == [
+            "list",
+            "get",
+            "create",
+            "update",
+            "delete",
+            "permissions",
+        ]
+
+
+@pytest.mark.asyncio
+async def test_quickstart_workspace_views_return_data(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    tile_service = StubTileService()
+    tile_service.list_tiles_result = (
+        TileRecord(
+            id="tile-analytics",
+            workspace_id="acme",
+            title="Analytics",
+            layout={"kind": "chart"},
+            ai_insights_enabled=True,
+        ),
+    )
+    tile_service.tile_records["tile-analytics"] = tile_service.list_tiles_result[0]
+    app.dependencies.provide(TileService, lambda: tile_service)
+
+    base = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
+    admin_records = {
+        "quickstart_tenants": (
+            quickstart.QuickstartTenantRecord(
+                id="tenant-acme",
+                slug="acme",
+                name="Acme Rockets",
+                created_at=base,
+                updated_at=base,
+            ),
+        ),
+        "quickstart_trial_extensions": (
+            quickstart.QuickstartTrialExtensionRecord(
+                id="trial-acme",
+                tenant_slug="acme",
+                extended_days=14,
+                requested_by="ops",
+                created_at=base,
+                updated_at=base + dt.timedelta(hours=1),
+            ),
+        ),
+        "support_tickets": (
+            SupportTicket(
+                id="ticket-1",
+                tenant_slug="acme",
+                kind=SupportTicketKind.ISSUE,
+                subject="API latency",
+                message="Investigate elevated latency",
+                status=SupportTicketStatus.RESPONDED,
+                updates=(
+                    SupportTicketUpdate(
+                        timestamp=base + dt.timedelta(hours=2),
+                        actor="eng",
+                        note="Working on mitigation",
+                    ),
+                ),
+                created_at=base,
+                updated_at=base + dt.timedelta(hours=3),
+                updated_by="eng",
+            ),
+            SupportTicket(
+                id="ticket-2",
+                tenant_slug="acme",
+                kind=SupportTicketKind.FEEDBACK,
+                subject="Product feedback",
+                message="Customers love the dashboards",
+                status=SupportTicketStatus.RESOLVED,
+                updates=(),
+                created_at=base + dt.timedelta(hours=1),
+                updated_at=base + dt.timedelta(hours=5),
+                updated_by="success",
+            ),
+            SupportTicket(
+                id="ticket-3",
+                tenant_slug="acme",
+                kind=SupportTicketKind.GENERAL,
+                subject="General inquiry",
+                message="Need help with billing",
+                status=SupportTicketStatus.OPEN,
+                updates=(),
+                created_at=base + dt.timedelta(hours=2),
+                updated_at=base + dt.timedelta(hours=2),
+                updated_by="ops",
+            ),
+        ),
+        "billing": (
+            BillingRecord(
+                id="billing-1",
+                customer_id="acme",
+                plan_code="pro",
+                status=BillingStatus.PAST_DUE,
+                amount_due_cents=12000,
+                currency="USD",
+                cycle_start=base,
+                cycle_end=base + dt.timedelta(days=30),
+                created_at=base,
+                updated_at=base + dt.timedelta(hours=4),
+            ),
+            BillingRecord(
+                id="billing-2",
+                customer_id="acme",
+                plan_code="pro",
+                status=BillingStatus.CANCELED,
+                amount_due_cents=0,
+                currency="USD",
+                cycle_start=base,
+                cycle_end=base + dt.timedelta(days=30),
+                created_at=base,
+                updated_at=base + dt.timedelta(hours=6),
+            ),
+            BillingRecord(
+                id="billing-3",
+                customer_id="acme",
+                plan_code="enterprise",
+                status=BillingStatus.ACTIVE,
+                amount_due_cents=50000,
+                currency="USD",
+                cycle_start=base,
+                cycle_end=base + dt.timedelta(days=30),
+                created_at=base,
+                updated_at=base + dt.timedelta(hours=7),
+            ),
+        ),
+    }
+    tenant_records = {
+        "support_tickets": (
+            quickstart.QuickstartTenantSupportTicketRecord(
+                id="tenant-ticket-1",
+                admin_ticket_id="ticket-1",
+                kind=SupportTicketKind.ISSUE,
+                subject="API latency",
+                message="Investigate elevated latency",
+                status=SupportTicketStatus.OPEN,
+                updates=(),
+                created_at=base,
+                updated_at=base + dt.timedelta(hours=4),
+                created_by="ops",
+                updated_by="ops",
+            ),
+            quickstart.QuickstartTenantSupportTicketRecord(
+                id="tenant-ticket-2",
+                admin_ticket_id="ticket-3",
+                kind=SupportTicketKind.GENERAL,
+                subject="General inquiry",
+                message="Need help with billing",
+                status=SupportTicketStatus.OPEN,
+                updates=(),
+                created_at=base + dt.timedelta(hours=2),
+                updated_at=base + dt.timedelta(hours=2),
+                created_by="ops",
+                updated_by="ops",
+            ),
+        ),
+    }
+    orm = StubWorkspaceOrm(admin_records=admin_records, tenant_records=tenant_records)
+    app.dependencies.provide(ORM, lambda: orm)
+
+    async with TestClient(app) as client:
+        settings = await client.get(
+            "/__mere/workspaces/acme/settings",
+            tenant="acme",
+        )
+        assert settings.status == Status.OK
+        settings_payload = json.loads(settings.body.decode())
+        assert settings_payload["workspaceId"] == "acme"
+        assert settings_payload["tileCount"] == 1
+        assert settings_payload["alerts"]
+
+        notifications = await client.get(
+            "/__mere/workspaces/acme/notifications",
+            tenant="acme",
+        )
+        assert notifications.status == Status.OK
+        feed = json.loads(notifications.body.decode())
+        assert any(item["kind"] == "billing" for item in feed)
+
+        kanban = await client.get(
+            "/__mere/workspaces/acme/kanban",
+            tenant="acme",
+        )
+        assert kanban.status == Status.OK
+        board = json.loads(kanban.body.decode())
+        assert board["workspaceId"] == "acme"
+        assert {column["key"] for column in board["columns"]} == {
+            "backlog",
+            "in_progress",
+            "done",
+        }
+        assert any(column["cards"] for column in board["columns"])
+
+
+@pytest.mark.asyncio
+async def test_quickstart_workspace_views_return_sample_when_empty(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+
+    class EmptyTileService(StubTileService):
+        async def list_tiles(
+            self,
+            *,
+            tenant,
+            workspace_id: str,
+            principal,
+        ) -> tuple[TileRecord, ...]:
+            self.calls.append(("list", {"workspace": workspace_id}))
+            return ()
+
+    tile_service = EmptyTileService()
+    app.dependencies.provide(TileService, lambda: tile_service)
+    orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
+    app.dependencies.provide(ORM, lambda: orm)
+
+    async with TestClient(app) as client:
+        settings = await client.get(
+            "/__mere/workspaces/acme/settings",
+            tenant="acme",
+        )
+        assert settings.status == Status.OK
+        settings_payload = json.loads(settings.body.decode())
+        assert settings_payload["tileCount"] == 0
+        assert "acme-billing-setup" in settings_payload["alerts"]
+
+        notifications = await client.get(
+            "/__mere/workspaces/acme/notifications",
+            tenant="acme",
+        )
+        assert notifications.status == Status.OK
+        feed = json.loads(notifications.body.decode())
+        assert len(feed) == 3
+
+        kanban = await client.get(
+            "/__mere/workspaces/acme/kanban",
+            tenant="acme",
+        )
+        assert kanban.status == Status.OK
+        board = json.loads(kanban.body.decode())
+        assert any(column["cards"] for column in board["columns"])
+
+
+@pytest.mark.asyncio
+async def test_quickstart_workspace_views_return_sample_without_orm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    app.dependencies.provide(TileService, StubTileService)
+    app.dependencies.provide(ORM, lambda: None)
+
+    async with TestClient(app) as client:
+        notifications = await client.get(
+            "/__mere/workspaces/acme/notifications",
+            tenant="acme",
+        )
+        assert notifications.status == Status.OK
+        feed = json.loads(notifications.body.decode())
+        assert feed[0]["id"].startswith("acme-")
+
+        kanban = await client.get(
+            "/__mere/workspaces/acme/kanban",
+            tenant="acme",
+        )
+        assert kanban.status == Status.OK
+        board = json.loads(kanban.body.decode())
+        assert board["workspaceId"] == "acme"
+        assert any(column["cards"] for column in board["columns"])
+
+
+@pytest.mark.asyncio
+async def test_quickstart_workspace_routes_reject_cross_tenant_access(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch, allowed_tenants=("acme", "beta"))
+    app.dependencies.provide(TileService, StubTileService)
+    orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
+    app.dependencies.provide(ORM, lambda: orm)
+
+    async with TestClient(app) as client:
+        forbidden = await client.get(
+            "/__mere/workspaces/acme/notifications",
+            tenant="beta",
+        )
+        assert forbidden.status == Status.FORBIDDEN
+
+
+@pytest.mark.asyncio
+async def test_quickstart_workspace_context_created_on_demand(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
+    app.dependencies.provide(ORM, lambda: orm)
+
+    async with TestClient(app) as client:
+        board = await client.get(
+            "/__mere/workspaces/omega/kanban",
+            tenant=app.config.admin_subdomain,
+        )
+        assert board.status == Status.OK
+        payload = json.loads(board.body.decode())
+        assert payload["workspaceId"] == "omega"
+
+
+class _TruthyEmptySequence:
+    def __iter__(self) -> Iterable[QuickstartKanbanCard]:
+        return iter(())
+
+    def __bool__(self) -> bool:
+        return True
+
+
+@pytest.mark.asyncio
+async def test_quickstart_workspace_kanban_returns_sample_for_empty_columns(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app = _build_quickstart_app(monkeypatch)
+    orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
+
+    async def _truthy_empty(
+        self: _StubManager,
+        *,
+        tenant: TenantContext | None = None,
+        filters: dict[str, object] | None = None,
+        order_by: Iterable[str] | None = None,
+    ) -> _TruthyEmptySequence:
+        return _TruthyEmptySequence()
+
+    orm.tenants.support_tickets.list = types.MethodType(_truthy_empty, orm.tenants.support_tickets)
+    app.dependencies.provide(ORM, lambda: orm)
+
+    async with TestClient(app) as client:
+        board = await client.get(
+            "/__mere/workspaces/acme/kanban",
+            tenant="acme",
+        )
+        assert board.status == Status.OK
+        payload = json.loads(board.body.decode())
+        assert payload["workspaceId"] == "acme"
+        assert any(column["cards"] for column in payload["columns"])
 
 
 @pytest.mark.asyncio

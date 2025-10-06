@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable
-from typing import Annotated, Literal, Optional, Protocol
+from typing import Annotated, Any, Literal, Optional, Protocol, cast
 
 import msgspec
 
@@ -181,3 +181,33 @@ def test_schema_registry_covers_python_types() -> None:
 
     assert registry.schema_for(RecursiveNode) == {"$ref": "#/components/schemas/RecursiveNode"}
     assert registry.schema_for(Response) == {"$ref": "#/components/schemas/Response"}
+
+
+class _ResponsePayload(msgspec.Struct):
+    id: str
+
+
+def test_generate_openapi_honors_explicit_response_models() -> None:
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.post("/items", name="create_item")
+    async def create_item() -> Response:
+        return JSONResponse({"id": "item-1"}, status=201)
+
+    cast(Any, create_item).__mere_response_models__ = {
+        201: {"model": _ResponsePayload, "description": "Item created"},
+    }
+
+    @app.route("/items/{item_id}", methods=("DELETE",), name="delete_item")
+    async def delete_item(item_id: str) -> Response:
+        return Response(status=204)
+
+    cast(Any, delete_item).__mere_response_models__ = {204: {"model": None, "description": "Deleted"}}
+
+    spec = generate_openapi(app)
+    responses = spec["paths"]["/items"]["post"]["responses"]
+    assert "201" in responses
+    schema = responses["201"]["content"]["application/json"]["schema"]
+    assert schema == {"$ref": "#/components/schemas/_ResponsePayload"}
+    delete_responses = spec["paths"]["/items/{item_id}"]["delete"]["responses"]
+    assert delete_responses["204"]["description"] == "Deleted"

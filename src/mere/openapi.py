@@ -124,6 +124,26 @@ def _request_body(route: Route, registry: "_SchemaRegistry") -> dict[str, Any] |
 
 
 def _responses(route: Route, registry: "_SchemaRegistry") -> dict[str, Any]:
+    metadata = getattr(route.spec.endpoint, "__mere_response_models__", None)
+    if metadata:
+        responses: dict[str, Any] = {}
+        for status, info in sorted(metadata.items(), key=lambda item: item[0]):
+            model = info.get("model")
+            description = info.get("description", "Success")
+            media_type = info.get("media_type", "application/json")
+            if model is None:
+                responses[str(status)] = {"description": description}
+                continue
+            schema = registry.schema_for(model)
+            responses[str(status)] = {
+                "description": description,
+                "content": {
+                    media_type: {
+                        "schema": schema,
+                    }
+                },
+            }
+        return responses
     annotation = route.type_hints.get("return", Any)
     annotation = registry._unwrap(annotation)
     origin = get_origin(annotation)
