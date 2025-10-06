@@ -102,6 +102,18 @@ def _assert_error_detail(exc: pytest.ExceptionInfo[BaseException], code: str) ->
     assert err.detail["detail"] == code
 
 
+@pytest.fixture(autouse=True)
+def _enable_bootstrap_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Ensure ``MereApp`` attaches bootstrap routes unless tests opt out explicitly."""
+
+    original_init = MereApp.__init__
+
+    def _patched_init(self: MereApp, config: AppConfig | None = None, **kwargs: Any) -> None:
+        kwargs.setdefault("bootstrap_enabled", True)
+        original_init(self, config, **kwargs)
+
+    monkeypatch.setattr(MereApp, "__init__", _patched_init)
+
 @pytest.mark.asyncio
 async def test_bootstrap_routes_dev_environment() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))

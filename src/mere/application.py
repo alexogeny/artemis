@@ -68,7 +68,7 @@ class MereApp:
         orm: ORM | None = None,
         chatops: ChatOpsService | None = None,
         observability: Observability | None = None,
-        bootstrap_enabled: bool = True,
+        bootstrap_enabled: bool = False,
         bootstrap_auth: "BootstrapAuthConfig | None" = None,
         bootstrap_environment: str | None = None,
         bootstrap_base_path: str = "/__mere",

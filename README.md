@@ -2,8 +2,8 @@
 
 ## Developer bootstrap
 
-Mere boots with a developer bootstrap that wires production-grade authentication and tenancy scaffolding for a
-multi-tenant deployment as soon as you instantiate `MereApp`. The helper defaults to development/staging
+Mere ships with a developer bootstrap that wires production-grade authentication and tenancy scaffolding for a
+multi-tenant deployment whenever you instantiate `MereApp` with `bootstrap_enabled=True`. The helper defaults to development/staging
 domains so the sample tenants (`acme`, `beta`) stay out of production, but the login engine and routes it
 exposes are the same ones you would run for real customers. Configuration is driven entirely through
 environment variables so each developer can point the bootstrap at tenant data that matches their sandbox.
@@ -40,7 +40,7 @@ demo operates purely in memory.
 
 ### Endpoints
 
-All routes live under `/__mere` by default (configurable via `base_path`).
+When enabled, all routes live under `/__mere` by default (configurable via `base_path`).
 
 | Method | Path                          | Description                                      |
 | ------ | ----------------------------- | ------------------------------------------------ |

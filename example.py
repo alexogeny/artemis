@@ -51,7 +51,7 @@ def create_app() -> MereApp:
         allowed_tenants=_parse_allowed_tenants(os.getenv("MERE_ALLOWED_TENANTS")),
         database=_database_config(),
     )
-    app = MereApp(config)
+    app = MereApp(config, bootstrap_enabled=True)
 
     @app.get("/", name="root")
     async def root(request: Request) -> Response:

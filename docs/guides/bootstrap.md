@@ -9,11 +9,11 @@ supporting routes under `/__mere`. It is ideal for demos, smoke tests, and early
 from mere import AppConfig, MereApp
 
 config = AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta"))
-app = MereApp(config)
+app = MereApp(config, bootstrap_enabled=True)
 ```
 
-Instantiating `MereApp` automatically registers the bootstrap routes, configures tenancy metadata, and
-loads the embedded front-end assets. Set `bootstrap_enabled=False` when you need to skip the wiring and
+Passing `bootstrap_enabled=True` registers the bootstrap routes, configures tenancy metadata, and
+loads the embedded front-end assets. Leave the flag unset (the default) to skip wiring entirely and
 call `attach_bootstrap` manually (useful in tests where you monkeypatch the bootstrap internals).
 
 ## Scaffolding a production project
