@@ -1,8 +1,8 @@
 site_name: Mere
 site_description: Async multi-tenant web framework
-site_url: https://github.com/alexogeny/mere
+site_url: https://alexogeny.github.io/mere/
 repo_url: https://github.com/alexogeny/mere
-repo_name: alexogeny/mere
+repo_name: mere
 
 nav:
   - Home: index.md
