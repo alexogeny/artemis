@@ -40,6 +40,7 @@ from .bootstrap import (
     BootstrapLoginResponse,
     BootstrapNotification,
     BootstrapPasskey,
+    BootstrapPasskeyCipher,
     BootstrapPasskeyRecord,
     BootstrapRepository,
     BootstrapSeeder,
@@ -67,6 +68,7 @@ from .bootstrap import (
     bootstrap_migrations,
     ensure_tenant_schemas,
     load_bootstrap_auth_from_env,
+    load_bootstrap_passkey_cipher,
 )
 from .chatops import (
     ChatMessage,
@@ -221,6 +223,7 @@ __all__ = [
     "BootstrapLoginResponse",
     "BootstrapNotification",
     "BootstrapPasskey",
+    "BootstrapPasskeyCipher",
     "BootstrapPasskeyRecord",
     "BootstrapRepository",
     "BootstrapSeedStateRecord",
@@ -350,6 +353,7 @@ __all__ = [
     "is_server_error",
     "is_success",
     "load_bootstrap_auth_from_env",
+    "load_bootstrap_passkey_cipher",
     "model",
     "mount_fastapi",
     "post",

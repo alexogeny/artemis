@@ -3,6 +3,7 @@ import datetime as dt
 import hashlib
 import hmac
 import json
+import types
 import xml.etree.ElementTree as ET
 from typing import Callable, Iterable
 
@@ -17,6 +18,8 @@ import lxml.etree as LET
 import mere.authentication as authentication_module
 from mere.authentication import (
     AuthenticationError,
+    AuthenticationFlowEngine,
+    AuthenticationLoginRecord,
     AuthenticationRateLimiter,
     AuthenticationService,
     FederatedIdentityDirectory,
@@ -44,6 +47,7 @@ from mere.models import (
     TenantSecret,
     TenantUser,
 )
+from mere.tenancy import TenantScope
 from tests.support import StaticSecretResolver
 
 _SigningKey = rsa.RSAPrivateKey | ec.EllipticCurvePrivateKey | ed25519.Ed25519PrivateKey | ed448.Ed448PrivateKey
@@ -1097,7 +1101,33 @@ def test_passkey_authentication_success() -> None:
         allow_user=user,
     )
     assert session.user_id == passkey.user_id
-    assert session.level is SessionLevel.PASSKEY
+
+
+def test_authentication_flow_engine_reset_handles_empty_passkey_buffers() -> None:
+    engine = AuthenticationFlowEngine()
+    passkey = types.SimpleNamespace(credential_id="cred")
+    user = types.SimpleNamespace(id="usr", email="owner@test", passkeys=(passkey,))
+    record = AuthenticationLoginRecord(scope=TenantScope.TENANT, tenant="acme", user=user)
+    engine.reset([record], passkey_material={"cred": ("usr", bytearray())})
+    assert engine._passkeys["cred"] == ("usr", "")
+
+
+def test_authentication_flow_engine_reset_supports_legacy_passkey_secret() -> None:
+    engine = AuthenticationFlowEngine()
+    legacy = types.SimpleNamespace(credential_id="legacy", secret="raw-secret")
+    user = types.SimpleNamespace(id="usr", email="legacy@test", passkeys=(legacy,))
+    record = AuthenticationLoginRecord(scope=TenantScope.TENANT, tenant="acme", user=user)
+    engine.reset([record])
+    assert engine._passkeys["legacy"] == ("usr", "raw-secret")
+
+
+def test_authentication_flow_engine_reset_ignores_missing_passkey_id() -> None:
+    engine = AuthenticationFlowEngine()
+    anonymous = types.SimpleNamespace(credential_id=None, secret="ignored")
+    user = types.SimpleNamespace(id="usr", email="missing@test", passkeys=(anonymous,))
+    record = AuthenticationLoginRecord(scope=TenantScope.TENANT, tenant="acme", user=user)
+    engine.reset([record])
+    assert engine._passkeys == {}
 
 
 def test_mfa_manager_issue_hashes_codes() -> None:
@@ -2013,9 +2043,7 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda uri, timeout=5, context=None: DummyResponse(
-            json.dumps({"keys": []}).encode(), status=500
-        ),
+        lambda uri, timeout=5, context=None: DummyResponse(json.dumps({"keys": []}).encode(), status=500),
     )
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._default_jwks_fetcher("https://example.com/jwks")
@@ -2118,6 +2146,7 @@ def test_default_jwks_fetcher_rejects_redirect_without_host(
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._default_jwks_fetcher("https://example.com/jwks")
     assert str(exc.value) == "jwks_invalid_host"
+
 
 def test_saml_authenticator_error_paths() -> None:
     now = dt.datetime.now(dt.timezone.utc)

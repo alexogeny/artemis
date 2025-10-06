@@ -14,8 +14,8 @@ from msgspec import structs
 
 import mere.bootstrap as bootstrap
 from mere import AppConfig, MereApp, PasskeyManager, SessionLevel, TestClient
+from mere.authentication import AuthenticationFlowUser, AuthenticationLoginRecord
 from mere.bootstrap import (
-    DEFAULT_BOOTSTRAP_AUTH,
     BootstrapAdminControlPlane,
     BootstrapAdminRealm,
     BootstrapAdminUserRecord,
@@ -62,7 +62,7 @@ from mere.chatops import (
     ChatOpsSlashCommand,
     SlackWebhookConfig,
 )
-from mere.database import Database, DatabaseConfig, PoolConfig
+from mere.database import Database, DatabaseConfig, PoolConfig, SecretValue
 from mere.domain.services import (
     AuditLogEntry,
     AuditLogExport,
@@ -113,6 +113,168 @@ def _enable_bootstrap_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
         original_init(self, config, **kwargs)
 
     monkeypatch.setattr(MereApp, "__init__", _patched_init)
+
+
+@pytest.fixture(autouse=True)
+def _bootstrap_secret_material(monkeypatch: pytest.MonkeyPatch) -> None:
+    passphrase = "unit-test-passphrase"
+    cipher = bootstrap.BootstrapPasskeyCipher.from_secret(passphrase)
+    ciphertext = cipher.encrypt(b"beta-passkey-secret")
+    monkeypatch.setenv("MERE_BOOTSTRAP_PASSPHRASE", passphrase)
+    monkeypatch.setenv("MERE_BOOTSTRAP_BETA_PASSKEY_CIPHERTEXT", ciphertext)
+    monkeypatch.setenv("MERE_BOOTSTRAP_BETA_PASSWORD", "beta-password")
+    monkeypatch.setenv("MERE_BOOTSTRAP_BETA_MFA", "654321")
+    monkeypatch.setenv("MERE_BOOTSTRAP_ADMIN_PASSWORD", "admin-password")
+    monkeypatch.setenv("MERE_BOOTSTRAP_ADMIN_MFA", "123456")
+    bootstrap.DEFAULT_BOOTSTRAP_AUTH = bootstrap._default_auth_config()
+
+
+@pytest.fixture
+def passkey_cipher(_bootstrap_secret_material: None) -> bootstrap.BootstrapPasskeyCipher:
+    cipher = bootstrap.load_bootstrap_passkey_cipher()
+    assert cipher is not None
+    return cipher
+
+
+def _resolve_passkey_secret(
+    passkey: bootstrap.BootstrapPasskey,
+    cipher: bootstrap.BootstrapPasskeyCipher,
+) -> bytes:
+    ciphertext = passkey.secret_ciphertext.resolve(None, field="tests.passkey")
+    assert ciphertext is not None
+    secret = cipher.decrypt(ciphertext)
+    try:
+        return bytes(secret)
+    finally:
+        secret[:] = b"\x00" * len(secret)
+
+
+def test_bootstrap_passkey_cipher_requires_key_material() -> None:
+    with pytest.raises(ValueError):
+        bootstrap.BootstrapPasskeyCipher(key_material=b"")
+
+
+def test_bootstrap_passkey_cipher_requires_ciphertext(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    with pytest.raises(ValueError):
+        passkey_cipher.decrypt(None)
+
+
+def test_bootstrap_load_passkey_cipher_missing_returns_none() -> None:
+    assert bootstrap.load_bootstrap_passkey_cipher(env={"IGNORED": "value"}) is None
+
+
+def test_bootstrap_passkey_record_resolves_legacy_secret() -> None:
+    record = BootstrapPasskeyRecord(
+        credential_id="legacy",
+        secret_ciphertext=None,
+        label=None,
+        _legacy_secret="legacy-ciphertext",
+    )
+    assert record.resolved_secret_ciphertext() == "legacy-ciphertext"
+
+
+def test_bootstrap_passkey_record_missing_ciphertext_raises() -> None:
+    record = BootstrapPasskeyRecord(
+        credential_id="missing",
+        secret_ciphertext=None,
+        label=None,
+    )
+    with pytest.raises(RuntimeError):
+        record.resolved_secret_ciphertext()
+
+
+def test_bootstrap_seeder_passkey_resolution_required() -> None:
+    seeder = BootstrapSeeder(cast(ORM, types.SimpleNamespace()))
+    passkey = BootstrapPasskey(credential_id="cred", secret_ciphertext=SecretValue())
+    with pytest.raises(RuntimeError):
+        seeder._passkeys_to_records((passkey,))
+
+
+def test_bootstrap_repository_decrypt_passkeys_without_cipher() -> None:
+    repository = BootstrapRepository(
+        cast(ORM, types.SimpleNamespace()),
+        site="demo",
+        domain="local.test",
+    )
+    user = BootstrapUser(id="usr", email="owner@test", passkeys=())
+    assert repository.decrypt_passkeys([user]) == {}
+
+
+def test_bootstrap_repository_extract_passkey_material_requires_ciphertext(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    user = BootstrapUser(
+        id="usr",
+        email="owner@test",
+        passkeys=(BootstrapPasskey(credential_id="cred", secret_ciphertext=SecretValue()),),
+    )
+    with pytest.raises(RuntimeError):
+        BootstrapRepository.extract_passkey_material([user], cipher=passkey_cipher, resolver=None)
+
+
+def test_bootstrap_engine_collect_passkeys_without_cipher() -> None:
+    engine = BootstrapAuthEngine(
+        BootstrapAuthConfig(tenants=(), admin=BootstrapAdminRealm(users=())),
+        passkey_cipher=None,
+    )
+    user = BootstrapUser(id="usr", email="owner@test", passkeys=())
+    record = AuthenticationLoginRecord(
+        scope=TenantScope.TENANT,
+        tenant="acme",
+        user=cast(AuthenticationFlowUser, user),
+    )
+    assert engine._collect_passkey_material([record]) == {}
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_engine_passkey_handles_empty_secret() -> None:
+    tenant_config = BootstrapTenant(
+        slug="theta",
+        name="Theta",
+        users=(
+            BootstrapUser(
+                id="usr_theta",
+                email="ops@theta.test",
+                passkeys=(
+                    BootstrapPasskey(
+                        credential_id="theta-passkey",
+                        secret_ciphertext=SecretValue(literal="ignored"),
+                    ),
+                ),
+            ),
+        ),
+    )
+    config = BootstrapAuthConfig(tenants=(tenant_config,), admin=BootstrapAdminRealm(users=()))
+    engine = BootstrapAuthEngine(config, passkey_cipher=None)
+    user = tenant_config.users[0]
+    record = AuthenticationLoginRecord(
+        scope=TenantScope.TENANT,
+        tenant=tenant_config.slug,
+        user=cast(AuthenticationFlowUser, user),
+    )
+    engine.reset([record], passkey_material={"theta-passkey": (user.id, bytearray())})
+    tenant = _tenant("demo", "local.test", tenant_config.slug, TenantScope.TENANT)
+    start = await engine.start(tenant, email=user.email)
+    flow = engine._flows[start.flow_token]
+    assert flow.challenge is not None
+    passkey = engine._passkey_manager.register(
+        user_id=user.id,
+        credential_id="theta-passkey",
+        secret=b"",
+        user_handle=f"{user.id}:{tenant.tenant}",
+    )
+    signature = engine._passkey_manager.sign(passkey=passkey, challenge=flow.challenge)
+    response = await engine.passkey(
+        tenant,
+        PasskeyAttempt(
+            flow_token=start.flow_token,
+            credential_id="theta-passkey",
+            signature=signature,
+        ),
+    )
+    assert response.next is LoginStep.SUCCESS
 
 
 @pytest.mark.asyncio
@@ -166,7 +328,7 @@ def test_bootstrap_updates_allowed_tenants_from_config() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
     )
 
     app = MereApp(
@@ -208,7 +370,9 @@ async def test_bootstrap_sso_login_hint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_passkey_flow_with_mfa() -> None:
+async def test_bootstrap_passkey_flow_with_mfa(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
 
     async with TestClient(app) as client:
@@ -225,13 +389,13 @@ async def test_bootstrap_passkey_flow_with_mfa() -> None:
         challenge = start_payload["challenge"]
         credential_id = start_payload["credential_ids"][0]
 
-        user = DEFAULT_BOOTSTRAP_AUTH.tenants[1].users[0]
+        user = bootstrap.DEFAULT_BOOTSTRAP_AUTH.tenants[1].users[0]
         passkey_cfg = user.passkeys[0]
         manager = PasskeyManager()
         demo_passkey = manager.register(
             user_id=user.id,
             credential_id=passkey_cfg.credential_id,
-            secret=passkey_cfg.secret.encode("utf-8"),
+            secret=_resolve_passkey_secret(passkey_cfg, passkey_cipher),
             user_handle="demo",
         )
         signature = manager.sign(passkey=demo_passkey, challenge=challenge)
@@ -266,8 +430,8 @@ async def test_bootstrap_passkey_flow_with_mfa() -> None:
 @pytest.mark.asyncio
 async def test_bootstrap_login_flow_times_out() -> None:
     config = BootstrapAuthConfig(
-        tenants=DEFAULT_BOOTSTRAP_AUTH.tenants,
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        tenants=bootstrap.DEFAULT_BOOTSTRAP_AUTH.tenants,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
         flow_ttl_seconds=0,
     )
     app = MereApp(
@@ -304,8 +468,8 @@ async def test_bootstrap_login_flow_times_out() -> None:
 @pytest.mark.asyncio
 async def test_bootstrap_login_flow_locks_after_failures() -> None:
     config = BootstrapAuthConfig(
-        tenants=DEFAULT_BOOTSTRAP_AUTH.tenants,
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        tenants=bootstrap.DEFAULT_BOOTSTRAP_AUTH.tenants,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
         max_attempts=2,
     )
     app = MereApp(
@@ -342,8 +506,10 @@ async def test_bootstrap_login_flow_locks_after_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_prunes_expired_flows() -> None:
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+async def test_bootstrap_engine_prunes_expired_flows(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     tenant = TenantContext(
         tenant="beta",
         site="demo",
@@ -365,7 +531,7 @@ async def test_bootstrap_engine_prunes_expired_flows() -> None:
 async def test_bootstrap_password_flow_for_admin() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
 
-    admin = DEFAULT_BOOTSTRAP_AUTH.admin.users[0]
+    admin = bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin.users[0]
 
     async with TestClient(app) as client:
         start = await client.post(
@@ -2039,7 +2205,9 @@ async def test_bootstrap_admin_support_ticket_update_sequence_response(
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_seeder_persists_config() -> None:
+async def test_bootstrap_seeder_persists_config(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
     class RecordingManager:
         def __init__(self) -> None:
             self.deleted: list[tuple[TenantContext | None, object | None]] = []
@@ -2117,7 +2285,9 @@ async def test_bootstrap_seeder_persists_config() -> None:
                         passkeys=(
                             BootstrapPasskey(
                                 credential_id="acme-passkey",
-                                secret="passkey-secret",
+                                secret_ciphertext=SecretValue(
+                                    literal=passkey_cipher.encrypt(b"passkey-secret"),
+                                ),
                                 label="YubiKey",
                             ),
                         ),
@@ -2138,7 +2308,14 @@ async def test_bootstrap_seeder_persists_config() -> None:
                     id="adm_root",
                     email="root@admin.test",
                     password="admin-pass",
-                    passkeys=(BootstrapPasskey(credential_id="adm-passkey", secret="adm-secret"),),
+                    passkeys=(
+                        BootstrapPasskey(
+                            credential_id="adm-passkey",
+                            secret_ciphertext=SecretValue(
+                                literal=passkey_cipher.encrypt(b"adm-secret"),
+                            ),
+                        ),
+                    ),
                     mfa_code="111111",
                 ),
             ),
@@ -2163,9 +2340,14 @@ async def test_bootstrap_seeder_persists_config() -> None:
     assert len(admin_users.created) == 1
     admin_record = admin_users.created[0][1]
     assert isinstance(admin_record, BootstrapAdminUserRecord)
-    assert admin_record.passkeys == (
-        BootstrapPasskeyRecord(credential_id="adm-passkey", secret="adm-secret", label=None),
-    )
+    assert len(admin_record.passkeys) == 1
+    admin_passkey = admin_record.passkeys[0]
+    assert admin_passkey.credential_id == "adm-passkey"
+    admin_secret = passkey_cipher.decrypt(admin_passkey.secret_ciphertext)
+    try:
+        assert bytes(admin_secret) == b"adm-secret"
+    finally:
+        admin_secret[:] = b"\x00" * len(admin_secret)
 
     assert len(tenant_records.deleted) == 1
     assert len(tenant_records.created) == 1
@@ -2181,13 +2363,15 @@ async def test_bootstrap_seeder_persists_config() -> None:
     created_user = tenant_users.created[0][1]
     assert isinstance(created_user, BootstrapTenantUserRecord)
     assert created_user.email == "founder@acme.test"
-    assert created_user.passkeys == (
-        BootstrapPasskeyRecord(
-            credential_id="acme-passkey",
-            secret="passkey-secret",
-            label="YubiKey",
-        ),
-    )
+    assert len(created_user.passkeys) == 1
+    tenant_passkey = created_user.passkeys[0]
+    assert tenant_passkey.credential_id == "acme-passkey"
+    assert tenant_passkey.label == "YubiKey"
+    tenant_secret = passkey_cipher.decrypt(tenant_passkey.secret_ciphertext)
+    try:
+        assert bytes(tenant_secret) == b"passkey-secret"
+    finally:
+        tenant_secret[:] = b"\x00" * len(tenant_secret)
     assert created_user.sso_provider is not None
 
     assert len(seed_state.created) == 1
@@ -2259,7 +2443,7 @@ async def test_bootstrap_seeder_skips_when_fingerprint_matches() -> None:
             ),
         ),
     )
-    config = BootstrapAuthConfig(tenants=(tenant,), admin=DEFAULT_BOOTSTRAP_AUTH.admin)
+    config = BootstrapAuthConfig(tenants=(tenant,), admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin)
     context = TenantContext(tenant="acme", site="demo", domain="local.test", scope=TenantScope.TENANT)
     seeder = BootstrapSeeder(cast(ORM, orm_stub))
 
@@ -2288,7 +2472,7 @@ async def test_bootstrap_seeder_skips_when_fingerprint_matches() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
     )
     third = await seeder.apply(updated_config, tenants={"acme": context})
     assert third is True
@@ -2297,7 +2481,11 @@ async def test_bootstrap_seeder_skips_when_fingerprint_matches() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_repository_roundtrip() -> None:
+async def test_bootstrap_repository_roundtrip(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    tenant_ciphertext = passkey_cipher.encrypt(b"passkey-secret")
+    admin_ciphertext = passkey_cipher.encrypt(b"adm-secret")
     tenant_record = BootstrapTenantRecord(id="tnt_acme", slug="acme", name="Acme")
     tenant_user = BootstrapTenantUserRecord(
         id="usr_acme",
@@ -2306,7 +2494,7 @@ async def test_bootstrap_repository_roundtrip() -> None:
         passkeys=(
             BootstrapPasskeyRecord(
                 credential_id="acme-passkey",
-                secret="passkey-secret",
+                secret_ciphertext=tenant_ciphertext,
                 label="Primary",
             ),
         ),
@@ -2322,7 +2510,13 @@ async def test_bootstrap_repository_roundtrip() -> None:
         id="adm_root",
         email="root@admin.test",
         password="admin-pass",
-        passkeys=(BootstrapPasskeyRecord(credential_id="adm-passkey", secret="adm-secret", label=None),),
+        passkeys=(
+            BootstrapPasskeyRecord(
+                credential_id="adm-passkey",
+                secret_ciphertext=admin_ciphertext,
+                label=None,
+            ),
+        ),
         mfa_code="111111",
     )
 
@@ -2350,11 +2544,17 @@ async def test_bootstrap_repository_roundtrip() -> None:
         ),
     )
 
-    repository = BootstrapRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
+    repository = BootstrapRepository(
+        cast(ORM, orm_stub),
+        site="demo",
+        domain="local.test",
+        passkey_cipher=passkey_cipher,
+    )
     config = await repository.load()
     assert config is not None
     assert config.tenants[0].slug == "acme"
-    assert config.tenants[0].users[0].passkeys[0].secret == "passkey-secret"
+    tenant_passkey = config.tenants[0].users[0].passkeys[0]
+    assert _resolve_passkey_secret(tenant_passkey, passkey_cipher) == b"passkey-secret"
     assert config.admin.users[0].email == "root@admin.test"
 
 
@@ -2362,8 +2562,10 @@ async def test_bootstrap_repository_roundtrip() -> None:
 async def test_attach_bootstrap_bootstraps_database(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
+    real_repository = bootstrap.BootstrapRepository
+
     class StubSeeder:
-        def __init__(self, orm: ORM) -> None:
+        def __init__(self, orm: ORM, **_: object) -> None:
             calls["seeder_init"] = orm
 
         async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
@@ -2372,8 +2574,29 @@ async def test_attach_bootstrap_bootstraps_database(monkeypatch: pytest.MonkeyPa
             return True
 
     class StubRepository:
-        def __init__(self, orm: ORM, *, site: str, domain: str) -> None:
-            calls["repository_init"] = (orm, site, domain)
+        def __init__(
+            self,
+            orm: ORM,
+            *,
+            site: str,
+            domain: str,
+            secret_resolver: object | None = None,
+            passkey_cipher: object | None = None,
+        ) -> None:
+            calls["repository_init"] = (orm, site, domain, secret_resolver, passkey_cipher)
+
+        @staticmethod
+        def extract_passkey_material(
+            users: Iterable[bootstrap.BootstrapUser],
+            *,
+            cipher: bootstrap.BootstrapPasskeyCipher | None,
+            resolver: bootstrap.SecretResolver | None = None,
+        ) -> dict[str, tuple[str, bytearray]]:
+            return real_repository.extract_passkey_material(
+                users,
+                cipher=cipher,
+                resolver=resolver,
+            )
 
         async def load(self) -> BootstrapAuthConfig | None:
             calls["repository_load"] = True
@@ -2422,10 +2645,10 @@ async def test_attach_bootstrap_bootstraps_database(monkeypatch: pytest.MonkeyPa
         response = await client.get("/__mere/ping", tenant="acme")
         assert response.status == 200
 
-    assert calls["seed_config"] is DEFAULT_BOOTSTRAP_AUTH
+    assert calls["seed_config"] is bootstrap.DEFAULT_BOOTSTRAP_AUTH
     assert sorted(calls["seed_tenants"]) == ["acme", "beta"]
     assert calls["repository_load"] is True
-    assert calls["reload_config"] is DEFAULT_BOOTSTRAP_AUTH
+    assert calls["reload_config"] is bootstrap.DEFAULT_BOOTSTRAP_AUTH
     assert [sorted(entry) for entry in calls.get("schemas", [])]
     assert [sorted(entry) for entry in calls.get("migrations", [])]
 
@@ -2483,18 +2706,41 @@ async def test_bootstrap_seeder_requires_context() -> None:
 
 @pytest.mark.asyncio
 async def test_attach_bootstrap_syncs_allowed_tenants_from_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    real_repository = bootstrap.BootstrapRepository
+
     class StubSeeder:
-        def __init__(self, orm: ORM) -> None:
+        def __init__(self, orm: ORM, **_: object) -> None:
             self.orm = orm
 
         async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
             return True
 
     class StubRepository:
-        def __init__(self, orm: ORM, *, site: str, domain: str) -> None:
+        def __init__(
+            self,
+            orm: ORM,
+            *,
+            site: str,
+            domain: str,
+            secret_resolver: object | None = None,
+            passkey_cipher: object | None = None,
+        ) -> None:
             self.orm = orm
             self.site = site
             self.domain = domain
+
+        @staticmethod
+        def extract_passkey_material(
+            users: Iterable[bootstrap.BootstrapUser],
+            *,
+            cipher: bootstrap.BootstrapPasskeyCipher | None,
+            resolver: bootstrap.SecretResolver | None = None,
+        ) -> dict[str, tuple[str, bytearray]]:
+            return real_repository.extract_passkey_material(
+                users,
+                cipher=cipher,
+                resolver=resolver,
+            )
 
         async def load(self) -> BootstrapAuthConfig | None:
             return BootstrapAuthConfig(
@@ -2511,7 +2757,7 @@ async def test_attach_bootstrap_syncs_allowed_tenants_from_registry(monkeypatch:
                         ),
                     ),
                 ),
-                admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+                admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
             )
 
     async def fake_ensure(database: Database, tenants: Sequence[TenantContext]) -> None:
@@ -2566,16 +2812,24 @@ async def test_bootstrap_repository_returns_none_when_empty() -> None:
         ),
         tenants=types.SimpleNamespace(bootstrap_users=types.SimpleNamespace(list=lambda **_: [])),
     )
-    repository = BootstrapRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
+    repository = BootstrapRepository(
+        cast(ORM, orm_stub),
+        site="demo",
+        domain="local.test",
+        passkey_cipher=cast(bootstrap.BootstrapPasskeyCipher, passkey_cipher),
+    )
     assert await repository.load() is None
 
 
 @pytest.mark.asyncio
-async def test_attach_bootstrap_with_custom_config(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_bootstrap_with_custom_config(
+    monkeypatch: pytest.MonkeyPatch,
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
     calls: dict[str, object] = {}
 
     class StubSeeder:
-        def __init__(self, orm: ORM) -> None:
+        def __init__(self, orm: ORM, **_: object) -> None:
             calls["init"] = orm
 
         async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
@@ -2714,8 +2968,10 @@ def test_load_bootstrap_auth_from_env_invalid() -> None:
 async def test_attach_bootstrap_uses_repository_config(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
+    real_repository = bootstrap.BootstrapRepository
+
     class StubSeeder:
-        def __init__(self, orm: ORM) -> None:
+        def __init__(self, orm: ORM, **_: object) -> None:
             calls["seeder_init"] = orm
 
         async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
@@ -2723,10 +2979,31 @@ async def test_attach_bootstrap_uses_repository_config(monkeypatch: pytest.Monke
             return True
 
     class StubRepository:
-        def __init__(self, orm: ORM, *, site: str, domain: str) -> None:
+        def __init__(
+            self,
+            orm: ORM,
+            *,
+            site: str,
+            domain: str,
+            secret_resolver: object | None = None,
+            passkey_cipher: object | None = None,
+        ) -> None:
             self._orm = orm
             self._site = site
             self._domain = domain
+
+        @staticmethod
+        def extract_passkey_material(
+            users: Iterable[bootstrap.BootstrapUser],
+            *,
+            cipher: bootstrap.BootstrapPasskeyCipher | None,
+            resolver: bootstrap.SecretResolver | None = None,
+        ) -> dict[str, tuple[str, bytearray]]:
+            return real_repository.extract_passkey_material(
+                users,
+                cipher=cipher,
+                resolver=resolver,
+            )
 
         async def load(self) -> BootstrapAuthConfig | None:
             return BootstrapAuthConfig(
@@ -2796,8 +3073,10 @@ def _tenant(site: str, domain: str, slug: str, scope: TenantScope) -> TenantCont
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_rejects_public_scope() -> None:
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+async def test_bootstrap_engine_rejects_public_scope(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     tenant = _tenant("demo", "local.test", "public", TenantScope.PUBLIC)
     with pytest.raises(HTTPError) as exc:
         await engine.start(tenant, email="user@example.com")
@@ -2805,8 +3084,10 @@ async def test_bootstrap_engine_rejects_public_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_unknown_user_and_authenticators() -> None:
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+async def test_bootstrap_engine_unknown_user_and_authenticators(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     tenant = _tenant("demo", "local.test", "acme", TenantScope.TENANT)
     with pytest.raises(HTTPError) as exc:
         await engine.start(tenant, email="missing@acme.test")
@@ -2820,9 +3101,9 @@ async def test_bootstrap_engine_unknown_user_and_authenticators() -> None:
                 users=(BootstrapUser(id="usr_gamma", email="ops@gamma.test"),),
             ),
         ),
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = BootstrapAuthEngine(config)
+    engine = BootstrapAuthEngine(config, passkey_cipher=passkey_cipher)
     tenant = _tenant("demo", "local.test", "gamma", TenantScope.TENANT)
     with pytest.raises(HTTPError) as exc:
         await engine.start(tenant, email="ops@gamma.test")
@@ -2830,8 +3111,10 @@ async def test_bootstrap_engine_unknown_user_and_authenticators() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_passkey_error_paths() -> None:
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+async def test_bootstrap_engine_passkey_error_paths(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     beta = _tenant("demo", "local.test", "beta", TenantScope.TENANT)
 
     start = await engine.start(beta, email="ops@beta.test")
@@ -2864,7 +3147,7 @@ async def test_bootstrap_engine_passkey_error_paths() -> None:
         )
     _assert_error_detail(exc, "invalid_passkey")
 
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     admin = _tenant("demo", "local.test", "admin", TenantScope.ADMIN)
     start = await engine.start(admin, email="root@admin.test")
     with pytest.raises(HTTPError) as exc:
@@ -2894,9 +3177,9 @@ async def test_bootstrap_engine_passkey_error_paths() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = BootstrapAuthEngine(config)
+    engine = BootstrapAuthEngine(config, passkey_cipher=passkey_cipher)
     zeta = _tenant("demo", "local.test", "zeta", TenantScope.TENANT)
     start = await engine.start(zeta, email="ops@zeta.test")
     assert start.next is LoginStep.SSO
@@ -2910,8 +3193,10 @@ async def test_bootstrap_engine_passkey_error_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_password_paths() -> None:
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+async def test_bootstrap_engine_password_paths(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     beta = _tenant("demo", "local.test", "beta", TenantScope.TENANT)
 
     # Password fallback from passkey
@@ -2927,13 +3212,13 @@ async def test_bootstrap_engine_password_paths() -> None:
 
     # Password not expected once MFA started
     start = await engine.start(beta, email="ops@beta.test")
-    user = DEFAULT_BOOTSTRAP_AUTH.tenants[1].users[0]
+    user = bootstrap.DEFAULT_BOOTSTRAP_AUTH.tenants[1].users[0]
     passkey_cfg = user.passkeys[0]
     manager = PasskeyManager()
     demo_passkey = manager.register(
         user_id=user.id,
         credential_id=passkey_cfg.credential_id,
-        secret=passkey_cfg.secret.encode("utf-8"),
+        secret=_resolve_passkey_secret(passkey_cfg, passkey_cipher),
         user_handle="demo",
     )
     challenge = engine._flows[start.flow_token].challenge
@@ -2961,14 +3246,21 @@ async def test_bootstrap_engine_password_paths() -> None:
                     BootstrapUser(
                         id="usr_gamma",
                         email="ops@gamma.test",
-                        passkeys=(BootstrapPasskey(credential_id="gamma-passkey", secret="gamma-secret"),),
+                        passkeys=(
+                            BootstrapPasskey(
+                                credential_id="gamma-passkey",
+                                secret_ciphertext=SecretValue(
+                                    literal=passkey_cipher.encrypt(b"gamma-secret"),
+                                ),
+                            ),
+                        ),
                     ),
                 ),
             ),
         ),
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = BootstrapAuthEngine(config)
+    engine = BootstrapAuthEngine(config, passkey_cipher=passkey_cipher)
     gamma = _tenant("demo", "local.test", "gamma", TenantScope.TENANT)
     start = await engine.start(gamma, email="ops@gamma.test")
     with pytest.raises(HTTPError) as exc:
@@ -2977,8 +3269,10 @@ async def test_bootstrap_engine_password_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_mfa_paths() -> None:
-    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
+async def test_bootstrap_engine_mfa_paths(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    engine = BootstrapAuthEngine(bootstrap.DEFAULT_BOOTSTRAP_AUTH, passkey_cipher=passkey_cipher)
     admin_ctx = _tenant("demo", "local.test", "admin", TenantScope.ADMIN)
 
     start = await engine.start(admin_ctx, email="root@admin.test")
@@ -3004,7 +3298,9 @@ async def test_bootstrap_engine_mfa_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_success_and_cleanup_paths() -> None:
+async def test_bootstrap_engine_success_and_cleanup_paths(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
     config = BootstrapAuthConfig(
         tenants=(
             BootstrapTenant(
@@ -3015,7 +3311,14 @@ async def test_bootstrap_engine_success_and_cleanup_paths() -> None:
                         id="usr_delta",
                         email="ops@delta.test",
                         password="delta-pass",
-                        passkeys=(BootstrapPasskey(credential_id="delta-passkey", secret="delta-secret"),),
+                        passkeys=(
+                            BootstrapPasskey(
+                                credential_id="delta-passkey",
+                                secret_ciphertext=SecretValue(
+                                    literal=passkey_cipher.encrypt(b"delta-secret"),
+                                ),
+                            ),
+                        ),
                     ),
                 ),
             ),
@@ -3026,12 +3329,19 @@ async def test_bootstrap_engine_success_and_cleanup_paths() -> None:
                     id="adm_demo",
                     email="admin@demo.test",
                     password="demo-admin",
-                    passkeys=(BootstrapPasskey(credential_id="adm-passkey", secret="adm-secret"),),
+                    passkeys=(
+                        BootstrapPasskey(
+                            credential_id="adm-passkey",
+                            secret_ciphertext=SecretValue(
+                                literal=passkey_cipher.encrypt(b"adm-secret"),
+                            ),
+                        ),
+                    ),
                 ),
             ),
         ),
     )
-    engine = BootstrapAuthEngine(config)
+    engine = BootstrapAuthEngine(config, passkey_cipher=passkey_cipher)
     delta = _tenant("demo", "local.test", "delta", TenantScope.TENANT)
 
     start = await engine.start(delta, email="ops@delta.test")
@@ -3039,7 +3349,7 @@ async def test_bootstrap_engine_success_and_cleanup_paths() -> None:
     passkey = manager.register(
         user_id="usr_delta",
         credential_id="delta-passkey",
-        secret=b"delta-secret",
+        secret=_resolve_passkey_secret(config.tenants[0].users[0].passkeys[0], passkey_cipher),
         user_handle="demo",
     )
     flow = engine._flows[start.flow_token]
@@ -3075,7 +3385,9 @@ async def test_bootstrap_engine_success_and_cleanup_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_bootstrap_engine_sso_fallback_to_passkey() -> None:
+async def test_bootstrap_engine_sso_fallback_to_passkey(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
     config = BootstrapAuthConfig(
         tenants=(
             BootstrapTenant(
@@ -3085,7 +3397,14 @@ async def test_bootstrap_engine_sso_fallback_to_passkey() -> None:
                     BootstrapUser(
                         id="usr_epsilon",
                         email="ops@epsilon.test",
-                        passkeys=(BootstrapPasskey(credential_id="epsilon-passkey", secret="epsilon-secret"),),
+                        passkeys=(
+                            BootstrapPasskey(
+                                credential_id="epsilon-passkey",
+                                secret_ciphertext=SecretValue(
+                                    literal=passkey_cipher.encrypt(b"epsilon-secret"),
+                                ),
+                            ),
+                        ),
                         sso=BootstrapSsoProvider(
                             slug="okta",
                             kind="saml",
@@ -3096,9 +3415,9 @@ async def test_bootstrap_engine_sso_fallback_to_passkey() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+        admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = BootstrapAuthEngine(config)
+    engine = BootstrapAuthEngine(config, passkey_cipher=passkey_cipher)
     epsilon = _tenant("demo", "local.test", "epsilon", TenantScope.TENANT)
     start = await engine.start(epsilon, email="ops@epsilon.test")
     assert start.next is LoginStep.SSO
@@ -3120,7 +3439,7 @@ async def test_bootstrap_engine_sso_fallback_to_passkey() -> None:
     passkey = manager.register(
         user_id=user.id,
         credential_id=passkey_config.credential_id,
-        secret=passkey_config.secret.encode("utf-8"),
+        secret=_resolve_passkey_secret(passkey_config, passkey_cipher),
         user_handle="demo",  # value unused by manager
     )
     signature = manager.sign(passkey=passkey, challenge=prompt.challenge)
@@ -3385,7 +3704,7 @@ async def test_bootstrap_admin_control_plane_support_and_metrics(
         def __init__(self) -> None:
             self.config = BootstrapAuthConfig(
                 tenants=(BootstrapTenant(slug="acme", name="Acme", users=()),),
-                admin=DEFAULT_BOOTSTRAP_AUTH.admin,
+                admin=bootstrap.DEFAULT_BOOTSTRAP_AUTH.admin,
             )
             self.reloaded: list[BootstrapAuthConfig] = []
 

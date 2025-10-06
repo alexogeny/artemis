@@ -727,12 +727,16 @@ class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
             challenge = flow.challenge
             if not challenge:
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "missing_challenge"})
+            encoded_secret = record[1]
+            secret_buffer = bytearray(_decode_secret(encoded_secret))
             passkey = self._passkey_manager.register(
                 user_id=getattr(flow.user, "id"),
                 credential_id=attempt.credential_id,
-                secret=record[1].encode("utf-8"),
+                secret=bytes(secret_buffer),
                 user_handle=f"{getattr(flow.user, 'id')}:{flow.tenant}",
             )
+            if secret_buffer:
+                secret_buffer[:] = b"\x00" * len(secret_buffer)
             if not self._passkey_manager.verify(passkey=passkey, challenge=challenge, signature=attempt.signature):
                 self._register_failure(flow)
                 raise HTTPError(Status.UNAUTHORIZED, {"detail": "invalid_passkey"})
@@ -777,7 +781,12 @@ class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
             self._reset_attempts(flow)
             return self._finish(flow, SessionLevel.MFA)
 
-    def reset(self, records: Iterable[AuthenticationLoginRecord[LoginUserT]]) -> None:
+    def reset(
+        self,
+        records: Iterable[AuthenticationLoginRecord[LoginUserT]],
+        *,
+        passkey_material: Mapping[str, tuple[str, bytearray]] | None = None,
+    ) -> None:
         """Replace indexed users and clear flow state."""
 
         self._flows.clear()
@@ -788,9 +797,19 @@ class AuthenticationFlowEngine(Generic[LoginUserT, SessionT]):
             self._users[key] = record.user
             for passkey in getattr(record.user, "passkeys", ()):
                 credential_id = getattr(passkey, "credential_id", None)
-                secret = getattr(passkey, "secret", None)
-                if credential_id and secret is not None:  # pragma: no branch
-                    self._passkeys[credential_id] = (getattr(record.user, "id"), secret)
+                if credential_id and passkey_material:
+                    secret_entry = passkey_material.get(credential_id)
+                else:
+                    secret_entry = None
+                if credential_id and secret_entry is not None:
+                    user_id, secret_buffer = secret_entry
+                    encoded = base64.urlsafe_b64encode(bytes(secret_buffer)).decode().rstrip("=")
+                    secret_buffer[:] = b"\x00" * len(secret_buffer)
+                    self._passkeys[credential_id] = (user_id, encoded)
+                elif credential_id:
+                    secret = getattr(passkey, "secret", None)
+                    if secret is not None:  # pragma: no branch - legacy fallback
+                        self._passkeys[credential_id] = (getattr(record.user, "id"), secret)
 
     def _complete_primary(self, flow: _LoginFlow[LoginUserT], level: SessionLevel) -> AuthenticationFlowResponse:
         if getattr(flow.user, "mfa_code", None):
@@ -1232,9 +1251,7 @@ def _default_jwks_fetcher(
         normalized_hosts.update(value.strip().lower() for value in allowed_hosts if value and value.strip())
     env_hosts = os.getenv("MERE_OIDC_JWKS_ALLOWED_HOSTS", "")
     if env_hosts:
-        normalized_hosts.update(
-            value.strip().lower() for value in env_hosts.split(",") if value.strip()
-        )
+        normalized_hosts.update(value.strip().lower() for value in env_hosts.split(",") if value.strip())
     if normalized_hosts and host not in normalized_hosts:
         raise AuthenticationError("jwks_disallowed_host")
 
