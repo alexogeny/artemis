@@ -114,6 +114,7 @@ def _enable_bootstrap_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(MereApp, "__init__", _patched_init)
 
+
 @pytest.mark.asyncio
 async def test_bootstrap_routes_dev_environment() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))

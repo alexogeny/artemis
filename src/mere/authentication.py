@@ -68,6 +68,7 @@ __all__ = [
     "AuthenticationRateLimiter",
     "AuthenticationService",
     "FederatedIdentityDirectory",
+    "IssuedMfaCode",
     "IssuedSessionToken",
     "LoginStep",
     "MfaManager",
@@ -238,6 +239,13 @@ class IssuedSessionToken(Struct, frozen=True):
     @property
     def revoked_at(self) -> dt.datetime | None:
         return self.record.revoked_at
+
+
+class IssuedMfaCode(Struct, frozen=True):
+    """Raw MFA code paired with the persisted database record."""
+
+    code: str
+    record: MfaCode
 
 
 _SESSION_TOKEN_PBKDF2_ITERATIONS = 120_000
@@ -434,6 +442,42 @@ class AuthenticationService:
         return IssuedSessionToken(token=token, record=record)
 
 
+_MFA_CODE_PBKDF2_ITERATIONS = 120_000
+_MFA_CODE_SALT_BYTES = 16
+
+
+def _derive_mfa_code_hash(code: str, salt: bytes) -> bytes:
+    return hashlib.pbkdf2_hmac("sha256", code.encode("utf-8"), salt, _MFA_CODE_PBKDF2_ITERATIONS)
+
+
+def _encode_hex(data: bytes) -> str:
+    return binascii.hexlify(data).decode("ascii")
+
+
+def _decode_hex(value: str | None) -> bytes | None:
+    if value is None:
+        return None
+    try:
+        return binascii.unhexlify(value)
+    except (binascii.Error, ValueError, TypeError):
+        return None
+
+
+def _hash_mfa_code(code: str) -> tuple[str, str]:
+    salt = secrets.token_bytes(_MFA_CODE_SALT_BYTES)
+    digest = _derive_mfa_code_hash(code, salt)
+    return _encode_hex(digest), _encode_hex(salt)
+
+
+def _verify_mfa_code(submitted: str, *, salt_hex: str | None, hash_hex: str | None) -> bool:
+    salt = _decode_hex(salt_hex)
+    expected = _decode_hex(hash_hex)
+    if salt is None or expected is None:
+        return False
+    candidate = _derive_mfa_code_hash(submitted, salt)
+    return hmac.compare_digest(expected, candidate)
+
+
 class MfaManager:
     """Generate and validate one-time MFA codes."""
 
@@ -448,18 +492,22 @@ class MfaManager:
         ttl: dt.timedelta = dt.timedelta(minutes=10),
         now: dt.datetime | None = None,
         channel: str = "totp",
-    ) -> MfaCode:
+    ) -> IssuedMfaCode:
         issued_at = now or dt.datetime.now(dt.UTC)
         code = "".join(str(secrets.randbelow(10)) for _ in range(self.code_length))
-        return MfaCode(
+        code_hash, code_salt = _hash_mfa_code(code)
+        record = MfaCode(
             id=generate_id57(),
             user_id=user_id,
-            code=code,
+            code_hash=code_hash,
+            code_salt=code_salt,
             purpose=purpose,
             created_at=issued_at,
+            updated_at=issued_at,
             expires_at=issued_at + ttl,
             channel=channel,
         )
+        return IssuedMfaCode(code=code, record=record)
 
     def verify(
         self,
@@ -474,7 +522,7 @@ class MfaManager:
         for code in codes:
             if code.user_id != user_id or code.purpose is not purpose:
                 continue
-            if code.code != submitted:
+            if not _verify_mfa_code(submitted, salt_hex=code.code_salt, hash_hex=code.code_hash):
                 continue
             if code.consumed_at is not None or code.expires_at <= timestamp:
                 break

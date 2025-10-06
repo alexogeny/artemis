@@ -374,13 +374,14 @@ class MfaPurpose(str, Enum):
     scope=ModelScope.TENANT,
     table="mfa_codes",
     exposed=False,
-    redacted_fields=("code",),
+    redacted_fields=("code_hash", "code_salt"),
 )
 class MfaCode(DatabaseModel):
     user_id: str
-    code: str
     purpose: MfaPurpose
     expires_at: dt.datetime
+    code_hash: str | None = None
+    code_salt: str | None = None
     consumed_at: dt.datetime | None = None
     channel: str = "totp"
 
