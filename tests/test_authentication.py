@@ -2046,6 +2046,79 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
     assert str(exc.value) == "jwks_fetch_failed"
 
 
+def test_default_jwks_fetcher_rejects_missing_host(monkeypatch: pytest.MonkeyPatch) -> None:
+    called = False
+
+    def _should_not_run(uri: str, timeout: int = 5, context: object | None = None) -> object:
+        nonlocal called
+        called = True
+        raise AssertionError("urlopen should not be invoked when host is missing")
+
+    monkeypatch.setattr("urllib.request.urlopen", _should_not_run)
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https:///jwks.json")
+    assert str(exc.value) == "jwks_invalid_host"
+    assert called is False
+
+
+def test_default_jwks_fetcher_respects_allowed_hosts_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyResponse:
+        def __init__(self, payload: bytes, url: str = "https://tenants.example.com/jwks") -> None:
+            self._payload = payload
+            self._url = url
+
+        def read(self) -> bytes:
+            return self._payload
+
+        def getcode(self) -> int:
+            return 200
+
+        def geturl(self) -> str:
+            return self._url
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5, context=None: DummyResponse(json.dumps({"keys": ["allowed"]}).encode()),
+    )
+    document = authentication_module._default_jwks_fetcher(
+        "https://tenants.example.com/jwks",
+        allowed_hosts={"tenants.example.com", "cdn.example.com"},
+    )
+    assert document["keys"] == ["allowed"]
+
+
+def test_default_jwks_fetcher_rejects_redirect_without_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DummyResponse:
+        def read(self) -> bytes:
+            return json.dumps({"keys": []}).encode()
+
+        def getcode(self) -> int:
+            return 200
+
+        def geturl(self) -> str:
+            return "https:///jwks"
+
+        def __enter__(self) -> "DummyResponse":
+            return self
+
+        def __exit__(self, exc_type: object, exc: object, tb: object) -> None:
+            return None
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda uri, timeout=5, context=None: DummyResponse())
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "jwks_invalid_host"
+
 def test_saml_authenticator_error_paths() -> None:
     now = dt.datetime.now(dt.timezone.utc)
     signing_key, certificate = _generate_saml_signing_material(now)
