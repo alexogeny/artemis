@@ -21,7 +21,7 @@ from mere import (
     TenantScope,
     TestClient,
 )
-from mere.observability import _MAX_TRACESTATE_LENGTH
+from mere.observability import _MAX_TRACESTATE_LENGTH, LoggingRedactionConfig
 from tests.observability_stubs import (
     setup_stub_datadog,
     setup_stub_opentelemetry,
@@ -72,6 +72,7 @@ async def test_request_observability_success(monkeypatch: pytest.MonkeyPatch) ->
     assert response.status == 200
     span = next(span for span in tracer.spans if span.name == observability.config.request.span_name)
     assert span.attributes["http.method"] == "GET"
+    assert span.attributes["http.target"] == "/ping"
     assert span.attributes["http.result"] == "success"
     assert span.attributes["http.status_code"] == 200
     assert hub.captured == []
@@ -116,6 +117,131 @@ async def test_request_observability_error(monkeypatch: pytest.MonkeyPatch) -> N
     assert "status:500" in tags
     assert statsd.timings
     assert statsd.timings[-1][0] == observability.config.request.datadog_metric_timing
+
+
+def _make_request(path: str = "/secret/123") -> Request:
+    tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
+    return Request(
+        method="GET",
+        path=path,
+        headers={},
+        tenant=tenant,
+        path_params={},
+        query_string="",
+        body=b"",
+    )
+
+
+def _collect_log_events(caplog: pytest.LogCaptureFixture) -> list[dict[str, Any]]:
+    return [json.loads(record.message) for record in caplog.records if record.name == "mere.observability"]
+
+
+def test_request_logging_redacts_sensitive_fields(caplog: pytest.LogCaptureFixture) -> None:
+    observability = Observability(
+        ObservabilityConfig(
+            opentelemetry_enabled=False,
+            sentry_enabled=False,
+            datadog_enabled=False,
+        )
+    )
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
+        context = observability.on_request_start(_make_request())
+        assert context is not None
+        observability.on_request_error(context, RuntimeError("super secret"), status_code=500)
+
+    events = _collect_log_events(caplog)
+    start_event = next(event for event in events if event["event"] == "request.start")
+    error_event = next(event for event in events if event["event"] == "request.error")
+    assert start_event["http.path"] == "[redacted]"
+    assert error_event["http.path"] == "[redacted]"
+    assert error_event["error_message"] == "[redacted]"
+    assert error_event["error_type"] == "RuntimeError"
+
+
+def test_request_logging_hash_mode(caplog: pytest.LogCaptureFixture) -> None:
+    observability = Observability(
+        ObservabilityConfig(
+            opentelemetry_enabled=False,
+            sentry_enabled=False,
+            datadog_enabled=False,
+            logging=LoggingRedactionConfig(
+                request_path="hash",
+                exception_message="hash",
+                hash_salt="unit-test",
+            ),
+        )
+    )
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
+        context = observability.on_request_start(_make_request("/orders/42"))
+        assert context is not None
+        observability.on_request_error(context, RuntimeError("database down"), status_code=503)
+
+    events = _collect_log_events(caplog)
+    start_event = next(event for event in events if event["event"] == "request.start")
+    error_event = next(event for event in events if event["event"] == "request.error")
+    assert start_event["http.path"].startswith("[hash:")
+    assert error_event["http.path"] == start_event["http.path"]
+    assert error_event["error_message"].startswith("[hash:")
+    assert error_event["error_message"] != "database down"
+
+
+def test_request_logging_raw_mode(caplog: pytest.LogCaptureFixture) -> None:
+    observability = Observability(
+        ObservabilityConfig(
+            opentelemetry_enabled=False,
+            sentry_enabled=False,
+            datadog_enabled=False,
+            logging=LoggingRedactionConfig(request_path="raw", exception_message="raw"),
+        )
+    )
+    request = _make_request("/public/info")
+    with caplog.at_level(logging.INFO, logger="mere.observability"):
+        context = observability.on_request_start(request)
+        assert context is not None
+        observability.on_request_error(context, RuntimeError("raw message"), status_code=400)
+
+    events = _collect_log_events(caplog)
+    start_event = next(event for event in events if event["event"] == "request.start")
+    error_event = next(event for event in events if event["event"] == "request.error")
+    assert start_event["http.path"] == "/public/info"
+    assert error_event["http.path"] == "/public/info"
+    assert error_event["error_message"] == "raw message"
+
+
+def test_logging_config_rejects_invalid_strategy() -> None:
+    with pytest.raises(ValueError):
+        Observability(
+            ObservabilityConfig(
+                logging=LoggingRedactionConfig(request_path="invalid"),
+            )
+        )
+    with pytest.raises(ValueError):
+        Observability(
+            ObservabilityConfig(
+                logging=LoggingRedactionConfig(exception_message="invalid"),
+            )
+        )
+
+
+def test_log_payload_sanitizer_modes() -> None:
+    observability = Observability(
+        ObservabilityConfig(
+            enabled=False,
+            logging=LoggingRedactionConfig(request_path="hash", exception_message="hash"),
+        )
+    )
+    payload = {
+        "http.path": "/users/123",
+        "http.target": "/internal/users/123",
+        "error_message": "boom",
+    }
+    observability._sanitize_log_payload(payload)
+    assert payload["http.path"].startswith("[hash:")
+    assert payload["http.target"].startswith("[hash:")
+    assert payload["error_message"].startswith("[hash:")
+    assert observability._sanitize_request_path_for_logs("") == ""
+    assert observability._sanitize_request_path_for_logs(None) is None
+    assert observability._sanitize_exception_message_for_logs(None) is None
 
 
 @pytest.mark.asyncio

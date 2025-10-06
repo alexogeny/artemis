@@ -143,6 +143,7 @@ from .models import (
 )
 from .observability import (
     ChatOpsObservabilityConfig,
+    LoggingRedactionConfig,
     Observability,
     ObservabilityConfig,
     RequestObservabilityConfig,
@@ -265,6 +266,7 @@ __all__ = [
     "IssuedMfaCode",
     "IssuedSessionToken",
     "JSONResponse",
+    "LoggingRedactionConfig",
     "LoginStep",
     "Mere",
     "MereApp",
