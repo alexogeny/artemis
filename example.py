@@ -73,12 +73,33 @@ def main() -> None:
 
     app = create_app()
     host = os.getenv("MERE_HOST", "127.0.0.1")
-    port = int(os.getenv("MERE_PORT", "8000"))
+    port = int(os.getenv("MERE_PORT", "8443"))
+    profile = os.getenv("MERE_PROFILE", "development")
+    cert_path = os.getenv("MERE_TLS_CERT")
+    key_path = os.getenv("MERE_TLS_KEY")
+    ca_path = os.getenv("MERE_TLS_CA")
+    client_verify_raw = os.getenv("MERE_TLS_CLIENT_VERIFY", "0")
+    client_verify = client_verify_raw.lower() in {"1", "true", "yes", "on"}
+
+    server_kwargs: dict[str, object] = {
+        "host": host,
+        "port": port,
+        "profile": profile,
+        "client_auth_required": client_verify,
+    }
+    if cert_path is not None:
+        server_kwargs["certificate_path"] = cert_path or None
+    if key_path is not None:
+        server_kwargs["private_key_path"] = key_path or None
+    if ca_path is not None:
+        server_kwargs["ca_path"] = ca_path or None
+    config = ServerConfig(**server_kwargs)
+    scheme = "https" if config.certificate_path and config.private_key_path else "http"
     print(
-        "Serving Mere bootstrap example on Granian at http://%s:%d (tenants: %s)"
-        % (host, port, ", ".join(app.tenant_resolver.allowed_tenants) or "<none>")
+        "Serving Mere bootstrap example on Granian at %s://%s:%d (tenants: %s)"
+        % (scheme, host, port, ", ".join(app.tenant_resolver.allowed_tenants) or "<none>")
     )
-    run(app, ServerConfig(host=host, port=port))
+    run(app, config)
 
 
 if __name__ == "__main__":

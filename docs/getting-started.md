@@ -41,6 +41,29 @@ uv run granian --interface rsgi --workers 1 mere.server:create_app
 The server will resolve requests for `https://acme.demo.local.test` and `https://beta.demo.local.test`
 by mapping each hostname to the corresponding tenant context.
 
+### TLS defaults
+
+`ServerConfig` now models TLS assets explicitly. In production profiles (`profile="production"`, the
+default) the server refuses to boot unless both `certificate_path` and `private_key_path` point to
+PEM-encoded files. Provide a certificate authority bundle through `ca_path` when terminating mutual TLS
+(`client_auth_required=True`). Development-oriented profiles (`development`, `dev`, `local`, or `test`)
+skip the requirement so you can iterate without generating certificates; when PEM files are present they
+are still wired into Granian so HTTPS works end-to-end.
+
+```python
+from pathlib import Path
+
+from mere.server import ServerConfig
+
+config = ServerConfig(
+    certificate_path=Path("/etc/mere/tls/server.crt"),
+    private_key_path=Path("/etc/mere/tls/server.key"),
+    ca_path=Path("/etc/mere/tls/clients.pem"),
+    profile="production",
+    client_auth_required=True,
+)
+```
+
 ## Quality checks
 
 Before committing changes, run the built-in quality command:

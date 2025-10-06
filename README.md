@@ -18,9 +18,14 @@ uv run example.py
 ```
 
 The script starts a Granian server with the bootstrap bundle already wired in. Override `MERE_SITE`,
-`MERE_DOMAIN`, `MERE_ALLOWED_TENANTS`, `MERE_HOST`, or `MERE_PORT` to tailor the tenancy hostnames and bind
-address. Provide a `DATABASE_URL` when you want the bootstrap tables to persist in PostgreSQL; otherwise the
-demo operates purely in memory.
+`MERE_DOMAIN`, `MERE_ALLOWED_TENANTS`, `MERE_HOST`, `MERE_PORT`, or `MERE_PROFILE` to tailor the tenancy
+hostnames, bind address, and runtime profile. Provide a `DATABASE_URL` when you want the bootstrap tables to
+persist in PostgreSQL; otherwise the demo operates purely in memory.
+
+Production profiles require TLS assets before the server will boot. Point `MERE_TLS_CERT`, `MERE_TLS_KEY`,
+and optionally `MERE_TLS_CA` at PEM-encoded files and set `MERE_TLS_CLIENT_VERIFY=1` when clients must present
+certificates. Development defaults skip TLS so the demo can run without generating certificates, but the
+server still listens on port 8443 by default to match production expectations.
 
 * **Diagnostics:** `/__mere/ping`, OpenAPI JSON, and a generated TypeScript client that all resolve for
   every tenant host (`*.site.domain`), including the admin control plane (`admin.site.domain`).
