@@ -14,3 +14,12 @@ multi-tenant flows. To keep production environments safe:
   values mentioned above are present.)
 
 Follow these practices before merging features or publishing the documentation site.
+
+## TLS enforcement
+
+Granian refuses to start without TLS material when `ServerConfig.profile` is not one of the development
+profiles (`development`, `dev`, `local`, or `test`). Provision PEM-encoded certificates and keys through the
+`certificate_path` and `private_key_path` fields (or the corresponding `MERE_TLS_CERT`/`MERE_TLS_KEY`
+environment variables). Enable mutual TLS by setting `client_auth_required=True` (or
+`MERE_TLS_CLIENT_VERIFY=1`) and providing a certificate authority bundle via `ca_path`/`MERE_TLS_CA`.
+Missing assets trigger a startup failure so misconfigured production nodes cannot serve plaintext traffic.
