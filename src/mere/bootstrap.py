@@ -1361,11 +1361,16 @@ def attach_bootstrap(
 ) -> None:
     """Attach development-only routes for OpenAPI, TypeScript clients, and login orchestration."""
 
-    env = (environment or os.getenv("MERE_ENV") or "development").lower()
+    explicit_environment = environment
+    env_source = explicit_environment if explicit_environment is not None else os.getenv("MERE_ENV")
+    env = env_source.lower() if env_source else None
     domain = app.config.domain.lower()
-    is_dev_env = env in _DEV_ENVIRONMENTS
+    is_dev_env = env in _DEV_ENVIRONMENTS if env is not None else False
     is_dev_domain = domain in _DEV_DOMAINS or any(domain.endswith(suffix) for suffix in _DEV_DOMAIN_SUFFIXES)
     if not allow_production and not (is_dev_env or is_dev_domain):
+        if explicit_environment is None:
+            # Skip attaching when the environment is unset and the domain is not explicitly development.
+            return
         raise RuntimeError("Bootstrap routes are only available in development environments")
 
     normalized = base_path.strip()

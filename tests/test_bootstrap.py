@@ -131,6 +131,13 @@ def test_bootstrap_rejects_production() -> None:
         )
 
 
+def test_bootstrap_skips_when_environment_unspecified() -> None:
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+
+    with pytest.raises(LookupError):
+        app.router.find("GET", "/__mere/ping")
+
+
 def test_bootstrap_updates_allowed_tenants_from_config() -> None:
     config = BootstrapAuthConfig(
         tenants=(
