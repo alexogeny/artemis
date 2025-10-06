@@ -154,8 +154,35 @@ def test_bootstrap_passkey_cipher_requires_key_material() -> None:
         bootstrap.BootstrapPasskeyCipher(key_material=b"")
 
 
+def test_bootstrap_passkey_cipher_requires_ciphertext(
+    passkey_cipher: bootstrap.BootstrapPasskeyCipher,
+) -> None:
+    with pytest.raises(ValueError):
+        passkey_cipher.decrypt(None)
+
+
 def test_bootstrap_load_passkey_cipher_missing_returns_none() -> None:
     assert bootstrap.load_bootstrap_passkey_cipher(env={"IGNORED": "value"}) is None
+
+
+def test_bootstrap_passkey_record_resolves_legacy_secret() -> None:
+    record = BootstrapPasskeyRecord(
+        credential_id="legacy",
+        secret_ciphertext=None,
+        label=None,
+        _legacy_secret="legacy-ciphertext",
+    )
+    assert record.resolved_secret_ciphertext() == "legacy-ciphertext"
+
+
+def test_bootstrap_passkey_record_missing_ciphertext_raises() -> None:
+    record = BootstrapPasskeyRecord(
+        credential_id="missing",
+        secret_ciphertext=None,
+        label=None,
+    )
+    with pytest.raises(RuntimeError):
+        record.resolved_secret_ciphertext()
 
 
 def test_bootstrap_seeder_passkey_resolution_required() -> None:
