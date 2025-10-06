@@ -1,14 +1,14 @@
 """Minimal Mere application that ships with the framework.
 
 Run ``uv sync`` once, then ``uv run example.py`` to boot a local Mere app with the
-quickstart bundle enabled. The server exposes the built-in authentication flows
+bootstrap bundle enabled. The server exposes the built-in authentication flows
 under ``/__mere`` alongside a small JSON route at ``/`` that echoes the resolved
 tenant.
 
 By default the example expects tenant hosts like ``acme.demo.local.test`` and
 ``beta.demo.local.test``. Override ``MERE_SITE``, ``MERE_DOMAIN``, or
 ``MERE_ALLOWED_TENANTS`` to match your environment. Provide ``DATABASE_URL`` to
-back the quickstart with PostgreSQL; when omitted the demo operates in memory.
+back the bootstrap with PostgreSQL; when omitted the demo operates in memory.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
-from mere import AppConfig, MereApp, attach_quickstart
+from mere import AppConfig, MereApp
 from mere.database import DatabaseConfig, PoolConfig
 from mere.requests import Request
 from mere.responses import JSONResponse, Response
@@ -24,7 +24,7 @@ from mere.server import ServerConfig, run
 
 
 def _parse_allowed_tenants(raw: str | None) -> tuple[str, ...]:
-    """Return a sorted tuple of tenant slugs for the quickstart resolver."""
+    """Return a sorted tuple of tenant slugs for the bootstrap resolver."""
 
     if not raw:
         return ("acme", "beta")
@@ -43,7 +43,7 @@ def _database_config() -> DatabaseConfig | None:
 
 
 def create_app() -> MereApp:
-    """Instantiate the demo application with quickstart routes attached."""
+    """Instantiate the demo application with bootstrap routes attached."""
 
     config = AppConfig(
         site=os.getenv("MERE_SITE", "demo"),
@@ -52,14 +52,13 @@ def create_app() -> MereApp:
         database=_database_config(),
     )
     app = MereApp(config)
-    attach_quickstart(app)
 
     @app.get("/", name="root")
     async def root(request: Request) -> Response:
         tenant = request.tenant
         return JSONResponse(
             {
-                "message": "Mere quickstart is ready",
+                "message": "Mere bootstrap is ready",
                 "tenant": tenant.tenant,
                 "scope": tenant.scope.value,
                 "host": tenant.host,
@@ -76,7 +75,7 @@ def main() -> None:
     host = os.getenv("MERE_HOST", "127.0.0.1")
     port = int(os.getenv("MERE_PORT", "8000"))
     print(
-        "Serving Mere quickstart example on Granian at http://%s:%d (tenants: %s)"
+        "Serving Mere bootstrap example on Granian at http://%s:%d (tenants: %s)"
         % (host, port, ", ".join(app.tenant_resolver.allowed_tenants) or "<none>")
     )
     run(app, ServerConfig(host=host, port=port))

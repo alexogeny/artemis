@@ -182,7 +182,7 @@ def _readme_template(options: ProjectOptions, title: str) -> str:
         - `ops/` - Local developer tooling (Compose stack, seed data).
         - CI configuration for the chosen git host.
 
-        This scaffold boots with the Mere quickstart so your local environment matches
+        This scaffold boots with the Mere bootstrap so your local environment matches
         the production authentication and tenancy flows. Adjust the seed data in
         `app/runtime.py` before promoting tenants to real customers.
         """
@@ -221,7 +221,7 @@ def _app_template() -> str:
 
         import os
 
-        from mere import AppConfig, MereApp, attach_quickstart
+        from mere import AppConfig, MereApp
         from mere.database import DatabaseConfig, PoolConfig
         from mere.requests import Request
         from mere.responses import JSONResponse
@@ -243,7 +243,6 @@ def _app_template() -> str:
                 ),
             )
             app = MereApp(config)
-            attach_quickstart(app)
 
             @app.get("/health", name="health")
             async def health(_: Request) -> JSONResponse:

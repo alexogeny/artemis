@@ -1,4 +1,4 @@
-"""Concrete domain services powering the quickstart experience."""
+"""Concrete domain services powering the bootstrap experience."""
 
 from __future__ import annotations
 
@@ -84,7 +84,7 @@ def _to_tile_record(
     )
 
 
-class QuickstartTileService(TileService):
+class BootstrapTileService(TileService):
     """Persist dashboard tiles using the ORM."""
 
     def __init__(self, orm: ORM) -> None:
@@ -261,7 +261,7 @@ class QuickstartTileService(TileService):
         return _to_tile_record(tile, permission)
 
 
-class QuickstartRbacService(RbacService):
+class BootstrapRbacService(RbacService):
     """Manage custom permission sets for workspaces."""
 
     def __init__(self, orm: ORM, clock: Callable[[], datetime] | None = None) -> None:
@@ -363,7 +363,7 @@ class QuickstartRbacService(RbacService):
         )
 
 
-class QuickstartDelegationService(DelegationService):
+class BootstrapDelegationService(DelegationService):
     """Store delegations and expose effective permissions."""
 
     def __init__(self, orm: ORM, clock: Callable[[], datetime] | None = None) -> None:
@@ -558,7 +558,7 @@ class QuickstartDelegationService(DelegationService):
         )
 
 
-class QuickstartAuditService(AuditService):
+class BootstrapAuditService(AuditService):
     """Adapter that materializes audit data from tenant tables."""
 
     def __init__(self, orm: ORM) -> None:

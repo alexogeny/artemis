@@ -58,7 +58,7 @@ def test_new_project_scaffolds_files(tmp_path: pathlib.Path) -> None:
     assert "AWS" in readme
 
     app_module = (target / "app/application.py").read_text(encoding="utf-8")
-    assert "attach_quickstart" in app_module
+    assert "MereApp(" in app_module
 
     workflow = (target / ".github/workflows/ci.yml").read_text(encoding="utf-8")
     assert "uv run pytest" in workflow

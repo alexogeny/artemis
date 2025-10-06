@@ -1,4 +1,4 @@
-"""Developer quickstart routes for OpenAPI, authentication, and tenancy scaffolding."""
+"""Developer bootstrap routes for OpenAPI, authentication, and tenancy scaffolding."""
 
 from __future__ import annotations
 
@@ -47,11 +47,11 @@ from .chatops import (
 )
 from .codegen import generate_typescript_client
 from .database import Database, _quote_identifier
-from .domain.quickstart_services import (
-    QuickstartAuditService,
-    QuickstartDelegationService,
-    QuickstartRbacService,
-    QuickstartTileService,
+from .domain.bootstrap_services import (
+    BootstrapAuditService,
+    BootstrapDelegationService,
+    BootstrapRbacService,
+    BootstrapTileService,
     build_cedar_engine,
 )
 from .domain.services import (
@@ -119,7 +119,7 @@ else:  # pragma: no cover - runtime alias derived from compiled pattern
 _TENANT_SLUG_PATTERN: Final[RureRegex] = cast("RureRegex", rure.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$"))
 
 
-class QuickstartSsoProvider(Struct, frozen=True):
+class BootstrapSsoProvider(Struct, frozen=True):
     """Metadata describing a federated identity provider."""
 
     slug: str
@@ -128,40 +128,40 @@ class QuickstartSsoProvider(Struct, frozen=True):
     redirect_url: str
 
 
-class QuickstartPasskey(Struct, frozen=True):
-    """Passkey configuration for the quickstart."""
+class BootstrapPasskey(Struct, frozen=True):
+    """Passkey configuration for the bootstrap."""
 
     credential_id: str
     secret: str
     label: str | None = None
 
 
-class QuickstartUser(Struct, frozen=True):
-    """Quickstart user profile with authentication factors."""
+class BootstrapUser(Struct, frozen=True):
+    """Bootstrap user profile with authentication factors."""
 
     id: str
     email: str
     password: str | None = None
-    passkeys: tuple[QuickstartPasskey, ...] = ()
+    passkeys: tuple[BootstrapPasskey, ...] = ()
     mfa_code: str | None = None
-    sso: QuickstartSsoProvider | None = None
+    sso: BootstrapSsoProvider | None = None
 
 
-class QuickstartTenant(Struct, frozen=True):
-    """Tenant definition used by the quickstart."""
+class BootstrapTenant(Struct, frozen=True):
+    """Tenant definition used by the bootstrap."""
 
     slug: str
     name: str
-    users: tuple[QuickstartUser, ...]
+    users: tuple[BootstrapUser, ...]
 
 
-class QuickstartAdminRealm(Struct, frozen=True):
-    """Administrative realm definition for the quickstart."""
+class BootstrapAdminRealm(Struct, frozen=True):
+    """Administrative realm definition for the bootstrap."""
 
-    users: tuple[QuickstartUser, ...]
+    users: tuple[BootstrapUser, ...]
 
 
-class QuickstartChatOpsNotificationChannels(Struct, frozen=True):
+class BootstrapChatOpsNotificationChannels(Struct, frozen=True):
     """Channel overrides for ChatOps notifications."""
 
     tenant_created: str | None = None
@@ -172,8 +172,8 @@ class QuickstartChatOpsNotificationChannels(Struct, frozen=True):
     support_ticket_updated: str | None = None
 
 
-class QuickstartSlashCommand(Struct, frozen=True):
-    """ChatOps command metadata for the quickstart surface."""
+class BootstrapSlashCommand(Struct, frozen=True):
+    """ChatOps command metadata for the bootstrap surface."""
 
     name: str
     action: Literal[
@@ -188,7 +188,7 @@ class QuickstartSlashCommand(Struct, frozen=True):
     aliases: tuple[str, ...] = ()
 
 
-class QuickstartKanbanCard(Struct, frozen=True, omit_defaults=True):
+class BootstrapKanbanCard(Struct, frozen=True, omit_defaults=True):
     """Card rendered within the workspace kanban board."""
 
     id: str
@@ -202,23 +202,23 @@ class QuickstartKanbanCard(Struct, frozen=True, omit_defaults=True):
     severity: Literal["low", "medium", "high"] = "low"
 
 
-class QuickstartKanbanColumn(Struct, frozen=True, omit_defaults=True):
+class BootstrapKanbanColumn(Struct, frozen=True, omit_defaults=True):
     """Column on the kanban board with associated cards."""
 
     key: Literal["backlog", "in_progress", "done"]
     title: str
-    cards: tuple[QuickstartKanbanCard, ...]
+    cards: tuple[BootstrapKanbanCard, ...]
 
 
-class QuickstartKanbanBoard(Struct, frozen=True, omit_defaults=True):
+class BootstrapKanbanBoard(Struct, frozen=True, omit_defaults=True):
     """Workspace kanban board summarizing support efforts."""
 
     workspace_id: str = field(name="workspaceId")
-    columns: tuple[QuickstartKanbanColumn, ...]
+    columns: tuple[BootstrapKanbanColumn, ...]
     updated_at: datetime = field(name="updatedAt")
 
 
-class QuickstartWorkspaceSettings(Struct, frozen=True, omit_defaults=True):
+class BootstrapWorkspaceSettings(Struct, frozen=True, omit_defaults=True):
     """Workspace configuration payload returned to the UI."""
 
     workspace_id: str = field(name="workspaceId")
@@ -231,7 +231,7 @@ class QuickstartWorkspaceSettings(Struct, frozen=True, omit_defaults=True):
     alerts: tuple[str, ...] = ()
 
 
-class QuickstartNotification(Struct, frozen=True, omit_defaults=True):
+class BootstrapNotification(Struct, frozen=True, omit_defaults=True):
     """Notification entry surfaced to workspace operators."""
 
     id: str
@@ -245,37 +245,37 @@ class QuickstartNotification(Struct, frozen=True, omit_defaults=True):
     metadata: Mapping[str, Any] = field(default_factory=dict)
 
 
-def _default_slash_commands() -> tuple[QuickstartSlashCommand, ...]:
+def _default_slash_commands() -> tuple[BootstrapSlashCommand, ...]:
     return (
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="create-tenant",
             action="create_tenant",
             description="Provision a new tenant from Slack.",
-            aliases=("quickstart-create-tenant",),
+            aliases=("bootstrap-create-tenant",),
         ),
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="extend-trial",
             action="extend_trial",
             description="Extend a tenant's trial period from Slack.",
-            aliases=("quickstart-extend-trial",),
+            aliases=("bootstrap-extend-trial",),
         ),
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="tenant-metrics",
             action="tenant_metrics",
             description="Summarize tenant metrics for administrators.",
-            aliases=("quickstart-tenant-metrics",),
+            aliases=("bootstrap-tenant-metrics",),
         ),
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="system-diagnostics",
             action="system_diagnostics",
-            description="Display quickstart diagnostics and health checks.",
-            aliases=("quickstart-system-diagnostics",),
+            description="Display bootstrap diagnostics and health checks.",
+            aliases=("bootstrap-system-diagnostics",),
         ),
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="ticket-update",
             action="ticket_update",
             description="Post an update to a customer support ticket.",
-            aliases=("quickstart-ticket-update",),
+            aliases=("bootstrap-ticket-update",),
         ),
     )
 
@@ -321,12 +321,12 @@ def _register_response_model(
     setattr(handler, "__mere_response_models__", updated)
 
 
-def _sample_notification_feed(workspace_id: str) -> tuple[QuickstartNotification, ...]:
+def _sample_notification_feed(workspace_id: str) -> tuple[BootstrapNotification, ...]:
     """Return a canned notification feed for empty workspaces."""
 
     base = _SAMPLE_FEED_BASE
     return (
-        QuickstartNotification(
+        BootstrapNotification(
             id=f"{workspace_id}-welcome",
             workspace_id=workspace_id,
             kind="system",
@@ -336,7 +336,7 @@ def _sample_notification_feed(workspace_id: str) -> tuple[QuickstartNotification
             severity="info",
             metadata={"workspace": workspace_id},
         ),
-        QuickstartNotification(
+        BootstrapNotification(
             id=f"{workspace_id}-first-ticket",
             workspace_id=workspace_id,
             kind="support",
@@ -345,7 +345,7 @@ def _sample_notification_feed(workspace_id: str) -> tuple[QuickstartNotification
             occurred_at=base + timedelta(hours=1),
             severity="info",
         ),
-        QuickstartNotification(
+        BootstrapNotification(
             id=f"{workspace_id}-billing-setup",
             workspace_id=workspace_id,
             kind="billing",
@@ -357,13 +357,13 @@ def _sample_notification_feed(workspace_id: str) -> tuple[QuickstartNotification
     )
 
 
-def _sample_kanban_board(workspace_id: str) -> QuickstartKanbanBoard:
+def _sample_kanban_board(workspace_id: str) -> BootstrapKanbanBoard:
     """Build a predictable kanban board when no data exists."""
 
     base = _SAMPLE_FEED_BASE
     cards = {
         "backlog": (
-            QuickstartKanbanCard(
+            BootstrapKanbanCard(
                 id=f"{workspace_id}-kb-1",
                 title="Gather product requirements",
                 status="backlog",
@@ -374,7 +374,7 @@ def _sample_kanban_board(workspace_id: str) -> QuickstartKanbanBoard:
             ),
         ),
         "in_progress": (
-            QuickstartKanbanCard(
+            BootstrapKanbanCard(
                 id=f"{workspace_id}-kb-2",
                 title="Triage onboarding ticket",
                 status="in_progress",
@@ -387,7 +387,7 @@ def _sample_kanban_board(workspace_id: str) -> QuickstartKanbanBoard:
             ),
         ),
         "done": (
-            QuickstartKanbanCard(
+            BootstrapKanbanCard(
                 id=f"{workspace_id}-kb-3",
                 title="Resolve billing anomaly",
                 status="done",
@@ -400,7 +400,7 @@ def _sample_kanban_board(workspace_id: str) -> QuickstartKanbanBoard:
         ),
     }
     columns = tuple(
-        QuickstartKanbanColumn(
+        BootstrapKanbanColumn(
             key=key,
             title=_KANBAN_COLUMN_TITLES[key],
             cards=cards[key],
@@ -408,21 +408,21 @@ def _sample_kanban_board(workspace_id: str) -> QuickstartKanbanBoard:
         for key in ("backlog", "in_progress", "done")
     )
     latest = max(card.updated_at for column in columns for card in column.cards)
-    return QuickstartKanbanBoard(workspace_id=workspace_id, columns=columns, updated_at=latest)
+    return BootstrapKanbanBoard(workspace_id=workspace_id, columns=columns, updated_at=latest)
 
 
-class QuickstartChatOpsSettings(Struct, frozen=True):
-    """Runtime ChatOps configuration maintained by the quickstart routes."""
+class BootstrapChatOpsSettings(Struct, frozen=True):
+    """Runtime ChatOps configuration maintained by the bootstrap routes."""
 
     enabled: bool = False
     webhook: SlackWebhookConfig | None = None
-    notifications: QuickstartChatOpsNotificationChannels = field(default_factory=QuickstartChatOpsNotificationChannels)
-    slash_commands: tuple[QuickstartSlashCommand, ...] = field(default_factory=_default_slash_commands)
+    notifications: BootstrapChatOpsNotificationChannels = field(default_factory=BootstrapChatOpsNotificationChannels)
+    slash_commands: tuple[BootstrapSlashCommand, ...] = field(default_factory=_default_slash_commands)
     bot_user_id: str | None = None
     admin_workspace: str | None = None
 
 
-class QuickstartAuditLogQuery(Struct, frozen=True, omit_defaults=True):
+class BootstrapAuditLogQuery(Struct, frozen=True, omit_defaults=True):
     """Query parameters used by audit log routes."""
 
     actor: str | None = None
@@ -433,7 +433,7 @@ class QuickstartAuditLogQuery(Struct, frozen=True, omit_defaults=True):
     format: Literal["csv", "json"] | None = None
 
 
-class QuickstartSlashCommandInvocation(Struct, frozen=True):
+class BootstrapSlashCommandInvocation(Struct, frozen=True):
     """Payload delivered from ChatOps slash command integrations."""
 
     text: str
@@ -444,57 +444,57 @@ class QuickstartSlashCommandInvocation(Struct, frozen=True):
     workspace_id: str | None = None
 
 
-QuickstartSession = AuthenticationFlowSession
-QuickstartLoginResponse = AuthenticationFlowResponse
+BootstrapSession = AuthenticationFlowSession
+BootstrapLoginResponse = AuthenticationFlowResponse
 
 
-class QuickstartPasskeyRecord(Struct, frozen=True):
-    """Database representation of a quickstart passkey."""
+class BootstrapPasskeyRecord(Struct, frozen=True):
+    """Database representation of a bootstrap passkey."""
 
     credential_id: str
     secret: str
     label: str | None = None
 
 
-@model(scope=ModelScope.ADMIN, table="quickstart_tenants")
-class QuickstartTenantRecord(DatabaseModel):
-    """Tenant metadata stored in the admin schema for the quickstart."""
+@model(scope=ModelScope.ADMIN, table="bootstrap_tenants")
+class BootstrapTenantRecord(DatabaseModel):
+    """Tenant metadata stored in the admin schema for the bootstrap."""
 
     slug: str
     name: str
 
 
-@model(scope=ModelScope.ADMIN, table="quickstart_admin_users")
-class QuickstartAdminUserRecord(DatabaseModel):
-    """Administrative login records for the quickstart."""
+@model(scope=ModelScope.ADMIN, table="bootstrap_admin_users")
+class BootstrapAdminUserRecord(DatabaseModel):
+    """Administrative login records for the bootstrap."""
 
     email: str
     password: str | None = None
-    passkeys: tuple[QuickstartPasskeyRecord, ...] = field(default_factory=tuple)
+    passkeys: tuple[BootstrapPasskeyRecord, ...] = field(default_factory=tuple)
     mfa_code: str | None = None
 
 
-@model(scope=ModelScope.ADMIN, table="quickstart_seed_state")
-class QuickstartSeedStateRecord(DatabaseModel):
-    """Tracks the last applied quickstart seed fingerprint."""
+@model(scope=ModelScope.ADMIN, table="bootstrap_seed_state")
+class BootstrapSeedStateRecord(DatabaseModel):
+    """Tracks the last applied bootstrap seed fingerprint."""
 
     key: str
     fingerprint: str
 
 
-@model(scope=ModelScope.TENANT, table="quickstart_users")
-class QuickstartTenantUserRecord(DatabaseModel):
-    """Tenant-scoped login records for the quickstart."""
+@model(scope=ModelScope.TENANT, table="bootstrap_users")
+class BootstrapTenantUserRecord(DatabaseModel):
+    """Tenant-scoped login records for the bootstrap."""
 
     email: str
     password: str | None = None
-    passkeys: tuple[QuickstartPasskeyRecord, ...] = field(default_factory=tuple)
+    passkeys: tuple[BootstrapPasskeyRecord, ...] = field(default_factory=tuple)
     mfa_code: str | None = None
-    sso_provider: QuickstartSsoProvider | None = None
+    sso_provider: BootstrapSsoProvider | None = None
 
 
-@model(scope=ModelScope.ADMIN, table="quickstart_trial_extensions")
-class QuickstartTrialExtensionRecord(DatabaseModel):
+@model(scope=ModelScope.ADMIN, table="bootstrap_trial_extensions")
+class BootstrapTrialExtensionRecord(DatabaseModel):
     """Audit record describing ChatOps-driven trial extensions."""
 
     tenant_slug: str
@@ -503,16 +503,16 @@ class QuickstartTrialExtensionRecord(DatabaseModel):
     note: str | None = None
 
 
-QuickstartSupportTicketUpdateLog = SupportTicketUpdate
-QuickstartSupportTicketRecord = SupportTicket
-QuickstartTenantSupportTicketRecord = TenantSupportTicket
+BootstrapSupportTicketUpdateLog = SupportTicketUpdate
+BootstrapSupportTicketRecord = SupportTicket
+BootstrapTenantSupportTicketRecord = TenantSupportTicket
 
 
-class QuickstartAuthConfig(Struct, frozen=True):
-    """Configuration for the quickstart authentication engine."""
+class BootstrapAuthConfig(Struct, frozen=True):
+    """Configuration for the bootstrap authentication engine."""
 
-    tenants: tuple[QuickstartTenant, ...]
-    admin: QuickstartAdminRealm
+    tenants: tuple[BootstrapTenant, ...]
+    admin: BootstrapAdminRealm
     session_ttl_seconds: int = 3600
     flow_ttl_seconds: int = 600
     max_attempts: int = 5
@@ -547,7 +547,7 @@ class MfaAttempt(Struct, frozen=True):
 
 
 class BillingCreateRequest(Struct, frozen=True):
-    """Payload for creating a billing record via the quickstart routes."""
+    """Payload for creating a billing record via the bootstrap routes."""
 
     customer_id: str
     plan_code: str
@@ -559,14 +559,14 @@ class BillingCreateRequest(Struct, frozen=True):
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class QuickstartTenantCreateRequest(Struct, frozen=True):
-    """Payload for creating a tenant through the quickstart API."""
+class BootstrapTenantCreateRequest(Struct, frozen=True):
+    """Payload for creating a tenant through the bootstrap API."""
 
     slug: str
     name: str
 
 
-class QuickstartSupportTicketRequest(Struct, frozen=True):
+class BootstrapSupportTicketRequest(Struct, frozen=True):
     """Tenant-facing payload for creating a support ticket."""
 
     subject: str
@@ -574,27 +574,27 @@ class QuickstartSupportTicketRequest(Struct, frozen=True):
     kind: Literal["general", "feedback", "issue"]
 
 
-class QuickstartSupportTicketUpdateRequest(Struct, frozen=True):
+class BootstrapSupportTicketUpdateRequest(Struct, frozen=True):
     """Administrative payload for updating a support ticket."""
 
     status: Literal["open", "responded", "resolved"]
     note: str | None = None
 
 
-def quickstart_migrations() -> tuple[Migration, ...]:
-    """Return the migrations required to persist quickstart data."""
+def bootstrap_migrations() -> tuple[Migration, ...]:
+    """Return the migrations required to persist bootstrap data."""
 
     return (
         Migration(
-            name="quickstart_admin_tables",
+            name="bootstrap_admin_tables",
             scope=MigrationScope.ADMIN,
             operations=(
                 create_table_for_model(AdminAuditLogEntry),
                 create_table_for_model(BillingRecord),
-                create_table_for_model(QuickstartTenantRecord),
-                create_table_for_model(QuickstartAdminUserRecord),
-                create_table_for_model(QuickstartSeedStateRecord),
-                create_table_for_model(QuickstartTrialExtensionRecord),
+                create_table_for_model(BootstrapTenantRecord),
+                create_table_for_model(BootstrapAdminUserRecord),
+                create_table_for_model(BootstrapSeedStateRecord),
+                create_table_for_model(BootstrapTrialExtensionRecord),
                 create_table_for_model(Role),
                 create_table_for_model(Permission),
                 create_table_for_model(AdminRoleAssignment),
@@ -602,10 +602,10 @@ def quickstart_migrations() -> tuple[Migration, ...]:
             ),
         ),
         Migration(
-            name="quickstart_tenant_tables",
+            name="bootstrap_tenant_tables",
             scope=MigrationScope.TENANT,
             operations=(
-                create_table_for_model(QuickstartTenantUserRecord),
+                create_table_for_model(BootstrapTenantUserRecord),
                 create_table_for_model(TenantSupportTicket),
                 create_table_for_model(TenantAuditLogEntry),
                 create_table_for_model(DashboardTile),
@@ -619,7 +619,7 @@ def quickstart_migrations() -> tuple[Migration, ...]:
 
 
 async def ensure_tenant_schemas(database: Database, tenants: Sequence[TenantContext]) -> None:
-    """Create tenant schemas for the quickstart if they do not already exist."""
+    """Create tenant schemas for the bootstrap if they do not already exist."""
 
     schemas = {database.config.schema_for_tenant(tenant) for tenant in tenants}
     async with database.connection(schema=database.config.admin_schema) as connection:
@@ -627,10 +627,10 @@ async def ensure_tenant_schemas(database: Database, tenants: Sequence[TenantCont
             await connection.execute(f"CREATE SCHEMA IF NOT EXISTS {_quote_identifier(schema)}")
 
 
-class QuickstartSeeder:
-    """Populate the database with quickstart identities."""
+class BootstrapSeeder:
+    """Populate the database with bootstrap identities."""
 
-    _STATE_KEY: Final[str] = "quickstart_auth"
+    _STATE_KEY: Final[str] = "bootstrap_auth"
 
     def __init__(self, orm: ORM, *, clock: Callable[[], datetime] | None = None) -> None:
         self._orm = orm
@@ -638,21 +638,21 @@ class QuickstartSeeder:
 
     async def apply(
         self,
-        config: QuickstartAuthConfig,
+        config: BootstrapAuthConfig,
         *,
         tenants: Mapping[str, TenantContext],
     ) -> bool:
         fingerprint = self._fingerprint(config)
-        state_manager = self._orm.admin.quickstart_seed_state
+        state_manager = self._orm.admin.bootstrap_seed_state
         existing_state = await state_manager.get(filters={"key": self._STATE_KEY})
         if existing_state and existing_state.fingerprint == fingerprint:
             return False
 
-        admin_manager = self._orm.admin.quickstart_admin_users
+        admin_manager = self._orm.admin.bootstrap_admin_users
         await admin_manager.delete(filters=None)
         for user in config.admin.users:
             await admin_manager.create(
-                QuickstartAdminUserRecord(
+                BootstrapAdminUserRecord(
                     id=user.id,
                     email=user.email,
                     password=user.password,
@@ -661,18 +661,18 @@ class QuickstartSeeder:
                 )
             )
 
-        tenant_manager = self._orm.admin.quickstart_tenants
+        tenant_manager = self._orm.admin.bootstrap_tenants
         await tenant_manager.delete(filters=None)
         for tenant in config.tenants:
-            await tenant_manager.create(QuickstartTenantRecord(slug=tenant.slug, name=tenant.name))
+            await tenant_manager.create(BootstrapTenantRecord(slug=tenant.slug, name=tenant.name))
             context = tenants.get(tenant.slug)
             if context is None:
-                raise RuntimeError(f"Tenant '{tenant.slug}' is missing from the quickstart tenant mapping")
-            user_manager = self._orm.tenants.quickstart_users
+                raise RuntimeError(f"Tenant '{tenant.slug}' is missing from the bootstrap tenant mapping")
+            user_manager = self._orm.tenants.bootstrap_users
             await user_manager.delete(tenant=context, filters=None)
             for user in tenant.users:
                 await user_manager.create(
-                    QuickstartTenantUserRecord(
+                    BootstrapTenantUserRecord(
                         id=user.id,
                         email=user.email,
                         password=user.password,
@@ -689,13 +689,13 @@ class QuickstartSeeder:
     async def _record_state(
         self,
         state_manager: Any,
-        existing_state: QuickstartSeedStateRecord | None,
+        existing_state: BootstrapSeedStateRecord | None,
         fingerprint: str,
     ) -> None:
         now = self._clock()
         if existing_state is None:
             await state_manager.create(
-                QuickstartSeedStateRecord(
+                BootstrapSeedStateRecord(
                     key=self._STATE_KEY,
                     fingerprint=fingerprint,
                     created_at=now,
@@ -712,9 +712,9 @@ class QuickstartSeeder:
         )
 
     @staticmethod
-    def _passkeys_to_records(passkeys: tuple[QuickstartPasskey, ...]) -> tuple[QuickstartPasskeyRecord, ...]:
+    def _passkeys_to_records(passkeys: tuple[BootstrapPasskey, ...]) -> tuple[BootstrapPasskeyRecord, ...]:
         return tuple(
-            QuickstartPasskeyRecord(
+            BootstrapPasskeyRecord(
                 credential_id=item.credential_id,
                 secret=item.secret,
                 label=item.label,
@@ -723,22 +723,22 @@ class QuickstartSeeder:
         )
 
     @staticmethod
-    def _fingerprint(config: QuickstartAuthConfig) -> str:
+    def _fingerprint(config: BootstrapAuthConfig) -> str:
         payload = json.encode(config)
         return hashlib.sha256(payload).hexdigest()
 
 
-class QuickstartRepository:
-    """Load quickstart identities from the database."""
+class BootstrapRepository:
+    """Load bootstrap identities from the database."""
 
     def __init__(self, orm: ORM, *, site: str, domain: str) -> None:
         self._orm = orm
         self._site = site
         self._domain = domain
 
-    async def load(self) -> QuickstartAuthConfig | None:
-        tenants = await self._orm.admin.quickstart_tenants.list(order_by=("slug",))
-        admins = await self._orm.admin.quickstart_admin_users.list(order_by=("email",))
+    async def load(self) -> BootstrapAuthConfig | None:
+        tenants = await self._orm.admin.bootstrap_tenants.list(order_by=("slug",))
+        admins = await self._orm.admin.bootstrap_admin_users.list(order_by=("email",))
         if not tenants and not admins:
             return None
         tenant_configs = []
@@ -749,49 +749,49 @@ class QuickstartRepository:
                 domain=self._domain,
                 scope=TenantScope.TENANT,
             )
-            users = await self._orm.tenants.quickstart_users.list(tenant=context, order_by=("email",))
+            users = await self._orm.tenants.bootstrap_users.list(tenant=context, order_by=("email",))
             tenant_configs.append(
-                QuickstartTenant(
+                BootstrapTenant(
                     slug=tenant.slug,
                     name=tenant.name,
                     users=tuple(self._convert_user(user) for user in users),
                 )
             )
         admin_users = tuple(self._convert_admin(user) for user in admins)
-        admin_realm = QuickstartAdminRealm(users=admin_users)
-        return QuickstartAuthConfig(
+        admin_realm = BootstrapAdminRealm(users=admin_users)
+        return BootstrapAuthConfig(
             tenants=tuple(tenant_configs),
             admin=admin_realm,
-            session_ttl_seconds=DEFAULT_QUICKSTART_AUTH.session_ttl_seconds,
-            flow_ttl_seconds=DEFAULT_QUICKSTART_AUTH.flow_ttl_seconds,
-            max_attempts=DEFAULT_QUICKSTART_AUTH.max_attempts,
+            session_ttl_seconds=DEFAULT_BOOTSTRAP_AUTH.session_ttl_seconds,
+            flow_ttl_seconds=DEFAULT_BOOTSTRAP_AUTH.flow_ttl_seconds,
+            max_attempts=DEFAULT_BOOTSTRAP_AUTH.max_attempts,
         )
 
     @staticmethod
-    def _convert_user(record: QuickstartTenantUserRecord) -> QuickstartUser:
-        return QuickstartUser(
+    def _convert_user(record: BootstrapTenantUserRecord) -> BootstrapUser:
+        return BootstrapUser(
             id=record.id,
             email=record.email,
             password=record.password,
-            passkeys=QuickstartRepository._records_to_passkeys(record.passkeys),
+            passkeys=BootstrapRepository._records_to_passkeys(record.passkeys),
             mfa_code=record.mfa_code,
             sso=record.sso_provider,
         )
 
     @staticmethod
-    def _convert_admin(record: QuickstartAdminUserRecord) -> QuickstartUser:
-        return QuickstartUser(
+    def _convert_admin(record: BootstrapAdminUserRecord) -> BootstrapUser:
+        return BootstrapUser(
             id=record.id,
             email=record.email,
             password=record.password,
-            passkeys=QuickstartRepository._records_to_passkeys(record.passkeys),
+            passkeys=BootstrapRepository._records_to_passkeys(record.passkeys),
             mfa_code=record.mfa_code,
         )
 
     @staticmethod
-    def _records_to_passkeys(records: tuple[QuickstartPasskeyRecord, ...]) -> tuple[QuickstartPasskey, ...]:
+    def _records_to_passkeys(records: tuple[BootstrapPasskeyRecord, ...]) -> tuple[BootstrapPasskey, ...]:
         return tuple(
-            QuickstartPasskey(
+            BootstrapPasskey(
                 credential_id=record.credential_id,
                 secret=record.secret,
                 label=record.label,
@@ -807,33 +807,33 @@ def _read_env_blob(name: str, env: Mapping[str, str]) -> str | None:
         try:
             return Path(path).read_text(encoding="utf-8")
         except FileNotFoundError as exc:  # pragma: no cover - validated in integration tests
-            raise RuntimeError(f"Quickstart configuration file at '{path}' not found") from exc
+            raise RuntimeError(f"Bootstrap configuration file at '{path}' not found") from exc
     value = env.get(name)
     if value:
         return value
     return None
 
 
-def load_quickstart_auth_from_env(*, env: Mapping[str, str] | None = None) -> QuickstartAuthConfig | None:
-    """Decode :class:`QuickstartAuthConfig` material from environment variables."""
+def load_bootstrap_auth_from_env(*, env: Mapping[str, str] | None = None) -> BootstrapAuthConfig | None:
+    """Decode :class:`BootstrapAuthConfig` material from environment variables."""
 
-    source = _read_env_blob("MERE_QUICKSTART_AUTH", env or os.environ)
+    source = _read_env_blob("MERE_BOOTSTRAP_AUTH", env or os.environ)
     if source is None:
         return None
     try:
         payload = json.decode(source)
     except Exception as exc:  # pragma: no cover - defensive surface
-        raise RuntimeError("Failed to decode MERE_QUICKSTART_AUTH as JSON") from exc
+        raise RuntimeError("Failed to decode MERE_BOOTSTRAP_AUTH as JSON") from exc
     try:
-        return convert(payload, type=QuickstartAuthConfig)
+        return convert(payload, type=BootstrapAuthConfig)
     except Exception as exc:  # pragma: no cover - defensive surface
-        raise RuntimeError("Invalid quickstart auth configuration in environment") from exc
+        raise RuntimeError("Invalid bootstrap auth configuration in environment") from exc
 
 
-class QuickstartAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, QuickstartSession]):
-    """Quickstart authentication engine built on the shared flow orchestration."""
+class BootstrapAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, BootstrapSession]):
+    """Bootstrap authentication engine built on the shared flow orchestration."""
 
-    def __init__(self, config: QuickstartAuthConfig) -> None:
+    def __init__(self, config: BootstrapAuthConfig) -> None:
         super().__init__(
             flow_ttl_seconds=config.flow_ttl_seconds,
             session_ttl_seconds=config.session_ttl_seconds,
@@ -842,14 +842,14 @@ class QuickstartAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, Quic
         self.config = config
         self._apply_config(config)
 
-    async def reload(self, config: QuickstartAuthConfig) -> None:
+    async def reload(self, config: BootstrapAuthConfig) -> None:
         """Replace the engine state with ``config``."""
 
         async with self._lock:
             self.config = config
             self._apply_config(config)
 
-    def _apply_config(self, config: QuickstartAuthConfig) -> None:
+    def _apply_config(self, config: BootstrapAuthConfig) -> None:
         records: list[AuthenticationLoginRecord[AuthenticationFlowUser]] = []
         for tenant in config.tenants:
             for user in tenant.users:
@@ -873,8 +873,8 @@ class QuickstartAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, Quic
         self.max_attempts = config.max_attempts
         self.reset(records)
 
-    def _issue_session(self, flow: Any, level: SessionLevel) -> QuickstartSession:
-        return QuickstartSession(
+    def _issue_session(self, flow: Any, level: SessionLevel) -> BootstrapSession:
+        return BootstrapSession(
             token=f"qs_{generate_id57()}",
             user_id=flow.user.id,
             scope=flow.scope,
@@ -883,25 +883,25 @@ class QuickstartAuthEngine(AuthenticationFlowEngine[AuthenticationFlowUser, Quic
         )
 
 
-def _default_auth_config() -> QuickstartAuthConfig:
-    """Return the built-in quickstart auth configuration."""
+def _default_auth_config() -> BootstrapAuthConfig:
+    """Return the built-in bootstrap auth configuration."""
 
-    acme_owner = QuickstartUser(
+    acme_owner = BootstrapUser(
         id="usr_acme_owner",
         email="founder@acme.test",
-        sso=QuickstartSsoProvider(
+        sso=BootstrapSsoProvider(
             slug="okta",
             kind="saml",
             display_name="Okta",
             redirect_url="https://id.acme.test/sso/start",
         ),
     )
-    beta_ops = QuickstartUser(
+    beta_ops = BootstrapUser(
         id="usr_beta_ops",
         email="ops@beta.test",
         password="beta-password",
         passkeys=(
-            QuickstartPasskey(
+            BootstrapPasskey(
                 credential_id="beta-passkey",
                 secret="beta-passkey-secret",
                 label="YubiKey 5",
@@ -909,31 +909,31 @@ def _default_auth_config() -> QuickstartAuthConfig:
         ),
         mfa_code="654321",
     )
-    admin_root = QuickstartUser(
+    admin_root = BootstrapUser(
         id="adm_root",
         email="root@admin.test",
         password="admin-password",
         mfa_code="123456",
     )
-    return QuickstartAuthConfig(
+    return BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(slug="acme", name="Acme Rockets", users=(acme_owner,)),
-            QuickstartTenant(slug="beta", name="Beta Industries", users=(beta_ops,)),
+            BootstrapTenant(slug="acme", name="Acme Rockets", users=(acme_owner,)),
+            BootstrapTenant(slug="beta", name="Beta Industries", users=(beta_ops,)),
         ),
-        admin=QuickstartAdminRealm(users=(admin_root,)),
+        admin=BootstrapAdminRealm(users=(admin_root,)),
     )
 
 
-DEFAULT_QUICKSTART_AUTH: Final[QuickstartAuthConfig] = _default_auth_config()
+DEFAULT_BOOTSTRAP_AUTH: Final[BootstrapAuthConfig] = _default_auth_config()
 
 
-class QuickstartChatOpsControlPlane:
+class BootstrapChatOpsControlPlane:
     """Centralizes ChatOps configuration, normalization, and invocation handling."""
 
     def __init__(
         self,
         app: MereApp,
-        settings: QuickstartChatOpsSettings,
+        settings: BootstrapChatOpsSettings,
         *,
         command_pattern: RureRegex,
     ) -> None:
@@ -944,17 +944,17 @@ class QuickstartChatOpsControlPlane:
         self._binding_actions: dict[str, str] = {}
 
     @property
-    def settings(self) -> QuickstartChatOpsSettings:
+    def settings(self) -> BootstrapChatOpsSettings:
         return self._settings
 
     def register_action_binding(self, action: str, binding_name: str) -> None:
         self._action_bindings[action] = binding_name
 
-    def configure(self, settings: QuickstartChatOpsSettings) -> None:
+    def configure(self, settings: BootstrapChatOpsSettings) -> None:
         """Apply ``settings`` to the ChatOps service and command registry."""
 
         normalized_commands = self.normalize_commands(settings.slash_commands or _default_slash_commands())
-        self._settings = QuickstartChatOpsSettings(
+        self._settings = BootstrapChatOpsSettings(
             enabled=settings.enabled,
             webhook=settings.webhook,
             notifications=settings.notifications,
@@ -967,7 +967,7 @@ class QuickstartChatOpsControlPlane:
         self._app.dependencies.provide(ChatOpsService, lambda: self._app.chatops)
         self._apply_command_bindings()
 
-    def normalize_command_definition(self, command: QuickstartSlashCommand) -> QuickstartSlashCommand:
+    def normalize_command_definition(self, command: BootstrapSlashCommand) -> BootstrapSlashCommand:
         normalized_name = self._app.chatops.normalize_command_token(command.name)
         if not normalized_name or not self._command_pattern.is_match(normalized_name):
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_command_name"})
@@ -981,7 +981,7 @@ class QuickstartChatOpsControlPlane:
                 continue
             normalized_aliases.append(normalized_alias)
             seen_aliases.add(normalized_alias)
-        return QuickstartSlashCommand(
+        return BootstrapSlashCommand(
             name=normalized_name,
             action=command.action,
             description=command.description,
@@ -989,8 +989,8 @@ class QuickstartChatOpsControlPlane:
             aliases=tuple(normalized_aliases),
         )
 
-    def normalize_commands(self, commands: Iterable[QuickstartSlashCommand]) -> tuple[QuickstartSlashCommand, ...]:
-        normalized: list[QuickstartSlashCommand] = []
+    def normalize_commands(self, commands: Iterable[BootstrapSlashCommand]) -> tuple[BootstrapSlashCommand, ...]:
+        normalized: list[BootstrapSlashCommand] = []
         seen: set[str] = set()
         for command in commands:
             normalized_command = self.normalize_command_definition(command)
@@ -1066,7 +1066,7 @@ class QuickstartChatOpsControlPlane:
     def resolve_invocation(
         self,
         request: Request,
-        payload: QuickstartSlashCommandInvocation,
+        payload: BootstrapSlashCommandInvocation,
     ) -> tuple[ChatOpsCommandBinding, dict[str, str], str]:
         command_name, arg_text = self._app.chatops.extract_command_from_invocation(
             payload,
@@ -1098,8 +1098,8 @@ class QuickstartChatOpsControlPlane:
         return self._binding_actions.get(binding.name)
 
 
-class QuickstartAdminControlPlane:
-    """Encapsulates admin operations for the quickstart bundle."""
+class BootstrapAdminControlPlane:
+    """Encapsulates admin operations for the bootstrap bundle."""
 
     def __init__(
         self,
@@ -1108,8 +1108,8 @@ class QuickstartAdminControlPlane:
         slug_normalizer: Callable[[str], str],
         slug_pattern: RureRegex,
         ensure_contexts: Callable[[Iterable[str]], Awaitable[None]],
-        chatops: QuickstartChatOpsControlPlane,
-        sync_allowed_tenants: Callable[[QuickstartAuthConfig], None],
+        chatops: BootstrapChatOpsControlPlane,
+        sync_allowed_tenants: Callable[[BootstrapAuthConfig], None],
     ) -> None:
         self._app = app
         self._normalize_slug = slug_normalizer
@@ -1125,10 +1125,10 @@ class QuickstartAdminControlPlane:
         name: str,
         *,
         orm: ORM,
-        engine: QuickstartAuthEngine,
+        engine: BootstrapAuthEngine,
         actor: str,
         source: str,
-    ) -> QuickstartTenantRecord:
+    ) -> BootstrapTenantRecord:
         normalized_slug = self._normalize_slug(slug)
         cleaned_name = name.strip()
         if not normalized_slug or not self._slug_pattern.is_match(normalized_slug):
@@ -1137,14 +1137,14 @@ class QuickstartAdminControlPlane:
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_name"})
         if normalized_slug in self._reserved_slugs:
             raise HTTPError(409, {"detail": "slug_reserved"})
-        existing = await orm.admin.quickstart_tenants.get(filters={"slug": normalized_slug})
+        existing = await orm.admin.bootstrap_tenants.get(filters={"slug": normalized_slug})
         if existing is not None:
             raise HTTPError(409, {"detail": "tenant_exists"})
         await self._ensure_contexts([normalized_slug])
-        record = await orm.admin.quickstart_tenants.create({"slug": normalized_slug, "name": cleaned_name})
+        record = await orm.admin.bootstrap_tenants.create({"slug": normalized_slug, "name": cleaned_name})
         tenants_config = [tenant for tenant in engine.config.tenants if tenant.slug != normalized_slug]
-        tenants_config.append(QuickstartTenant(slug=normalized_slug, name=cleaned_name, users=()))
-        updated_config = QuickstartAuthConfig(
+        tenants_config.append(BootstrapTenant(slug=normalized_slug, name=cleaned_name, users=()))
+        updated_config = BootstrapAuthConfig(
             tenants=tuple(sorted(tenants_config, key=lambda item: item.slug)),
             admin=engine.config.admin,
             session_ttl_seconds=engine.config.session_ttl_seconds,
@@ -1163,7 +1163,7 @@ class QuickstartAdminControlPlane:
                 "source": source,
             },
         )
-        return cast(QuickstartTenantRecord, record)
+        return cast(BootstrapTenantRecord, record)
 
     async def grant_trial_extension(
         self,
@@ -1173,23 +1173,23 @@ class QuickstartAdminControlPlane:
         note: str | None,
         actor: str,
         orm: ORM,
-    ) -> QuickstartTrialExtensionRecord:
+    ) -> BootstrapTrialExtensionRecord:
         normalized_slug = self._normalize_slug(tenant_slug)
         if not normalized_slug or not self._slug_pattern.is_match(normalized_slug):
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_slug"})
         if days <= 0:
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_days"})
-        tenant_record = await orm.admin.quickstart_tenants.get(filters={"slug": normalized_slug})
+        tenant_record = await orm.admin.bootstrap_tenants.get(filters={"slug": normalized_slug})
         if tenant_record is None:
             raise HTTPError(Status.NOT_FOUND, {"detail": "tenant_missing"})
         note_value = note.strip() if note else None
-        record = QuickstartTrialExtensionRecord(
+        record = BootstrapTrialExtensionRecord(
             tenant_slug=normalized_slug,
             extended_days=days,
             requested_by=actor,
             note=note_value,
         )
-        created = await orm.admin.quickstart_trial_extensions.create(record)
+        created = await orm.admin.bootstrap_trial_extensions.create(record)
         await self._chatops.notify(
             "trial_extended",
             f"Trial for tenant '{normalized_slug}' extended by {days} days",
@@ -1200,11 +1200,11 @@ class QuickstartAdminControlPlane:
                 "note": note_value,
             },
         )
-        return cast(QuickstartTrialExtensionRecord, created)
+        return cast(BootstrapTrialExtensionRecord, created)
 
     async def tenant_metrics(self, orm: ORM) -> dict[str, Any]:
-        tenants = await orm.admin.quickstart_tenants.list(order_by=("slug",))
-        trials = await orm.admin.quickstart_trial_extensions.list(order_by=("created_at",))
+        tenants = await orm.admin.bootstrap_tenants.list(order_by=("slug",))
+        trials = await orm.admin.bootstrap_trial_extensions.list(order_by=("created_at",))
         tickets = await orm.admin.support_tickets.list(order_by=("created_at",))
         active_tenants = len(tenants)
         trial_extensions = len(trials)
@@ -1221,7 +1221,7 @@ class QuickstartAdminControlPlane:
         }
 
     async def system_diagnostics(self, orm: ORM) -> dict[str, Any]:
-        tenants = await orm.admin.quickstart_tenants.list(order_by=("slug",))
+        tenants = await orm.admin.bootstrap_tenants.list(order_by=("slug",))
         tickets = await orm.admin.support_tickets.list(order_by=("created_at",))
         return {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1241,24 +1241,24 @@ class QuickstartAdminControlPlane:
     async def create_support_ticket(
         self,
         tenant: TenantContext,
-        payload: QuickstartSupportTicketRequest,
+        payload: BootstrapSupportTicketRequest,
         *,
         orm: ORM,
         actor: str,
-    ) -> QuickstartSupportTicketRecord:
+    ) -> BootstrapSupportTicketRecord:
         subject = payload.subject.strip()
         message = payload.message.strip()
         if not subject or not message:
             raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_ticket"})
         ticket_kind = SupportTicketKind(payload.kind)
-        admin_record = QuickstartSupportTicketRecord(
+        admin_record = BootstrapSupportTicketRecord(
             tenant_slug=tenant.tenant,
             kind=ticket_kind,
             subject=subject,
             message=message,
         )
         created = await orm.admin.support_tickets.create(admin_record)
-        tenant_record = QuickstartTenantSupportTicketRecord(
+        tenant_record = BootstrapTenantSupportTicketRecord(
             admin_ticket_id=created.id,
             kind=ticket_kind,
             subject=subject,
@@ -1281,11 +1281,11 @@ class QuickstartAdminControlPlane:
     async def update_support_ticket(
         self,
         ticket_id: str,
-        payload: QuickstartSupportTicketUpdateRequest,
+        payload: BootstrapSupportTicketUpdateRequest,
         *,
         orm: ORM,
         actor: str,
-    ) -> QuickstartSupportTicketRecord:
+    ) -> BootstrapSupportTicketRecord:
         record = await orm.admin.support_tickets.get(filters={"id": ticket_id})
         if record is None:
             raise HTTPError(Status.NOT_FOUND, {"detail": "ticket_missing"})
@@ -1293,7 +1293,7 @@ class QuickstartAdminControlPlane:
         log_entries = list(record.updates)
         if payload.note:
             log_entries.append(
-                QuickstartSupportTicketUpdateLog(
+                BootstrapSupportTicketUpdateLog(
                     timestamp=datetime.now(timezone.utc),
                     actor=actor,
                     note=payload.note.strip(),
@@ -1309,11 +1309,11 @@ class QuickstartAdminControlPlane:
         )
         if isinstance(updated, Sequence):
             updated_record = cast(
-                QuickstartSupportTicketRecord,
+                BootstrapSupportTicketRecord,
                 updated[0] if updated else record,
             )
         else:
-            updated_record = cast(QuickstartSupportTicketRecord, updated)
+            updated_record = cast(BootstrapSupportTicketRecord, updated)
         tenant_context = self._app.tenant_resolver.context_for(record.tenant_slug, TenantScope.TENANT)
         tenant_record = await orm.tenants.support_tickets.get(
             tenant=tenant_context,
@@ -1323,7 +1323,7 @@ class QuickstartAdminControlPlane:
             tenant_updates = list(tenant_record.updates)
             if payload.note:
                 tenant_updates.append(
-                    QuickstartSupportTicketUpdateLog(
+                    BootstrapSupportTicketUpdateLog(
                         timestamp=datetime.now(timezone.utc),
                         actor=actor,
                         note=payload.note.strip(),
@@ -1351,13 +1351,13 @@ class QuickstartAdminControlPlane:
         return updated_record
 
 
-def attach_quickstart(
+def attach_bootstrap(
     app: MereApp,
     *,
     base_path: str = "/__mere",
     environment: str | None = None,
     allow_production: bool = False,
-    auth_config: QuickstartAuthConfig | None = None,
+    auth_config: BootstrapAuthConfig | None = None,
 ) -> None:
     """Attach development-only routes for OpenAPI, TypeScript clients, and login orchestration."""
 
@@ -1366,7 +1366,7 @@ def attach_quickstart(
     is_dev_env = env in _DEV_ENVIRONMENTS
     is_dev_domain = domain in _DEV_DOMAINS or any(domain.endswith(suffix) for suffix in _DEV_DOMAIN_SUFFIXES)
     if not allow_production and not (is_dev_env or is_dev_domain):
-        raise RuntimeError("Quickstart routes are only available in development environments")
+        raise RuntimeError("Bootstrap routes are only available in development environments")
 
     normalized = base_path.strip()
     if not normalized:
@@ -1404,10 +1404,10 @@ def attach_quickstart(
     audit_logs_path = f"{workspaces_path}/{{wsId}}/audit-logs"
     audit_logs_export_path = f"{audit_logs_path}/export"
 
-    env_auth_config = load_quickstart_auth_from_env()
-    seed_hint = auth_config or env_auth_config or DEFAULT_QUICKSTART_AUTH
+    env_auth_config = load_bootstrap_auth_from_env()
+    seed_hint = auth_config or env_auth_config or DEFAULT_BOOTSTRAP_AUTH
 
-    def _sync_allowed_tenants(config: QuickstartAuthConfig) -> None:
+    def _sync_allowed_tenants(config: BootstrapAuthConfig) -> None:
         resolver = app.tenant_resolver
         resolver.allowed_tenants.update(tenant.slug for tenant in config.tenants)
         resolver.allowed_tenants.discard(app.config.admin_subdomain)
@@ -1415,14 +1415,14 @@ def attach_quickstart(
 
     _sync_allowed_tenants(seed_hint)
 
-    engine = QuickstartAuthEngine(seed_hint)
-    app.dependencies.provide(QuickstartAuthEngine, lambda: engine)
+    engine = BootstrapAuthEngine(seed_hint)
+    app.dependencies.provide(BootstrapAuthEngine, lambda: engine)
 
     if app.database and app.orm:
         database = cast(Database, app.database)
         orm = cast(ORM, app.orm)
         initial_chatops_config = app.chatops.config
-        initial_chatops_settings = QuickstartChatOpsSettings(
+        initial_chatops_settings = BootstrapChatOpsSettings(
             enabled=initial_chatops_config.enabled,
             webhook=(initial_chatops_config.default if initial_chatops_config.enabled else None),
         )
@@ -1441,16 +1441,16 @@ def attach_quickstart(
         }
         runner = MigrationRunner(
             database,
-            migrations=quickstart_migrations(),
+            migrations=bootstrap_migrations(),
             tenant_provider=lambda: list(tenants_map.values()),
         )
-        seeder = QuickstartSeeder(orm)
-        repository = QuickstartRepository(orm, site=app.config.site, domain=app.config.domain)
+        seeder = BootstrapSeeder(orm)
+        repository = BootstrapRepository(orm, site=app.config.site, domain=app.config.domain)
 
-        tile_domain = QuickstartTileService(orm)
-        rbac_domain = QuickstartRbacService(orm)
-        delegation_domain = QuickstartDelegationService(orm)
-        audit_domain = QuickstartAuditService(orm)
+        tile_domain = BootstrapTileService(orm)
+        rbac_domain = BootstrapRbacService(orm)
+        delegation_domain = BootstrapDelegationService(orm)
+        audit_domain = BootstrapAuditService(orm)
 
         app.dependencies.provide(TileService, lambda: tile_domain)
         app.dependencies.provide(RbacService, lambda: rbac_domain)
@@ -1510,17 +1510,17 @@ def attach_quickstart(
         async def _collect_workspace_notifications(
             orm: ORM | None,
             workspace_id: str,
-        ) -> tuple[QuickstartNotification, ...]:
+        ) -> tuple[BootstrapNotification, ...]:
             if orm is None:
                 return _sample_notification_feed(workspace_id)
-            notifications: list[QuickstartNotification] = []
-            trials = await orm.admin.quickstart_trial_extensions.list(
+            notifications: list[BootstrapNotification] = []
+            trials = await orm.admin.bootstrap_trial_extensions.list(
                 filters={"tenant_slug": workspace_id},
                 order_by=("created_at desc",),
             )
             for record in trials:
                 notifications.append(
-                    QuickstartNotification(
+                    BootstrapNotification(
                         id=f"trial-{record.id}",
                         workspace_id=workspace_id,
                         kind="trial",
@@ -1544,7 +1544,7 @@ def attach_quickstart(
                 elif ticket.status is SupportTicketStatus.RESOLVED:
                     severity = "info"
                 notifications.append(
-                    QuickstartNotification(
+                    BootstrapNotification(
                         id=f"ticket-{ticket.id}",
                         workspace_id=workspace_id,
                         kind="support",
@@ -1574,7 +1574,7 @@ def attach_quickstart(
                     severity = "info"
                     message = f"Plan {record.plan_code} is {record.status.value}"
                 notifications.append(
-                    QuickstartNotification(
+                    BootstrapNotification(
                         id=f"billing-{record.id}",
                         workspace_id=workspace_id,
                         kind="billing",
@@ -1597,7 +1597,7 @@ def attach_quickstart(
             orm: ORM | None,
             workspace_id: str,
             tenant_ctx: TenantContext,
-        ) -> QuickstartKanbanBoard:
+        ) -> BootstrapKanbanBoard:
             if orm is None:
                 return _sample_kanban_board(workspace_id)
             tickets = await orm.tenants.support_tickets.list(
@@ -1606,12 +1606,12 @@ def attach_quickstart(
             )
             if not tickets:
                 return _sample_kanban_board(workspace_id)
-            columns: dict[str, list[QuickstartKanbanCard]] = {key: [] for key in _KANBAN_COLUMN_TITLES}
+            columns: dict[str, list[BootstrapKanbanCard]] = {key: [] for key in _KANBAN_COLUMN_TITLES}
             latest = _SAMPLE_FEED_BASE
             for ticket in tickets:
                 column_key = _KANBAN_STATUS_BY_TICKET.get(ticket.status, "backlog")
                 severity = _KANBAN_SEVERITY_BY_KIND.get(ticket.kind, "low")
-                card = QuickstartKanbanCard(
+                card = BootstrapKanbanCard(
                     id=ticket.id,
                     title=ticket.subject,
                     status=column_key,
@@ -1628,22 +1628,22 @@ def attach_quickstart(
             if not any(columns.values()):
                 return _sample_kanban_board(workspace_id)
             column_payload = tuple(
-                QuickstartKanbanColumn(
+                BootstrapKanbanColumn(
                     key=key,
                     title=_KANBAN_COLUMN_TITLES[key],
                     cards=tuple(columns[key]),
                 )
                 for key in ("backlog", "in_progress", "done")
             )
-            return QuickstartKanbanBoard(
+            return BootstrapKanbanBoard(
                 workspace_id=workspace_id,
                 columns=column_payload,
                 updated_at=latest,
             )
 
-        async def _bootstrap_quickstart() -> None:
+        async def _bootstrap_bootstrap() -> None:
             await _ensure_contexts_for(tenants_map.keys())
-            config_to_load: QuickstartAuthConfig
+            config_to_load: BootstrapAuthConfig
             source_config = auth_config or env_auth_config
             if source_config is not None:
                 config_to_load = source_config
@@ -1652,7 +1652,7 @@ def attach_quickstart(
             else:
                 loaded = await repository.load()
                 if loaded is None:
-                    config_to_load = DEFAULT_QUICKSTART_AUTH
+                    config_to_load = DEFAULT_BOOTSTRAP_AUTH
                     await _ensure_contexts_for(tenant.slug for tenant in config_to_load.tenants)
                     await seeder.apply(config_to_load, tenants=tenants_map)
                 else:
@@ -1661,7 +1661,7 @@ def attach_quickstart(
             await engine.reload(config_to_load)
             _sync_allowed_tenants(config_to_load)
 
-        app.on_startup(_bootstrap_quickstart)
+        app.on_startup(_bootstrap_bootstrap)
 
         def _require_admin(request: Request) -> None:
             if request.tenant.scope is not TenantScope.ADMIN:
@@ -1670,14 +1670,14 @@ def attach_quickstart(
         def _normalize_slug(raw: str) -> str:
             return raw.strip().lower()
 
-        chatops_control = QuickstartChatOpsControlPlane(
+        chatops_control = BootstrapChatOpsControlPlane(
             app,
             initial_chatops_settings,
             command_pattern=_TENANT_SLUG_PATTERN,
         )
         chatops_control.configure(initial_chatops_settings)
 
-        admin_control = QuickstartAdminControlPlane(
+        admin_control = BootstrapAdminControlPlane(
             app,
             slug_normalizer=_normalize_slug,
             slug_pattern=_TENANT_SLUG_PATTERN,
@@ -1686,22 +1686,22 @@ def attach_quickstart(
             sync_allowed_tenants=_sync_allowed_tenants,
         )
 
-        chatops_control.register_action_binding("create_tenant", "quickstart.chatops.create_tenant")
-        chatops_control.register_action_binding("extend_trial", "quickstart.chatops.extend_trial")
-        chatops_control.register_action_binding("tenant_metrics", "quickstart.chatops.tenant_metrics")
-        chatops_control.register_action_binding("system_diagnostics", "quickstart.chatops.system_diagnostics")
-        chatops_control.register_action_binding("ticket_update", "quickstart.chatops.ticket_update")
+        chatops_control.register_action_binding("create_tenant", "bootstrap.chatops.create_tenant")
+        chatops_control.register_action_binding("extend_trial", "bootstrap.chatops.extend_trial")
+        chatops_control.register_action_binding("tenant_metrics", "bootstrap.chatops.tenant_metrics")
+        chatops_control.register_action_binding("system_diagnostics", "bootstrap.chatops.system_diagnostics")
+        chatops_control.register_action_binding("ticket_update", "bootstrap.chatops.ticket_update")
 
         @app.chatops_command(
             ChatOpsSlashCommand(
                 name="create-tenant",
                 description="Provision a new tenant from Slack.",
                 visibility="admin",
-                aliases=("quickstart-create-tenant",),
+                aliases=("bootstrap-create-tenant",),
             ),
-            name="quickstart.chatops.create_tenant",
+            name="bootstrap.chatops.create_tenant",
         )
-        async def quickstart_chatops_create_tenant_command(
+        async def bootstrap_chatops_create_tenant_command(
             context: ChatOpsCommandContext,
         ) -> dict[str, Any]:
             slug_arg = context.args.get("slug")
@@ -1709,7 +1709,7 @@ def attach_quickstart(
             if not slug_arg or not name_arg:
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "missing_arguments"})
             orm = await context.dependencies.get(ORM)
-            engine = await context.dependencies.get(QuickstartAuthEngine)
+            engine = await context.dependencies.get(BootstrapAuthEngine)
             record = await admin_control.create_tenant_from_inputs(
                 slug_arg,
                 name_arg,
@@ -1729,11 +1729,11 @@ def attach_quickstart(
                 name="extend-trial",
                 description="Extend a tenant's trial period from Slack.",
                 visibility="admin",
-                aliases=("quickstart-extend-trial",),
+                aliases=("bootstrap-extend-trial",),
             ),
-            name="quickstart.chatops.extend_trial",
+            name="bootstrap.chatops.extend_trial",
         )
-        async def quickstart_chatops_extend_trial_command(
+        async def bootstrap_chatops_extend_trial_command(
             context: ChatOpsCommandContext,
         ) -> dict[str, Any]:
             tenant_arg = context.args.get("tenant")
@@ -1764,11 +1764,11 @@ def attach_quickstart(
                 name="tenant-metrics",
                 description="Summarize tenant metrics for administrators.",
                 visibility="admin",
-                aliases=("quickstart-tenant-metrics",),
+                aliases=("bootstrap-tenant-metrics",),
             ),
-            name="quickstart.chatops.tenant_metrics",
+            name="bootstrap.chatops.tenant_metrics",
         )
-        async def quickstart_chatops_tenant_metrics_command(
+        async def bootstrap_chatops_tenant_metrics_command(
             context: ChatOpsCommandContext,
         ) -> dict[str, Any]:
             orm = await context.dependencies.get(ORM)
@@ -1782,13 +1782,13 @@ def attach_quickstart(
         @app.chatops_command(
             ChatOpsSlashCommand(
                 name="system-diagnostics",
-                description="Display quickstart diagnostics and health checks.",
+                description="Display bootstrap diagnostics and health checks.",
                 visibility="admin",
-                aliases=("quickstart-system-diagnostics",),
+                aliases=("bootstrap-system-diagnostics",),
             ),
-            name="quickstart.chatops.system_diagnostics",
+            name="bootstrap.chatops.system_diagnostics",
         )
-        async def quickstart_chatops_system_diagnostics_command(
+        async def bootstrap_chatops_system_diagnostics_command(
             context: ChatOpsCommandContext,
         ) -> dict[str, Any]:
             orm = await context.dependencies.get(ORM)
@@ -1804,11 +1804,11 @@ def attach_quickstart(
                 name="ticket-update",
                 description="Post an update to a customer support ticket.",
                 visibility="admin",
-                aliases=("quickstart-ticket-update",),
+                aliases=("bootstrap-ticket-update",),
             ),
-            name="quickstart.chatops.ticket_update",
+            name="bootstrap.chatops.ticket_update",
         )
-        async def quickstart_chatops_ticket_update_command(
+        async def bootstrap_chatops_ticket_update_command(
             context: ChatOpsCommandContext,
         ) -> dict[str, Any]:
             ticket_id = context.args.get("ticket")
@@ -1817,7 +1817,7 @@ def attach_quickstart(
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "missing_arguments"})
             if status_arg not in {"open", "responded", "resolved"}:
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "invalid_status"})
-            update_payload = QuickstartSupportTicketUpdateRequest(status=status_arg, note=context.args.get("note"))
+            update_payload = BootstrapSupportTicketUpdateRequest(status=status_arg, note=context.args.get("note"))
             orm = await context.dependencies.get(ORM)
             ticket = await admin_control.update_support_ticket(
                 ticket_id,
@@ -1831,8 +1831,8 @@ def attach_quickstart(
                 "ticket": to_builtins(ticket),
             }
 
-        @app.get(tiles_collection_path, name="quickstart_tiles_list")
-        async def quickstart_tiles_list(
+        @app.get(tiles_collection_path, name="bootstrap_tiles_list")
+        async def bootstrap_tiles_list(
             request: Request,
             wsId: str,
             service: TileService,
@@ -1844,8 +1844,8 @@ def attach_quickstart(
                 principal=request.principal,
             )
 
-        @app.post(tiles_collection_path, name="quickstart_tiles_create")
-        async def quickstart_tiles_create(
+        @app.post(tiles_collection_path, name="bootstrap_tiles_create")
+        async def bootstrap_tiles_create(
             request: Request,
             wsId: str,
             payload: TileCreate,
@@ -1861,14 +1861,14 @@ def attach_quickstart(
             return JSONResponse(to_builtins(result), status=int(Status.CREATED))
 
         _register_response_model(
-            quickstart_tiles_create,
+            bootstrap_tiles_create,
             status=int(Status.CREATED),
             model=TileRecord,
             description="Tile created",
         )
 
-        @app.get(tile_item_path, name="quickstart_tiles_read")
-        async def quickstart_tiles_read(
+        @app.get(tile_item_path, name="bootstrap_tiles_read")
+        async def bootstrap_tiles_read(
             request: Request,
             wsId: str,
             tileId: str,
@@ -1882,8 +1882,8 @@ def attach_quickstart(
                 principal=request.principal,
             )
 
-        @app.route(tile_item_path, methods=("PATCH",), name="quickstart_tiles_update")
-        async def quickstart_tiles_update(
+        @app.route(tile_item_path, methods=("PATCH",), name="bootstrap_tiles_update")
+        async def bootstrap_tiles_update(
             request: Request,
             wsId: str,
             tileId: str,
@@ -1900,8 +1900,8 @@ def attach_quickstart(
             )
             return result
 
-        @app.route(tile_item_path, methods=("DELETE",), name="quickstart_tiles_delete")
-        async def quickstart_tiles_delete(
+        @app.route(tile_item_path, methods=("DELETE",), name="bootstrap_tiles_delete")
+        async def bootstrap_tiles_delete(
             request: Request,
             wsId: str,
             tileId: str,
@@ -1919,9 +1919,9 @@ def attach_quickstart(
         @app.route(
             tile_permissions_path,
             methods=("PUT",),
-            name="quickstart_tiles_permissions",
+            name="bootstrap_tiles_permissions",
         )
-        async def quickstart_tiles_permissions(
+        async def bootstrap_tiles_permissions(
             request: Request,
             wsId: str,
             tileId: str,
@@ -1938,13 +1938,13 @@ def attach_quickstart(
             )
             return result
 
-        @app.get(workspace_settings_path, name="quickstart_workspace_settings")
-        async def quickstart_workspace_settings(
+        @app.get(workspace_settings_path, name="bootstrap_workspace_settings")
+        async def bootstrap_workspace_settings(
             request: Request,
             wsId: str,
             orm: ORM,
             service: TileService,
-        ) -> QuickstartWorkspaceSettings:
+        ) -> BootstrapWorkspaceSettings:
             _assert_workspace_access(request, wsId)
             tiles = await service.list_tiles(
                 tenant=request.tenant,
@@ -1953,13 +1953,13 @@ def attach_quickstart(
             )
             tile_count = len(tiles)
             ai_enabled = any(tile.ai_insights_enabled for tile in tiles)
-            tenant_record = await orm.admin.quickstart_tenants.get(filters={"slug": wsId})
+            tenant_record = await orm.admin.bootstrap_tenants.get(filters={"slug": wsId})
             workspace_name = tenant_record.name if tenant_record else wsId.replace("-", " ").title()
             notifications = await _collect_workspace_notifications(orm, wsId)
             alerts = tuple(
                 notification.id for notification in notifications if notification.severity in {"warning", "critical"}
             )
-            return QuickstartWorkspaceSettings(
+            return BootstrapWorkspaceSettings(
                 workspace_id=wsId,
                 name=workspace_name,
                 timezone="UTC",
@@ -1970,30 +1970,30 @@ def attach_quickstart(
                 alerts=alerts,
             )
 
-        @app.get(workspace_notifications_path, name="quickstart_workspace_notifications")
-        async def quickstart_workspace_notifications(
+        @app.get(workspace_notifications_path, name="bootstrap_workspace_notifications")
+        async def bootstrap_workspace_notifications(
             request: Request,
             wsId: str,
             orm: ORM,
-        ) -> tuple[QuickstartNotification, ...]:
+        ) -> tuple[BootstrapNotification, ...]:
             _assert_workspace_access(request, wsId)
             return await _collect_workspace_notifications(orm, wsId)
 
-        @app.get(workspace_kanban_path, name="quickstart_workspace_kanban")
-        async def quickstart_workspace_kanban(
+        @app.get(workspace_kanban_path, name="bootstrap_workspace_kanban")
+        async def bootstrap_workspace_kanban(
             request: Request,
             wsId: str,
             orm: ORM,
-        ) -> QuickstartKanbanBoard:
+        ) -> BootstrapKanbanBoard:
             _assert_workspace_access(request, wsId)
             tenant_context = _resolve_workspace_context(wsId)
             return await _load_workspace_board(orm, wsId, tenant_context)
 
         @app.post(
             rbac_permission_sets_path,
-            name="quickstart_rbac_permission_sets_create",
+            name="bootstrap_rbac_permission_sets_create",
         )
-        async def quickstart_rbac_permission_sets_create(
+        async def bootstrap_rbac_permission_sets_create(
             request: Request,
             wsId: str,
             payload: PermissionSetCreate,
@@ -2009,14 +2009,14 @@ def attach_quickstart(
             return JSONResponse(to_builtins(result), status=int(Status.CREATED))
 
         _register_response_model(
-            quickstart_rbac_permission_sets_create,
+            bootstrap_rbac_permission_sets_create,
             status=int(Status.CREATED),
             model=PermissionSetRecord,
             description="Permission set created",
         )
 
-        @app.post(rbac_role_assign_path, name="quickstart_rbac_assign_role")
-        async def quickstart_rbac_assign_role(
+        @app.post(rbac_role_assign_path, name="bootstrap_rbac_assign_role")
+        async def bootstrap_rbac_assign_role(
             request: Request,
             wsId: str,
             roleId: str,
@@ -2033,8 +2033,8 @@ def attach_quickstart(
             )
             return JSONResponse(to_builtins(result))
 
-        @app.post(delegations_path, name="quickstart_delegations_grant")
-        async def quickstart_delegations_grant(
+        @app.post(delegations_path, name="bootstrap_delegations_grant")
+        async def bootstrap_delegations_grant(
             request: Request,
             payload: DelegationGrant,
             service: DelegationService,
@@ -2049,7 +2049,7 @@ def attach_quickstart(
             return JSONResponse(to_builtins(delegation), status=int(Status.CREATED))
 
         _register_response_model(
-            quickstart_delegations_grant,
+            bootstrap_delegations_grant,
             status=int(Status.CREATED),
             model=DelegationRecord,
             description="Delegation granted",
@@ -2058,9 +2058,9 @@ def attach_quickstart(
         @app.route(
             delegation_item_path,
             methods=("DELETE",),
-            name="quickstart_delegations_revoke",
+            name="bootstrap_delegations_revoke",
         )
-        async def quickstart_delegations_revoke(
+        async def bootstrap_delegations_revoke(
             request: Request,
             delegationId: str,
             service: DelegationService,
@@ -2074,14 +2074,14 @@ def attach_quickstart(
             )
             return Response(status=int(Status.NO_CONTENT))
 
-        @app.get(audit_logs_path, name="quickstart_audit_logs")
-        async def quickstart_audit_logs(
+        @app.get(audit_logs_path, name="bootstrap_audit_logs")
+        async def bootstrap_audit_logs(
             request: Request,
             wsId: str,
             service: AuditService,
         ) -> Response:
             _require_admin(request)
-            query = request.query(QuickstartAuditLogQuery)
+            query = request.query(BootstrapAuditLogQuery)
             page = await service.read(
                 tenant=request.tenant,
                 workspace_id=wsId,
@@ -2094,14 +2094,14 @@ def attach_quickstart(
             )
             return JSONResponse(to_builtins(page))
 
-        @app.get(audit_logs_export_path, name="quickstart_audit_logs_export")
-        async def quickstart_audit_logs_export(
+        @app.get(audit_logs_export_path, name="bootstrap_audit_logs_export")
+        async def bootstrap_audit_logs_export(
             request: Request,
             wsId: str,
             service: AuditService,
         ) -> Response:
             _require_admin(request)
-            query = request.query(QuickstartAuditLogQuery)
+            query = request.query(BootstrapAuditLogQuery)
             export = await service.export(
                 tenant=request.tenant,
                 workspace_id=wsId,
@@ -2123,14 +2123,14 @@ def attach_quickstart(
                 )
             return Response(status=int(Status.OK), headers=tuple(headers), body=export.body)
 
-        @app.get(billing_path, name="quickstart_admin_billing")
-        async def quickstart_admin_billing(request: Request, orm: ORM) -> Response:
+        @app.get(billing_path, name="bootstrap_admin_billing")
+        async def bootstrap_admin_billing(request: Request, orm: ORM) -> Response:
             _require_admin(request)
             records = await orm.admin.billing.list(order_by=("created_at desc",))
             return JSONResponse(tuple(to_builtins(record) for record in records))
 
-        @app.post(billing_path, name="quickstart_admin_create_billing")
-        async def quickstart_admin_create_billing(
+        @app.post(billing_path, name="bootstrap_admin_create_billing")
+        async def bootstrap_admin_create_billing(
             request: Request,
             payload: BillingCreateRequest,
             orm: ORM,
@@ -2159,38 +2159,38 @@ def attach_quickstart(
             return JSONResponse(record_payload, status=201)
 
         _register_response_model(
-            quickstart_admin_create_billing,
+            bootstrap_admin_create_billing,
             status=int(Status.CREATED),
             model=BillingRecord,
             description="Billing record created",
         )
 
-        @app.get(metrics_path, name="quickstart_admin_metrics")
-        async def quickstart_admin_metrics(request: Request, orm: ORM) -> Response:
+        @app.get(metrics_path, name="bootstrap_admin_metrics")
+        async def bootstrap_admin_metrics(request: Request, orm: ORM) -> Response:
             _require_admin(request)
             metrics = await admin_control.tenant_metrics(orm)
             return JSONResponse(metrics)
 
-        @app.get(diagnostics_path, name="quickstart_admin_diagnostics")
-        async def quickstart_admin_diagnostics(request: Request, orm: ORM) -> Response:
+        @app.get(diagnostics_path, name="bootstrap_admin_diagnostics")
+        async def bootstrap_admin_diagnostics(request: Request, orm: ORM) -> Response:
             _require_admin(request)
             diagnostics = await admin_control.system_diagnostics(orm)
             return JSONResponse(diagnostics)
 
-        @app.get(support_admin_path, name="quickstart_admin_support_tickets")
-        async def quickstart_admin_support_tickets(request: Request, orm: ORM) -> Response:
+        @app.get(support_admin_path, name="bootstrap_admin_support_tickets")
+        async def bootstrap_admin_support_tickets(request: Request, orm: ORM) -> Response:
             _require_admin(request)
             tickets = await orm.admin.support_tickets.list(order_by=("created_at desc",))
             return JSONResponse(tuple(to_builtins(ticket) for ticket in tickets))
 
         @app.post(
             support_admin_ticket_path,
-            name="quickstart_admin_support_ticket_update",
+            name="bootstrap_admin_support_ticket_update",
         )
-        async def quickstart_admin_support_ticket_update(
+        async def bootstrap_admin_support_ticket_update(
             request: Request,
             ticket_id: str,
-            payload: QuickstartSupportTicketUpdateRequest,
+            payload: BootstrapSupportTicketUpdateRequest,
             orm: ORM,
         ) -> Response:
             _require_admin(request)
@@ -2198,12 +2198,12 @@ def attach_quickstart(
                 ticket_id,
                 payload,
                 orm=orm,
-                actor=request.headers.get("x-mere-actor", "quickstart-admin"),
+                actor=request.headers.get("x-mere-actor", "bootstrap-admin"),
             )
             return JSONResponse(to_builtins(updated))
 
-        @app.get(support_tenant_path, name="quickstart_tenant_support_tickets")
-        async def quickstart_tenant_support_tickets(request: Request, orm: ORM) -> Response:
+        @app.get(support_tenant_path, name="bootstrap_tenant_support_tickets")
+        async def bootstrap_tenant_support_tickets(request: Request, orm: ORM) -> Response:
             if request.tenant.scope is TenantScope.ADMIN:
                 return JSONResponse(())
             tickets = await orm.tenants.support_tickets.list(
@@ -2212,10 +2212,10 @@ def attach_quickstart(
             )
             return JSONResponse(tuple(to_builtins(ticket) for ticket in tickets))
 
-        @app.post(support_tenant_path, name="quickstart_tenant_create_support_ticket")
-        async def quickstart_tenant_create_support_ticket(
+        @app.post(support_tenant_path, name="bootstrap_tenant_create_support_ticket")
+        async def bootstrap_tenant_create_support_ticket(
             request: Request,
-            payload: QuickstartSupportTicketRequest,
+            payload: BootstrapSupportTicketRequest,
             orm: ORM,
         ) -> Response:
             if request.tenant.scope is not TenantScope.TENANT:
@@ -2229,24 +2229,24 @@ def attach_quickstart(
             )
             return JSONResponse(to_builtins(ticket), status=201)
 
-        @app.get(tenants_path, name="quickstart_tenants")
-        async def quickstart_list_tenants(request: Request, orm: ORM) -> Response:
+        @app.get(tenants_path, name="bootstrap_tenants")
+        async def bootstrap_list_tenants(request: Request, orm: ORM) -> Response:
             if request.tenant.scope is TenantScope.ADMIN:
-                records = await orm.admin.quickstart_tenants.list(order_by=("slug",))
+                records = await orm.admin.bootstrap_tenants.list(order_by=("slug",))
             else:
-                record = await orm.admin.quickstart_tenants.get(filters={"slug": request.tenant.tenant})
+                record = await orm.admin.bootstrap_tenants.get(filters={"slug": request.tenant.tenant})
                 records = [] if record is None else [record]
             return JSONResponse(tuple(to_builtins(record) for record in records))
 
-        @app.post(tenants_path, name="quickstart_create_tenant")
-        async def quickstart_create_tenant(
+        @app.post(tenants_path, name="bootstrap_create_tenant")
+        async def bootstrap_create_tenant(
             request: Request,
-            payload: QuickstartTenantCreateRequest,
+            payload: BootstrapTenantCreateRequest,
             orm: ORM,
-            engine: QuickstartAuthEngine,
+            engine: BootstrapAuthEngine,
         ) -> Response:
             _require_admin(request)
-            actor = request.headers.get("x-mere-actor", "quickstart-admin")
+            actor = request.headers.get("x-mere-actor", "bootstrap-admin")
             record = await admin_control.create_tenant_from_inputs(
                 payload.slug,
                 payload.name,
@@ -2257,25 +2257,25 @@ def attach_quickstart(
             )
             return JSONResponse(to_builtins(record), status=201)
 
-        @app.get(chatops_settings_path, name="quickstart_admin_chatops_settings")
-        async def quickstart_admin_chatops_settings(
+        @app.get(chatops_settings_path, name="bootstrap_admin_chatops_settings")
+        async def bootstrap_admin_chatops_settings(
             request: Request,
         ) -> Response:
             _require_admin(request)
             settings = chatops_control.serialize_settings()
             return JSONResponse(settings)
 
-        @app.post(chatops_settings_path, name="quickstart_admin_update_chatops_settings")
-        async def quickstart_update_chatops_settings(
+        @app.post(chatops_settings_path, name="bootstrap_admin_update_chatops_settings")
+        async def bootstrap_update_chatops_settings(
             request: Request,
-            payload: QuickstartChatOpsSettings,
+            payload: BootstrapChatOpsSettings,
         ) -> Response:
             _require_admin(request)
             if payload.enabled and payload.webhook is None:
                 raise HTTPError(Status.BAD_REQUEST, {"detail": "webhook_required"})
             commands_iterable = payload.slash_commands or _default_slash_commands()
             normalized_commands = chatops_control.normalize_commands(commands_iterable)
-            settings = QuickstartChatOpsSettings(
+            settings = BootstrapChatOpsSettings(
                 enabled=payload.enabled,
                 webhook=payload.webhook,
                 notifications=payload.notifications,
@@ -2286,10 +2286,10 @@ def attach_quickstart(
             chatops_control.configure(settings)
             return JSONResponse(chatops_control.serialize_settings())
 
-        @app.post(chatops_slash_path, name="quickstart_chatops_slash")
-        async def quickstart_chatops_slash(
+        @app.post(chatops_slash_path, name="bootstrap_chatops_slash")
+        async def bootstrap_chatops_slash(
             request: Request,
-            payload: QuickstartSlashCommandInvocation,
+            payload: BootstrapSlashCommandInvocation,
         ) -> Response:
             settings = chatops_control.settings
             if not settings.enabled or settings.webhook is None:
@@ -2342,17 +2342,17 @@ def attach_quickstart(
     if CedarEngine not in providers:
         app.dependencies.provide(CedarEngine, lambda: CedarEngine(()))
 
-    @app.get(ping_path, name="quickstart_ping")
-    async def quickstart_ping() -> str:
+    @app.get(ping_path, name="bootstrap_ping")
+    async def bootstrap_ping() -> str:
         return "pong"
 
-    @app.get(openapi_path, name="quickstart_openapi")
-    async def quickstart_openapi() -> Response:
+    @app.get(openapi_path, name="bootstrap_openapi")
+    async def bootstrap_openapi() -> Response:
         spec = generate_openapi(app)
         return JSONResponse(spec)
 
-    @app.get(client_path, name="quickstart_client")
-    async def quickstart_client() -> Response:
+    @app.get(client_path, name="bootstrap_client")
+    async def bootstrap_client() -> Response:
         spec = generate_openapi(app)
         source = generate_typescript_client(spec)
         return Response(
@@ -2360,78 +2360,78 @@ def attach_quickstart(
             body=source.encode("utf-8"),
         )
 
-    @app.post(login_start_path, name="quickstart_login_start")
-    async def quickstart_login_start(
-        request: Request, payload: LoginStartRequest, engine: QuickstartAuthEngine
-    ) -> QuickstartLoginResponse:
+    @app.post(login_start_path, name="bootstrap_login_start")
+    async def bootstrap_login_start(
+        request: Request, payload: LoginStartRequest, engine: BootstrapAuthEngine
+    ) -> BootstrapLoginResponse:
         result = await engine.start(request.tenant, email=payload.email)
         return result
 
-    @app.post(passkey_path, name="quickstart_login_passkey")
-    async def quickstart_login_passkey(
-        request: Request, payload: PasskeyAttempt, engine: QuickstartAuthEngine
-    ) -> QuickstartLoginResponse:
+    @app.post(passkey_path, name="bootstrap_login_passkey")
+    async def bootstrap_login_passkey(
+        request: Request, payload: PasskeyAttempt, engine: BootstrapAuthEngine
+    ) -> BootstrapLoginResponse:
         result = await engine.passkey(request.tenant, payload)
         return result
 
-    @app.post(password_path, name="quickstart_login_password")
-    async def quickstart_login_password(
-        request: Request, payload: PasswordAttempt, engine: QuickstartAuthEngine
-    ) -> QuickstartLoginResponse:
+    @app.post(password_path, name="bootstrap_login_password")
+    async def bootstrap_login_password(
+        request: Request, payload: PasswordAttempt, engine: BootstrapAuthEngine
+    ) -> BootstrapLoginResponse:
         result = await engine.password(request.tenant, payload)
         return result
 
-    @app.post(mfa_path, name="quickstart_login_mfa")
-    async def quickstart_login_mfa(
-        request: Request, payload: MfaAttempt, engine: QuickstartAuthEngine
-    ) -> QuickstartLoginResponse:
+    @app.post(mfa_path, name="bootstrap_login_mfa")
+    async def bootstrap_login_mfa(
+        request: Request, payload: MfaAttempt, engine: BootstrapAuthEngine
+    ) -> BootstrapLoginResponse:
         result = await engine.mfa(request.tenant, payload)
         return result
 
 
 __all__ = [
-    "DEFAULT_QUICKSTART_AUTH",
+    "DEFAULT_BOOTSTRAP_AUTH",
     "BillingCreateRequest",
+    "BootstrapAdminControlPlane",
+    "BootstrapAdminRealm",
+    "BootstrapAdminUserRecord",
+    "BootstrapAuthConfig",
+    "BootstrapAuthEngine",
+    "BootstrapChatOpsControlPlane",
+    "BootstrapChatOpsNotificationChannels",
+    "BootstrapChatOpsSettings",
+    "BootstrapKanbanBoard",
+    "BootstrapKanbanCard",
+    "BootstrapKanbanColumn",
+    "BootstrapLoginResponse",
+    "BootstrapNotification",
+    "BootstrapPasskey",
+    "BootstrapPasskeyRecord",
+    "BootstrapRepository",
+    "BootstrapSeedStateRecord",
+    "BootstrapSeeder",
+    "BootstrapSession",
+    "BootstrapSlashCommand",
+    "BootstrapSlashCommandInvocation",
+    "BootstrapSsoProvider",
+    "BootstrapSupportTicketRecord",
+    "BootstrapSupportTicketRequest",
+    "BootstrapSupportTicketUpdateLog",
+    "BootstrapSupportTicketUpdateRequest",
+    "BootstrapTenant",
+    "BootstrapTenantCreateRequest",
+    "BootstrapTenantRecord",
+    "BootstrapTenantSupportTicketRecord",
+    "BootstrapTenantUserRecord",
+    "BootstrapTrialExtensionRecord",
+    "BootstrapUser",
+    "BootstrapWorkspaceSettings",
     "LoginStep",
     "MfaAttempt",
     "PasskeyAttempt",
     "PasswordAttempt",
-    "QuickstartAdminControlPlane",
-    "QuickstartAdminRealm",
-    "QuickstartAdminUserRecord",
-    "QuickstartAuthConfig",
-    "QuickstartAuthEngine",
-    "QuickstartChatOpsControlPlane",
-    "QuickstartChatOpsNotificationChannels",
-    "QuickstartChatOpsSettings",
-    "QuickstartKanbanBoard",
-    "QuickstartKanbanCard",
-    "QuickstartKanbanColumn",
-    "QuickstartLoginResponse",
-    "QuickstartNotification",
-    "QuickstartPasskey",
-    "QuickstartPasskeyRecord",
-    "QuickstartRepository",
-    "QuickstartSeedStateRecord",
-    "QuickstartSeeder",
-    "QuickstartSession",
-    "QuickstartSlashCommand",
-    "QuickstartSlashCommandInvocation",
-    "QuickstartSsoProvider",
-    "QuickstartSupportTicketRecord",
-    "QuickstartSupportTicketRequest",
-    "QuickstartSupportTicketUpdateLog",
-    "QuickstartSupportTicketUpdateRequest",
-    "QuickstartTenant",
-    "QuickstartTenantCreateRequest",
-    "QuickstartTenantRecord",
-    "QuickstartTenantSupportTicketRecord",
-    "QuickstartTenantUserRecord",
-    "QuickstartTrialExtensionRecord",
-    "QuickstartUser",
-    "QuickstartWorkspaceSettings",
-    "attach_quickstart",
+    "attach_bootstrap",
+    "bootstrap_migrations",
     "ensure_tenant_schemas",
-    "load_quickstart_auth_from_env",
-    "quickstart_migrations",
+    "load_bootstrap_auth_from_env",
 ]

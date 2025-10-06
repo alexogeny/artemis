@@ -11,7 +11,7 @@ applications with declarative routing, structured observability, and a fully asy
 - **Declarative routing** – the `@route`, `@get`, and `@post` decorators expose typed request/response
   surfaces that stay in sync with generated OpenAPI contracts and the TypeScript client.
 - **Authentication orchestration** – plug-and-play passkey, password, MFA, and SSO flows managed through the
-  quickstart utilities or your own domain services.
+  bootstrap utilities or your own domain services.
 - **Observability hooks** – consistent tracing, metrics, and audit logging surfaces ready for the platform of
   your choice.
 - **First-class async** – every subsystem (database, background jobs, WebSockets, streaming events) is built on

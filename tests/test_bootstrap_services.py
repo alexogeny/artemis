@@ -7,11 +7,11 @@ from typing import Any, Iterable, cast
 import pytest
 from msgspec import Struct, structs
 
-from mere.domain.quickstart_services import (
-    QuickstartAuditService,
-    QuickstartDelegationService,
-    QuickstartRbacService,
-    QuickstartTileService,
+from mere.domain.bootstrap_services import (
+    BootstrapAuditService,
+    BootstrapDelegationService,
+    BootstrapRbacService,
+    BootstrapTileService,
     build_cedar_engine,
 )
 from mere.domain.services import (
@@ -188,7 +188,7 @@ async def test_tile_service_crud_cycle_covers_admin_and_tenant_scopes(
     tiles = InMemoryTable(DashboardTile)
     permissions = InMemoryTable(DashboardTilePermission)
     orm = FakeORM(tenants={"dashboard_tiles": tiles, "dashboard_tile_permissions": permissions}, admin={})
-    service = QuickstartTileService(orm)  # type: ignore[arg-type]
+    service = BootstrapTileService(orm)  # type: ignore[arg-type]
 
     payload = TileCreate(
         title="Revenue",
@@ -322,7 +322,7 @@ async def test_tile_service_list_and_get_include_permissions(
     tiles = InMemoryTable(DashboardTile)
     permissions = InMemoryTable(DashboardTilePermission)
     orm = FakeORM(tenants={"dashboard_tiles": tiles, "dashboard_tile_permissions": permissions}, admin={})
-    service = QuickstartTileService(orm)  # type: ignore[arg-type]
+    service = BootstrapTileService(orm)  # type: ignore[arg-type]
 
     record = DashboardTile(
         workspace_id=tenant_alpha.tenant,
@@ -366,7 +366,7 @@ async def test_rbac_service_creates_roles_and_assigns_users(
         },
         admin={"roles": roles, "permissions": permissions},
     )
-    service = QuickstartRbacService(orm)  # type: ignore[arg-type]
+    service = BootstrapRbacService(orm)  # type: ignore[arg-type]
 
     created = await service.create_permission_set(
         tenant=admin_ctx,
@@ -435,7 +435,7 @@ async def test_delegation_service_grant_merge_revoke_and_resolution(
         admin={},
     )
     clock = TickingClock(dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc))
-    service = QuickstartDelegationService(orm, clock=clock.now)  # type: ignore[arg-type]
+    service = BootstrapDelegationService(orm, clock=clock.now)  # type: ignore[arg-type]
     grantor_principal = CedarEntity(type="User", id="grantor")
 
     with pytest.raises(HTTPError) as window_error:
@@ -668,7 +668,7 @@ async def test_delegation_service_enforces_actor_authorization(
         admin={},
     )
     clock = TickingClock(dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc))
-    service = QuickstartDelegationService(orm, clock=clock.now)  # type: ignore[arg-type]
+    service = BootstrapDelegationService(orm, clock=clock.now)  # type: ignore[arg-type]
 
     await permission_sets.create(
         WorkspacePermissionSet(
@@ -764,7 +764,7 @@ async def test_delegation_service_enforces_actor_authorization(
 async def test_audit_service_filters_and_exports(admin_ctx: TenantContext, tenant_alpha: TenantContext) -> None:
     audit_log = InMemoryTable(AuditRow)
     orm = FakeORM(tenants={"audit_log": audit_log}, admin={})
-    service = QuickstartAuditService(orm)  # type: ignore[arg-type]
+    service = BootstrapAuditService(orm)  # type: ignore[arg-type]
 
     base = dt.datetime(2024, 5, 1, tzinfo=dt.timezone.utc)
     await audit_log.create(

@@ -12,8 +12,44 @@ import msgspec
 import pytest
 from msgspec import structs
 
-import mere.quickstart as quickstart
+import mere.bootstrap as bootstrap
 from mere import AppConfig, MereApp, PasskeyManager, SessionLevel, TestClient
+from mere.bootstrap import (
+    DEFAULT_BOOTSTRAP_AUTH,
+    BootstrapAdminControlPlane,
+    BootstrapAdminRealm,
+    BootstrapAdminUserRecord,
+    BootstrapAuthConfig,
+    BootstrapAuthEngine,
+    BootstrapChatOpsControlPlane,
+    BootstrapChatOpsSettings,
+    BootstrapKanbanCard,
+    BootstrapPasskey,
+    BootstrapPasskeyRecord,
+    BootstrapRepository,
+    BootstrapSeeder,
+    BootstrapSeedStateRecord,
+    BootstrapSlashCommand,
+    BootstrapSlashCommandInvocation,
+    BootstrapSsoProvider,
+    BootstrapSupportTicketRecord,
+    BootstrapSupportTicketRequest,
+    BootstrapSupportTicketUpdateRequest,
+    BootstrapTenant,
+    BootstrapTenantRecord,
+    BootstrapTenantSupportTicketRecord,
+    BootstrapTenantUserRecord,
+    BootstrapTrialExtensionRecord,
+    BootstrapUser,
+    LoginStep,
+    MfaAttempt,
+    PasskeyAttempt,
+    PasswordAttempt,
+    attach_bootstrap,
+    bootstrap_migrations,
+    ensure_tenant_schemas,
+    load_bootstrap_auth_from_env,
+)
 from mere.chatops import (
     ChatMessage,
     ChatOpsCommandBinding,
@@ -53,42 +89,6 @@ from mere.models import (
     SupportTicketUpdate,
 )
 from mere.orm import ORM
-from mere.quickstart import (
-    DEFAULT_QUICKSTART_AUTH,
-    LoginStep,
-    MfaAttempt,
-    PasskeyAttempt,
-    PasswordAttempt,
-    QuickstartAdminControlPlane,
-    QuickstartAdminRealm,
-    QuickstartAdminUserRecord,
-    QuickstartAuthConfig,
-    QuickstartAuthEngine,
-    QuickstartChatOpsControlPlane,
-    QuickstartChatOpsSettings,
-    QuickstartKanbanCard,
-    QuickstartPasskey,
-    QuickstartPasskeyRecord,
-    QuickstartRepository,
-    QuickstartSeeder,
-    QuickstartSeedStateRecord,
-    QuickstartSlashCommand,
-    QuickstartSlashCommandInvocation,
-    QuickstartSsoProvider,
-    QuickstartSupportTicketRecord,
-    QuickstartSupportTicketRequest,
-    QuickstartSupportTicketUpdateRequest,
-    QuickstartTenant,
-    QuickstartTenantRecord,
-    QuickstartTenantSupportTicketRecord,
-    QuickstartTenantUserRecord,
-    QuickstartTrialExtensionRecord,
-    QuickstartUser,
-    attach_quickstart,
-    ensure_tenant_schemas,
-    load_quickstart_auth_from_env,
-    quickstart_migrations,
-)
 from mere.rbac import CedarEngine
 from mere.requests import Request
 from mere.responses import JSONResponse, Response
@@ -103,9 +103,8 @@ def _assert_error_detail(exc: pytest.ExceptionInfo[BaseException], code: str) ->
 
 
 @pytest.mark.asyncio
-async def test_attach_quickstart_routes_dev_environment() -> None:
+async def test_bootstrap_routes_dev_environment() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
-    attach_quickstart(app)
 
     async with TestClient(app) as client:
         for tenant in ("acme", "beta", app.config.admin_subdomain):
@@ -124,21 +123,22 @@ async def test_attach_quickstart_routes_dev_environment() -> None:
             assert "export class MereClient" in client_ts.body.decode()
 
 
-def test_attach_quickstart_rejects_production() -> None:
-    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")))
+def test_bootstrap_rejects_production() -> None:
     with pytest.raises(RuntimeError):
-        attach_quickstart(app, environment="production")
+        MereApp(
+            AppConfig(site="demo", domain="example.com", allowed_tenants=("acme", "beta")),
+            bootstrap_environment="production",
+        )
 
 
-def test_attach_quickstart_updates_allowed_tenants_from_config() -> None:
-    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=()))
-    config = QuickstartAuthConfig(
+def test_bootstrap_updates_allowed_tenants_from_config() -> None:
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="gamma",
                 name="Gamma Corp",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_gamma_owner",
                         email="owner@gamma.test",
                         password="gamma-pass",
@@ -146,18 +146,23 @@ def test_attach_quickstart_updates_allowed_tenants_from_config() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
     )
 
-    attach_quickstart(app, auth_config=config)
+    app = MereApp(
+        AppConfig(site="demo", domain="local.test", allowed_tenants=()),
+        bootstrap_auth=config,
+    )
 
     assert "gamma" in app.tenant_resolver.allowed_tenants
 
 
 @pytest.mark.asyncio
-async def test_attach_quickstart_with_root_base_path() -> None:
-    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
-    attach_quickstart(app, base_path="")
+async def test_bootstrap_with_root_base_path() -> None:
+    app = MereApp(
+        AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")),
+        bootstrap_base_path="",
+    )
 
     async with TestClient(app) as client:
         response = await client.get("/ping", tenant="acme")
@@ -166,9 +171,8 @@ async def test_attach_quickstart_with_root_base_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_sso_login_hint() -> None:
+async def test_bootstrap_sso_login_hint() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
-    attach_quickstart(app)
 
     async with TestClient(app) as client:
         response = await client.post(
@@ -184,9 +188,8 @@ async def test_quickstart_sso_login_hint() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_passkey_flow_with_mfa() -> None:
+async def test_bootstrap_passkey_flow_with_mfa() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
-    attach_quickstart(app)
 
     async with TestClient(app) as client:
         start = await client.post(
@@ -202,7 +205,7 @@ async def test_quickstart_passkey_flow_with_mfa() -> None:
         challenge = start_payload["challenge"]
         credential_id = start_payload["credential_ids"][0]
 
-        user = DEFAULT_QUICKSTART_AUTH.tenants[1].users[0]
+        user = DEFAULT_BOOTSTRAP_AUTH.tenants[1].users[0]
         passkey_cfg = user.passkeys[0]
         manager = PasskeyManager()
         demo_passkey = manager.register(
@@ -241,14 +244,16 @@ async def test_quickstart_passkey_flow_with_mfa() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_login_flow_times_out() -> None:
-    config = QuickstartAuthConfig(
-        tenants=DEFAULT_QUICKSTART_AUTH.tenants,
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+async def test_bootstrap_login_flow_times_out() -> None:
+    config = BootstrapAuthConfig(
+        tenants=DEFAULT_BOOTSTRAP_AUTH.tenants,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
         flow_ttl_seconds=0,
     )
-    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)))
-    attach_quickstart(app, auth_config=config)
+    app = MereApp(
+        AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)),
+        bootstrap_auth=config,
+    )
 
     async with TestClient(app) as client:
         start = await client.post(
@@ -277,14 +282,16 @@ async def test_quickstart_login_flow_times_out() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_login_flow_locks_after_failures() -> None:
-    config = QuickstartAuthConfig(
-        tenants=DEFAULT_QUICKSTART_AUTH.tenants,
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+async def test_bootstrap_login_flow_locks_after_failures() -> None:
+    config = BootstrapAuthConfig(
+        tenants=DEFAULT_BOOTSTRAP_AUTH.tenants,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
         max_attempts=2,
     )
-    app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)))
-    attach_quickstart(app, auth_config=config)
+    app = MereApp(
+        AppConfig(site="demo", domain="local.test", allowed_tenants=("beta",)),
+        bootstrap_auth=config,
+    )
 
     async with TestClient(app) as client:
         start = await client.post(
@@ -315,8 +322,8 @@ async def test_quickstart_login_flow_locks_after_failures() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_prunes_expired_flows() -> None:
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+async def test_bootstrap_engine_prunes_expired_flows() -> None:
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     tenant = TenantContext(
         tenant="beta",
         site="demo",
@@ -335,11 +342,10 @@ async def test_quickstart_engine_prunes_expired_flows() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_password_flow_for_admin() -> None:
+async def test_bootstrap_password_flow_for_admin() -> None:
     app = MereApp(AppConfig(site="demo", domain="local.test", allowed_tenants=("acme", "beta")))
-    attach_quickstart(app)
 
-    admin = DEFAULT_QUICKSTART_AUTH.admin.users[0]
+    admin = DEFAULT_BOOTSTRAP_AUTH.admin.users[0]
 
     async with TestClient(app) as client:
         start = await client.post(
@@ -375,24 +381,24 @@ async def test_quickstart_password_flow_for_admin() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_migrations_create_tables() -> None:
+async def test_bootstrap_migrations_create_tables() -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     tenant_ctx = TenantContext(tenant="acme", site="demo", domain="local.test", scope=TenantScope.TENANT)
 
-    migrations = quickstart_migrations()
+    migrations = bootstrap_migrations()
     runner = MigrationRunner(database, migrations=migrations, tenant_provider=lambda: (tenant_ctx,))
 
     await ensure_tenant_schemas(database, [tenant_ctx])
     await runner.run_all(tenants=[tenant_ctx])
 
     statements = [sql for kind, sql, *_ in connection.calls if kind == "execute"]
-    assert any("CREATE TABLE" in sql and "quickstart_tenants" in sql for sql in statements)
-    assert any("CREATE TABLE" in sql and "quickstart_users" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "bootstrap_tenants" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "bootstrap_users" in sql for sql in statements)
     assert any("CREATE TABLE" in sql and '"billing"' in sql for sql in statements)
-    assert any("CREATE TABLE" in sql and "quickstart_trial_extensions" in sql for sql in statements)
+    assert any("CREATE TABLE" in sql and "bootstrap_trial_extensions" in sql for sql in statements)
     assert any("CREATE TABLE" in sql and "dashboard_tiles" in sql for sql in statements)
     assert any("CREATE TABLE" in sql and "dashboard_tile_permissions" in sql for sql in statements)
     assert any("CREATE TABLE" in sql and "workspace_permission_sets" in sql for sql in statements)
@@ -400,10 +406,10 @@ async def test_quickstart_migrations_create_tables() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_bootstrap_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -411,29 +417,29 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
     async def _noop_apply(
-        self: quickstart.QuickstartSeeder,
-        config: QuickstartAuthConfig,
+        self: bootstrap.BootstrapSeeder,
+        config: BootstrapAuthConfig,
         *,
         tenants: Mapping[str, TenantContext],
     ) -> bool:
         return False
 
-    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
+    monkeypatch.setattr(bootstrap.BootstrapSeeder, "apply", _noop_apply)
 
     async def _noop_run_all(
-        self: quickstart.MigrationRunner,
+        self: bootstrap.MigrationRunner,
         *,
         tenants: Sequence[TenantContext],
     ) -> None:
         return None
 
-    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
+    monkeypatch.setattr(bootstrap.MigrationRunner, "run_all", _noop_run_all)
 
-    empty_auth = QuickstartAuthConfig(tenants=(), admin=QuickstartAdminRealm(users=()))
-    attach_quickstart(app, auth_config=empty_auth)
+    empty_auth = BootstrapAuthConfig(tenants=(), admin=BootstrapAdminRealm(users=()))
+    attach_bootstrap(app, auth_config=empty_auth)
 
     orm = cast(ORM, app.orm)
     cycle_start = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
@@ -518,10 +524,10 @@ async def test_quickstart_admin_billing_routes(monkeypatch: pytest.MonkeyPatch) 
 
 
 @pytest.mark.asyncio
-async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_bootstrap_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -529,37 +535,37 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
     async def _noop_apply(
-        self: quickstart.QuickstartSeeder,
-        config: QuickstartAuthConfig,
+        self: bootstrap.BootstrapSeeder,
+        config: BootstrapAuthConfig,
         *,
         tenants: Mapping[str, TenantContext],
     ) -> bool:
         return False
 
-    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
+    monkeypatch.setattr(bootstrap.BootstrapSeeder, "apply", _noop_apply)
 
     async def _noop_run_all(
-        self: quickstart.MigrationRunner,
+        self: bootstrap.MigrationRunner,
         *,
         tenants: Sequence[TenantContext],
     ) -> None:
         return None
 
-    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
+    monkeypatch.setattr(bootstrap.MigrationRunner, "run_all", _noop_run_all)
 
-    empty_auth = QuickstartAuthConfig(tenants=(), admin=QuickstartAdminRealm(users=()))
-    attach_quickstart(app, auth_config=empty_auth)
+    empty_auth = BootstrapAuthConfig(tenants=(), admin=BootstrapAdminRealm(users=()))
+    attach_bootstrap(app, auth_config=empty_auth)
 
     orm = cast(ORM, app.orm)
-    acme_record = QuickstartTenantRecord(slug="acme", name="Acme Rockets")
+    acme_record = BootstrapTenantRecord(slug="acme", name="Acme Rockets")
     connection.queue_result([msgspec.to_builtins(acme_record)])
-    await orm.admin.quickstart_tenants.create(acme_record)
-    beta_record = QuickstartTenantRecord(slug="beta", name="Beta Industries")
+    await orm.admin.bootstrap_tenants.create(acme_record)
+    beta_record = BootstrapTenantRecord(slug="beta", name="Beta Industries")
     connection.queue_result([msgspec.to_builtins(beta_record)])
-    await orm.admin.quickstart_tenants.create(beta_record)
+    await orm.admin.bootstrap_tenants.create(beta_record)
 
     async with TestClient(app) as client:
         connection.queue_result(
@@ -588,7 +594,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         beta_payload = json.loads(beta_response.body.decode())
         assert beta_payload[0]["slug"] == "beta"
 
-        gamma_created = QuickstartTenantRecord(
+        gamma_created = BootstrapTenantRecord(
             id="tenant_gamma",
             slug="gamma",
             name="Gamma Co",
@@ -597,13 +603,13 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
         )
 
         async def _stub_create(
-            data: Mapping[str, object] | QuickstartTenantRecord,
+            data: Mapping[str, object] | BootstrapTenantRecord,
             *,
             tenant: TenantContext | None = None,
-        ) -> QuickstartTenantRecord:
+        ) -> BootstrapTenantRecord:
             return gamma_created
 
-        monkeypatch.setattr(orm.admin.quickstart_tenants, "create", _stub_create)
+        monkeypatch.setattr(orm.admin.bootstrap_tenants, "create", _stub_create)
 
         connection.queue_result([])
         create_response = await client.post(
@@ -636,7 +642,7 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
             ),
         )
         scope = app.dependencies.scope(scope_request)
-        engine = await scope.get(QuickstartAuthEngine)
+        engine = await scope.get(BootstrapAuthEngine)
         assert any(tenant.slug == "gamma" for tenant in engine.config.tenants)
 
         denied_response = await client.post(
@@ -685,12 +691,12 @@ async def test_quickstart_tenant_routes(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.asyncio
-async def test_quickstart_chatops_configuration_and_slash_commands(
+async def test_bootstrap_chatops_configuration_and_slash_commands(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -698,7 +704,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
     class RecordingChatOpsService(ChatOpsService):
         def __init__(
@@ -719,46 +725,46 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
             self.sent.append((tenant, message))
 
     async def _noop_apply(
-        self: quickstart.QuickstartSeeder,
-        config: QuickstartAuthConfig,
+        self: bootstrap.BootstrapSeeder,
+        config: BootstrapAuthConfig,
         *,
         tenants: Mapping[str, TenantContext],
     ) -> bool:
         return False
 
     async def _noop_run_all(
-        self: quickstart.MigrationRunner,
+        self: bootstrap.MigrationRunner,
         *,
         tenants: Sequence[TenantContext],
     ) -> None:
         return None
 
-    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
-    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
-    monkeypatch.setattr(quickstart, "ChatOpsService", RecordingChatOpsService)
+    monkeypatch.setattr(bootstrap.BootstrapSeeder, "apply", _noop_apply)
+    monkeypatch.setattr(bootstrap.MigrationRunner, "run_all", _noop_run_all)
+    monkeypatch.setattr(bootstrap, "ChatOpsService", RecordingChatOpsService)
 
-    attach_quickstart(app)
+    attach_bootstrap(app)
     orm = cast(ORM, app.orm)
 
-    created_tenants: dict[str, QuickstartTenantRecord] = {}
+    created_tenants: dict[str, BootstrapTenantRecord] = {}
 
     async def _stub_get(
         *,
         filters: Mapping[str, object] | None = None,
         tenant: TenantContext | None = None,
-    ) -> QuickstartTenantRecord | None:
+    ) -> BootstrapTenantRecord | None:
         slug = cast(str | None, (filters or {}).get("slug"))
         if slug is None:
             return None
         return created_tenants.get(slug)
 
     async def _stub_create(
-        data: Mapping[str, object] | QuickstartTenantRecord,
+        data: Mapping[str, object] | BootstrapTenantRecord,
         *,
         tenant: TenantContext | None = None,
-    ) -> QuickstartTenantRecord:
+    ) -> BootstrapTenantRecord:
         if isinstance(data, Mapping):
-            record = QuickstartTenantRecord(
+            record = BootstrapTenantRecord(
                 slug=cast(str, data["slug"]),
                 name=cast(str, data["name"]),
             )
@@ -767,35 +773,35 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         created_tenants[record.slug] = record
         return record
 
-    monkeypatch.setattr(orm.admin.quickstart_tenants, "get", _stub_get)
-    monkeypatch.setattr(orm.admin.quickstart_tenants, "create", _stub_create)
+    monkeypatch.setattr(orm.admin.bootstrap_tenants, "get", _stub_get)
+    monkeypatch.setattr(orm.admin.bootstrap_tenants, "create", _stub_create)
 
-    recorded_extensions: list[quickstart.QuickstartTrialExtensionRecord] = []
+    recorded_extensions: list[bootstrap.BootstrapTrialExtensionRecord] = []
 
     async def _stub_extension_create(
-        record: quickstart.QuickstartTrialExtensionRecord,
+        record: bootstrap.BootstrapTrialExtensionRecord,
         *,
         tenant: TenantContext | None = None,
-    ) -> quickstart.QuickstartTrialExtensionRecord:
+    ) -> bootstrap.BootstrapTrialExtensionRecord:
         recorded_extensions.append(record)
         return record
 
     monkeypatch.setattr(
-        orm.admin.quickstart_trial_extensions,
+        orm.admin.bootstrap_trial_extensions,
         "create",
         _stub_extension_create,
     )
 
-    admin_support_tickets: dict[str, quickstart.QuickstartSupportTicketRecord] = {}
-    tenant_support_tickets: defaultdict[str, dict[str, quickstart.QuickstartTenantSupportTicketRecord]] = defaultdict(
+    admin_support_tickets: dict[str, bootstrap.BootstrapSupportTicketRecord] = {}
+    tenant_support_tickets: defaultdict[str, dict[str, bootstrap.BootstrapTenantSupportTicketRecord]] = defaultdict(
         dict
     )
 
     async def _admin_support_create(
-        record: quickstart.QuickstartSupportTicketRecord,
+        record: bootstrap.BootstrapSupportTicketRecord,
         *,
         tenant: TenantContext | None = None,
-    ) -> quickstart.QuickstartSupportTicketRecord:
+    ) -> bootstrap.BootstrapSupportTicketRecord:
         admin_support_tickets[record.id] = record
         return record
 
@@ -803,7 +809,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         *,
         filters: Mapping[str, object] | None = None,
         tenant: TenantContext | None = None,
-    ) -> quickstart.QuickstartSupportTicketRecord | None:
+    ) -> bootstrap.BootstrapSupportTicketRecord | None:
         if not filters:
             return None
         ticket_id = cast(str | None, filters.get("id"))
@@ -815,7 +821,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         *,
         order_by: Sequence[str] | tuple[str, ...] = (),
         tenant: TenantContext | None = None,
-    ) -> list[quickstart.QuickstartSupportTicketRecord]:
+    ) -> list[bootstrap.BootstrapSupportTicketRecord]:
         tickets = list(admin_support_tickets.values())
         if order_by:
             field_spec = order_by[0]
@@ -829,21 +835,21 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         filters: Mapping[str, object] | None = None,
         values: Mapping[str, object],
         tenant: TenantContext | None = None,
-    ) -> quickstart.QuickstartSupportTicketRecord:
+    ) -> bootstrap.BootstrapSupportTicketRecord:
         ticket_id = cast(str, (filters or {}).get("id"))
         existing = admin_support_tickets[ticket_id]
         data = msgspec.to_builtins(existing)
         data.update(values)
-        updated = msgspec.convert(data, type=quickstart.QuickstartSupportTicketRecord)
+        updated = msgspec.convert(data, type=bootstrap.BootstrapSupportTicketRecord)
         admin_support_tickets[ticket_id] = updated
         return updated
 
     async def _tenant_support_create(
-        data: quickstart.QuickstartTenantSupportTicketRecord | None = None,
+        data: bootstrap.BootstrapTenantSupportTicketRecord | None = None,
         *,
         tenant: TenantContext,
-        model: quickstart.QuickstartTenantSupportTicketRecord | None = None,
-    ) -> quickstart.QuickstartTenantSupportTicketRecord:
+        model: bootstrap.BootstrapTenantSupportTicketRecord | None = None,
+    ) -> bootstrap.BootstrapTenantSupportTicketRecord:
         entry = model or data
         assert entry is not None
         tenant_support_tickets[tenant.tenant][entry.admin_ticket_id] = entry
@@ -853,7 +859,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         *,
         filters: Mapping[str, object] | None = None,
         tenant: TenantContext,
-    ) -> quickstart.QuickstartTenantSupportTicketRecord | None:
+    ) -> bootstrap.BootstrapTenantSupportTicketRecord | None:
         if not filters:
             return None
         ticket_id = cast(str | None, filters.get("admin_ticket_id"))
@@ -865,7 +871,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         *,
         tenant: TenantContext,
         order_by: Sequence[str] | tuple[str, ...] = (),
-    ) -> list[quickstart.QuickstartTenantSupportTicketRecord]:
+    ) -> list[bootstrap.BootstrapTenantSupportTicketRecord]:
         tickets = list(tenant_support_tickets[tenant.tenant].values())
         if order_by:
             field_spec = order_by[0]
@@ -879,14 +885,14 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         filters: Mapping[str, object] | None = None,
         values: Mapping[str, object],
         tenant: TenantContext,
-    ) -> quickstart.QuickstartTenantSupportTicketRecord:
+    ) -> bootstrap.BootstrapTenantSupportTicketRecord:
         ticket_id = cast(str, (filters or {}).get("admin_ticket_id"))
         existing = tenant_support_tickets[tenant.tenant][ticket_id]
         data = msgspec.to_builtins(existing)
         data.update(values)
         updated = msgspec.convert(
             data,
-            type=quickstart.QuickstartTenantSupportTicketRecord,
+            type=bootstrap.BootstrapTenantSupportTicketRecord,
         )
         tenant_support_tickets[tenant.tenant][ticket_id] = updated
         return updated
@@ -1067,7 +1073,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
             "/__mere/chatops/slash",
             tenant=admin,
             json={
-                "command": "/quickstart-create-tenant",
+                "command": "/bootstrap-create-tenant",
                 "text": "slug=sigma name=Sigma",
                 "user_id": "U123",
                 "user_name": "demo",
@@ -1655,7 +1661,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
             "/__mere/chatops/slash",
             tenant=admin,
             json={
-                "command": "/quickstart-create-tenant",
+                "command": "/bootstrap-create-tenant",
                 "text": "slug=omega name=Omega",
                 "user_id": "U123",
                 "user_name": "demo",
@@ -1679,7 +1685,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
         assert reenable_integration.status == Status.OK
         commands_payload = json.loads(reenable_integration.body.decode())["slash_commands"]
 
-        create_binding = app.chatops_commands.binding_by_name("quickstart.chatops.create_tenant")
+        create_binding = app.chatops_commands.binding_by_name("bootstrap.chatops.create_tenant")
 
         async def response_handler(context: ChatOpsCommandContext) -> Response:
             return JSONResponse(
@@ -1702,7 +1708,7 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
             "/__mere/chatops/slash",
             tenant=admin,
             json={
-                "command": "/quickstart-create-tenant",
+                "command": "/bootstrap-create-tenant",
                 "text": "slug=psi name=Psi",
                 "user_id": "U123",
                 "user_name": "demo",
@@ -1715,12 +1721,12 @@ async def test_quickstart_chatops_configuration_and_slash_commands(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_admin_support_ticket_update_branches(
+async def test_bootstrap_admin_support_ticket_update_branches(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -1728,16 +1734,16 @@ async def test_quickstart_admin_support_ticket_update_branches(
         allowed_tenants=("acme",),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
-    settings = QuickstartChatOpsSettings(
+    settings = BootstrapChatOpsSettings(
         enabled=True,
         webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
     )
-    chatops_control = QuickstartChatOpsControlPlane(
+    chatops_control = BootstrapChatOpsControlPlane(
         app,
         settings,
-        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+        command_pattern=bootstrap._TENANT_SLUG_PATTERN,
     )
 
     async def noop_send(self: ChatOpsService, tenant: TenantContext, message: ChatMessage) -> None:
@@ -1746,13 +1752,13 @@ async def test_quickstart_admin_support_ticket_update_branches(
     monkeypatch.setattr(ChatOpsService, "send", noop_send, raising=False)
     chatops_control.configure(settings)
 
-    ticket = QuickstartSupportTicketRecord(
+    ticket = BootstrapSupportTicketRecord(
         tenant_slug="acme",
         kind=SupportTicketKind.ISSUE,
         subject="Login",
         message="Cannot login",
     )
-    tenant_ticket = QuickstartTenantSupportTicketRecord(
+    tenant_ticket = BootstrapTenantSupportTicketRecord(
         admin_ticket_id=ticket.id,
         kind=SupportTicketKind.ISSUE,
         subject=ticket.subject,
@@ -1761,11 +1767,11 @@ async def test_quickstart_admin_support_ticket_update_branches(
 
     class AdminSupportStore:
         def __init__(self) -> None:
-            self.records: dict[str, QuickstartSupportTicketRecord] = {ticket.id: ticket}
+            self.records: dict[str, BootstrapSupportTicketRecord] = {ticket.id: ticket}
 
         async def get(
             self, *, filters: Mapping[str, object] | None = None, tenant: TenantContext | None = None
-        ) -> QuickstartSupportTicketRecord | None:
+        ) -> BootstrapSupportTicketRecord | None:
             if not filters:
                 return None
             ticket_id = cast(str | None, filters.get("id"))
@@ -1778,7 +1784,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
             *,
             filters: Mapping[str, object],
             values: Mapping[str, object],
-        ) -> QuickstartSupportTicketRecord:
+        ) -> BootstrapSupportTicketRecord:
             current = self.records[cast(str, filters["id"])]
             updated = structs.replace(current, **values)
             self.records[current.id] = updated
@@ -1786,16 +1792,14 @@ async def test_quickstart_admin_support_ticket_update_branches(
 
     class TenantSupportStore:
         def __init__(self) -> None:
-            self.records: dict[str, QuickstartTenantSupportTicketRecord] = {
-                tenant_ticket.admin_ticket_id: tenant_ticket
-            }
+            self.records: dict[str, BootstrapTenantSupportTicketRecord] = {tenant_ticket.admin_ticket_id: tenant_ticket}
 
         async def get(
             self,
             *,
             tenant: TenantContext,
             filters: Mapping[str, object],
-        ) -> QuickstartTenantSupportTicketRecord | None:
+        ) -> BootstrapTenantSupportTicketRecord | None:
             ticket_id = cast(str | None, filters.get("admin_ticket_id"))
             if ticket_id is None:
                 return None
@@ -1807,7 +1811,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
             tenant: TenantContext,
             filters: Mapping[str, object],
             values: Mapping[str, object],
-        ) -> QuickstartTenantSupportTicketRecord:
+        ) -> BootstrapTenantSupportTicketRecord:
             current = self.records[cast(str, filters["admin_ticket_id"])]
             updated = structs.replace(current, **values)
             self.records[current.admin_ticket_id] = updated
@@ -1830,16 +1834,16 @@ async def test_quickstart_admin_support_ticket_update_branches(
     async def ensure_contexts(slugs: Iterable[str]) -> None:
         return None
 
-    admin_control = QuickstartAdminControlPlane(
+    admin_control = BootstrapAdminControlPlane(
         app,
         slug_normalizer=lambda raw: raw.strip().lower(),
-        slug_pattern=quickstart._TENANT_SLUG_PATTERN,
+        slug_pattern=bootstrap._TENANT_SLUG_PATTERN,
         ensure_contexts=ensure_contexts,
         chatops=chatops_control,
         sync_allowed_tenants=lambda config: None,
     )
 
-    update_payload = QuickstartSupportTicketUpdateRequest(status="responded", note=" Investigating ")
+    update_payload = BootstrapSupportTicketUpdateRequest(status="responded", note=" Investigating ")
     updated = await admin_control.update_support_ticket(
         ticket.id,
         update_payload,
@@ -1853,7 +1857,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
     assert tenant_updated.status == SupportTicketStatus.RESPONDED
     assert tenant_updated.updates[-1].note == "Investigating"
 
-    no_note_payload = QuickstartSupportTicketUpdateRequest(status="responded", note=None)
+    no_note_payload = BootstrapSupportTicketUpdateRequest(status="responded", note=None)
     updated_no_note = await admin_control.update_support_ticket(
         ticket.id,
         no_note_payload,
@@ -1863,7 +1867,7 @@ async def test_quickstart_admin_support_ticket_update_branches(
     assert updated_no_note.status == SupportTicketStatus.RESPONDED
 
     tenant_store.records.pop(ticket.id)
-    resolved_payload = QuickstartSupportTicketUpdateRequest(status="resolved", note=None)
+    resolved_payload = BootstrapSupportTicketUpdateRequest(status="resolved", note=None)
     updated_missing = await admin_control.update_support_ticket(
         ticket.id,
         resolved_payload,
@@ -1874,12 +1878,12 @@ async def test_quickstart_admin_support_ticket_update_branches(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_admin_support_ticket_update_sequence_response(
+async def test_bootstrap_admin_support_ticket_update_sequence_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -1887,16 +1891,16 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
         allowed_tenants=("acme",),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
-    settings = QuickstartChatOpsSettings(
+    settings = BootstrapChatOpsSettings(
         enabled=True,
         webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
     )
-    chatops_control = QuickstartChatOpsControlPlane(
+    chatops_control = BootstrapChatOpsControlPlane(
         app,
         settings,
-        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+        command_pattern=bootstrap._TENANT_SLUG_PATTERN,
     )
 
     async def noop_send(self: ChatOpsService, tenant: TenantContext, message: ChatMessage) -> None:
@@ -1905,7 +1909,7 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
     monkeypatch.setattr(ChatOpsService, "send", noop_send, raising=False)
     chatops_control.configure(settings)
 
-    ticket = QuickstartSupportTicketRecord(
+    ticket = BootstrapSupportTicketRecord(
         tenant_slug="acme",
         kind=SupportTicketKind.ISSUE,
         subject="Login",
@@ -1914,14 +1918,14 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
 
     class ListReturningAdminSupportStore:
         def __init__(self) -> None:
-            self.records: dict[str, QuickstartSupportTicketRecord] = {ticket.id: ticket}
+            self.records: dict[str, BootstrapSupportTicketRecord] = {ticket.id: ticket}
 
         async def get(
             self,
             *,
             filters: Mapping[str, object] | None = None,
             tenant: TenantContext | None = None,
-        ) -> QuickstartSupportTicketRecord | None:
+        ) -> BootstrapSupportTicketRecord | None:
             if not filters:
                 return None
             ticket_id = cast(str | None, filters.get("id"))
@@ -1934,13 +1938,13 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
             *,
             filters: Mapping[str, object],
             values: Mapping[str, object],
-        ) -> list[QuickstartSupportTicketRecord]:
+        ) -> list[BootstrapSupportTicketRecord]:
             current = self.records[cast(str, filters["id"])]
             updated = structs.replace(current, **values)
             self.records[current.id] = updated
             return [updated]
 
-    tenant_ticket = QuickstartTenantSupportTicketRecord(
+    tenant_ticket = BootstrapTenantSupportTicketRecord(
         admin_ticket_id=ticket.id,
         kind=SupportTicketKind.ISSUE,
         subject=ticket.subject,
@@ -1949,16 +1953,14 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
 
     class TenantSupportStore:
         def __init__(self) -> None:
-            self.records: dict[str, QuickstartTenantSupportTicketRecord] = {
-                tenant_ticket.admin_ticket_id: tenant_ticket
-            }
+            self.records: dict[str, BootstrapTenantSupportTicketRecord] = {tenant_ticket.admin_ticket_id: tenant_ticket}
 
         async def get(
             self,
             *,
             tenant: TenantContext,
             filters: Mapping[str, object],
-        ) -> QuickstartTenantSupportTicketRecord | None:
+        ) -> BootstrapTenantSupportTicketRecord | None:
             ticket_id = cast(str | None, filters.get("admin_ticket_id"))
             if ticket_id is None:
                 return None
@@ -1970,7 +1972,7 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
             tenant: TenantContext,
             filters: Mapping[str, object],
             values: Mapping[str, object],
-        ) -> QuickstartTenantSupportTicketRecord:
+        ) -> BootstrapTenantSupportTicketRecord:
             current = self.records[cast(str, filters["admin_ticket_id"])]
             updated = structs.replace(current, **values)
             self.records[current.admin_ticket_id] = updated
@@ -1993,16 +1995,16 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
     async def ensure_contexts(slugs: Iterable[str]) -> None:
         return None
 
-    admin_control = QuickstartAdminControlPlane(
+    admin_control = BootstrapAdminControlPlane(
         app,
         slug_normalizer=lambda raw: raw.strip().lower(),
-        slug_pattern=quickstart._TENANT_SLUG_PATTERN,
+        slug_pattern=bootstrap._TENANT_SLUG_PATTERN,
         ensure_contexts=ensure_contexts,
         chatops=chatops_control,
         sync_allowed_tenants=lambda config: None,
     )
 
-    update_payload = QuickstartSupportTicketUpdateRequest(status="responded", note="Investigating")
+    update_payload = BootstrapSupportTicketUpdateRequest(status="responded", note="Investigating")
     updated = await admin_control.update_support_ticket(
         ticket.id,
         update_payload,
@@ -2010,14 +2012,14 @@ async def test_quickstart_admin_support_ticket_update_sequence_response(
         actor="agent",
     )
 
-    assert isinstance(updated, QuickstartSupportTicketRecord)
+    assert isinstance(updated, BootstrapSupportTicketRecord)
     assert updated.status == SupportTicketStatus.RESPONDED
     tenant_updated = tenant_store.records[ticket.id]
     assert tenant_updated.status == SupportTicketStatus.RESPONDED
 
 
 @pytest.mark.asyncio
-async def test_quickstart_seeder_persists_config() -> None:
+async def test_bootstrap_seeder_persists_config() -> None:
     class RecordingManager:
         def __init__(self) -> None:
             self.deleted: list[tuple[TenantContext | None, object | None]] = []
@@ -2033,7 +2035,7 @@ async def test_quickstart_seeder_persists_config() -> None:
 
     class RecordingStateManager:
         def __init__(self) -> None:
-            self.created: list[QuickstartSeedStateRecord] = []
+            self.created: list[BootstrapSeedStateRecord] = []
             self.updated: list[tuple[Mapping[str, object] | None, Mapping[str, object]]] = []
             self.state: object | None = None
 
@@ -2047,10 +2049,10 @@ async def test_quickstart_seeder_persists_config() -> None:
 
         async def create(
             self,
-            data: QuickstartSeedStateRecord,
+            data: BootstrapSeedStateRecord,
             *,
             tenant: TenantContext | None = None,
-        ) -> QuickstartSeedStateRecord:
+        ) -> BootstrapSeedStateRecord:
             self.created.append(data)
             self.state = types.SimpleNamespace(id=data.id, fingerprint=data.fingerprint)
             return data
@@ -2075,32 +2077,32 @@ async def test_quickstart_seeder_persists_config() -> None:
 
     orm_stub = types.SimpleNamespace(
         admin=types.SimpleNamespace(
-            quickstart_admin_users=admin_users,
-            quickstart_tenants=tenant_records,
-            quickstart_seed_state=seed_state,
+            bootstrap_admin_users=admin_users,
+            bootstrap_tenants=tenant_records,
+            bootstrap_seed_state=seed_state,
         ),
-        tenants=types.SimpleNamespace(quickstart_users=tenant_users),
+        tenants=types.SimpleNamespace(bootstrap_users=tenant_users),
     )
 
-    config = QuickstartAuthConfig(
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="acme",
                 name="Acme Rockets",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_acme_owner",
                         email="founder@acme.test",
                         password="demo-pass",
                         passkeys=(
-                            QuickstartPasskey(
+                            BootstrapPasskey(
                                 credential_id="acme-passkey",
                                 secret="passkey-secret",
                                 label="YubiKey",
                             ),
                         ),
                         mfa_code="654321",
-                        sso=QuickstartSsoProvider(
+                        sso=BootstrapSsoProvider(
                             slug="okta",
                             kind="saml",
                             display_name="Okta",
@@ -2110,13 +2112,13 @@ async def test_quickstart_seeder_persists_config() -> None:
                 ),
             ),
         ),
-        admin=QuickstartAdminRealm(
+        admin=BootstrapAdminRealm(
             users=(
-                QuickstartUser(
+                BootstrapUser(
                     id="adm_root",
                     email="root@admin.test",
                     password="admin-pass",
-                    passkeys=(QuickstartPasskey(credential_id="adm-passkey", secret="adm-secret"),),
+                    passkeys=(BootstrapPasskey(credential_id="adm-passkey", secret="adm-secret"),),
                     mfa_code="111111",
                 ),
             ),
@@ -2133,22 +2135,22 @@ async def test_quickstart_seeder_persists_config() -> None:
         for tenant in config.tenants
     }
 
-    seeder = QuickstartSeeder(cast(ORM, orm_stub))
+    seeder = BootstrapSeeder(cast(ORM, orm_stub))
     seeded = await seeder.apply(config, tenants=tenants_map)
     assert seeded is True
 
     assert len(admin_users.deleted) == 1
     assert len(admin_users.created) == 1
     admin_record = admin_users.created[0][1]
-    assert isinstance(admin_record, QuickstartAdminUserRecord)
+    assert isinstance(admin_record, BootstrapAdminUserRecord)
     assert admin_record.passkeys == (
-        QuickstartPasskeyRecord(credential_id="adm-passkey", secret="adm-secret", label=None),
+        BootstrapPasskeyRecord(credential_id="adm-passkey", secret="adm-secret", label=None),
     )
 
     assert len(tenant_records.deleted) == 1
     assert len(tenant_records.created) == 1
     tenant_record = tenant_records.created[0][1]
-    assert isinstance(tenant_record, QuickstartTenantRecord)
+    assert isinstance(tenant_record, BootstrapTenantRecord)
     assert tenant_record.slug == "acme"
 
     assert len(tenant_users.deleted) == 1
@@ -2157,10 +2159,10 @@ async def test_quickstart_seeder_persists_config() -> None:
     assert deleted_ctx.tenant == "acme"
 
     created_user = tenant_users.created[0][1]
-    assert isinstance(created_user, QuickstartTenantUserRecord)
+    assert isinstance(created_user, BootstrapTenantUserRecord)
     assert created_user.email == "founder@acme.test"
     assert created_user.passkeys == (
-        QuickstartPasskeyRecord(
+        BootstrapPasskeyRecord(
             credential_id="acme-passkey",
             secret="passkey-secret",
             label="YubiKey",
@@ -2170,13 +2172,13 @@ async def test_quickstart_seeder_persists_config() -> None:
 
     assert len(seed_state.created) == 1
     created_state = seed_state.created[0]
-    assert isinstance(created_state, QuickstartSeedStateRecord)
-    assert created_state.key == "quickstart_auth"
+    assert isinstance(created_state, BootstrapSeedStateRecord)
+    assert created_state.key == "bootstrap_auth"
     assert seed_state.updated == []
 
 
 @pytest.mark.asyncio
-async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
+async def test_bootstrap_seeder_skips_when_fingerprint_matches() -> None:
     state_manager = types.SimpleNamespace(
         created=[],
         updated=[],
@@ -2187,7 +2189,7 @@ async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
         async def get(self, **_: object) -> object | None:
             return state_manager.state
 
-        async def create(self, data: QuickstartSeedStateRecord, **_: object) -> QuickstartSeedStateRecord:
+        async def create(self, data: BootstrapSeedStateRecord, **_: object) -> BootstrapSeedStateRecord:
             state_manager.created.append(data)
             state_manager.state = types.SimpleNamespace(id=data.id, fingerprint=data.fingerprint)
             return data
@@ -2219,27 +2221,27 @@ async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
 
     orm_stub = types.SimpleNamespace(
         admin=types.SimpleNamespace(
-            quickstart_admin_users=admin_manager,
-            quickstart_tenants=tenant_manager,
-            quickstart_seed_state=seed_manager,
+            bootstrap_admin_users=admin_manager,
+            bootstrap_tenants=tenant_manager,
+            bootstrap_seed_state=seed_manager,
         ),
-        tenants=types.SimpleNamespace(quickstart_users=tenant_users),
+        tenants=types.SimpleNamespace(bootstrap_users=tenant_users),
     )
 
-    tenant = QuickstartTenant(
+    tenant = BootstrapTenant(
         slug="acme",
         name="Acme",
         users=(
-            QuickstartUser(
+            BootstrapUser(
                 id="usr_acme",
                 email="founder@acme.test",
                 password="demo-pass",
             ),
         ),
     )
-    config = QuickstartAuthConfig(tenants=(tenant,), admin=DEFAULT_QUICKSTART_AUTH.admin)
+    config = BootstrapAuthConfig(tenants=(tenant,), admin=DEFAULT_BOOTSTRAP_AUTH.admin)
     context = TenantContext(tenant="acme", site="demo", domain="local.test", scope=TenantScope.TENANT)
-    seeder = QuickstartSeeder(cast(ORM, orm_stub))
+    seeder = BootstrapSeeder(cast(ORM, orm_stub))
 
     first = await seeder.apply(config, tenants={"acme": context})
     assert first is True
@@ -2252,13 +2254,13 @@ async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
     assert state_manager.state is not None
     assert state_manager.updated == []
 
-    updated_config = QuickstartAuthConfig(
+    updated_config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="acme",
                 name="Acme",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_acme",
                         email="founder@acme.test",
                         password="new-pass",
@@ -2266,7 +2268,7 @@ async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
     )
     third = await seeder.apply(updated_config, tenants={"acme": context})
     assert third is True
@@ -2275,32 +2277,32 @@ async def test_quickstart_seeder_skips_when_fingerprint_matches() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_repository_roundtrip() -> None:
-    tenant_record = QuickstartTenantRecord(id="tnt_acme", slug="acme", name="Acme")
-    tenant_user = QuickstartTenantUserRecord(
+async def test_bootstrap_repository_roundtrip() -> None:
+    tenant_record = BootstrapTenantRecord(id="tnt_acme", slug="acme", name="Acme")
+    tenant_user = BootstrapTenantUserRecord(
         id="usr_acme",
         email="founder@acme.test",
         password="demo-pass",
         passkeys=(
-            QuickstartPasskeyRecord(
+            BootstrapPasskeyRecord(
                 credential_id="acme-passkey",
                 secret="passkey-secret",
                 label="Primary",
             ),
         ),
         mfa_code="654321",
-        sso_provider=QuickstartSsoProvider(
+        sso_provider=BootstrapSsoProvider(
             slug="okta",
             kind="saml",
             display_name="Okta",
             redirect_url="https://id.acme.test/sso/start",
         ),
     )
-    admin_user = QuickstartAdminUserRecord(
+    admin_user = BootstrapAdminUserRecord(
         id="adm_root",
         email="root@admin.test",
         password="admin-pass",
-        passkeys=(QuickstartPasskeyRecord(credential_id="adm-passkey", secret="adm-secret", label=None),),
+        passkeys=(BootstrapPasskeyRecord(credential_id="adm-passkey", secret="adm-secret", label=None),),
         mfa_code="111111",
     )
 
@@ -2312,23 +2314,23 @@ async def test_quickstart_repository_roundtrip() -> None:
             return list(self._items)
 
     class TenantUserManager:
-        def __init__(self, mapping: dict[str, list[QuickstartTenantUserRecord]]) -> None:
+        def __init__(self, mapping: dict[str, list[BootstrapTenantUserRecord]]) -> None:
             self._mapping = mapping
 
-        async def list(self, *, tenant: TenantContext, **_: object) -> list[QuickstartTenantUserRecord]:
+        async def list(self, *, tenant: TenantContext, **_: object) -> list[BootstrapTenantUserRecord]:
             return list(self._mapping.get(tenant.tenant, []))
 
     orm_stub = types.SimpleNamespace(
         admin=types.SimpleNamespace(
-            quickstart_tenants=ListManager([tenant_record]),
-            quickstart_admin_users=ListManager([admin_user]),
+            bootstrap_tenants=ListManager([tenant_record]),
+            bootstrap_admin_users=ListManager([admin_user]),
         ),
         tenants=types.SimpleNamespace(
-            quickstart_users=TenantUserManager({"acme": [tenant_user]}),
+            bootstrap_users=TenantUserManager({"acme": [tenant_user]}),
         ),
     )
 
-    repository = QuickstartRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
+    repository = BootstrapRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
     config = await repository.load()
     assert config is not None
     assert config.tenants[0].slug == "acme"
@@ -2337,14 +2339,14 @@ async def test_quickstart_repository_roundtrip() -> None:
 
 
 @pytest.mark.asyncio
-async def test_attach_quickstart_bootstraps_database(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_bootstrap_bootstraps_database(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
     class StubSeeder:
         def __init__(self, orm: ORM) -> None:
             calls["seeder_init"] = orm
 
-        async def apply(self, config: QuickstartAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
+        async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
             calls["seed_config"] = config
             calls["seed_tenants"] = sorted(tenants)
             return True
@@ -2353,7 +2355,7 @@ async def test_attach_quickstart_bootstraps_database(monkeypatch: pytest.MonkeyP
         def __init__(self, orm: ORM, *, site: str, domain: str) -> None:
             calls["repository_init"] = (orm, site, domain)
 
-        async def load(self) -> QuickstartAuthConfig | None:
+        async def load(self) -> BootstrapAuthConfig | None:
             calls["repository_load"] = True
             return None
 
@@ -2370,21 +2372,21 @@ async def test_attach_quickstart_bootstraps_database(monkeypatch: pytest.MonkeyP
         calls.setdefault("migrations", []).append([ctx.tenant for ctx in tenants or []])
         return []
 
-    original_reload = quickstart.QuickstartAuthEngine.reload
+    original_reload = bootstrap.BootstrapAuthEngine.reload
 
-    async def recording_reload(self: QuickstartAuthEngine, config: QuickstartAuthConfig) -> None:
+    async def recording_reload(self: BootstrapAuthEngine, config: BootstrapAuthConfig) -> None:
         calls["reload_config"] = config
         await original_reload(self, config)
 
-    monkeypatch.setattr(quickstart, "QuickstartSeeder", StubSeeder)
-    monkeypatch.setattr(quickstart, "QuickstartRepository", StubRepository)
-    monkeypatch.setattr(quickstart, "ensure_tenant_schemas", fake_ensure)
+    monkeypatch.setattr(bootstrap, "BootstrapSeeder", StubSeeder)
+    monkeypatch.setattr(bootstrap, "BootstrapRepository", StubRepository)
+    monkeypatch.setattr(bootstrap, "ensure_tenant_schemas", fake_ensure)
     monkeypatch.setattr(MigrationRunner, "run_all", fake_run_all)
-    monkeypatch.setattr(quickstart.QuickstartAuthEngine, "reload", recording_reload)
+    monkeypatch.setattr(bootstrap.BootstrapAuthEngine, "reload", recording_reload)
 
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     config = AppConfig(
         site="demo",
         domain="local.test",
@@ -2393,17 +2395,17 @@ async def test_attach_quickstart_bootstraps_database(monkeypatch: pytest.MonkeyP
     )
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = MereApp(config, database=database, orm=orm)
-    attach_quickstart(app)
+    app = MereApp(config, database=database, orm=orm, bootstrap_enabled=False)
+    attach_bootstrap(app)
 
     async with TestClient(app) as client:
         response = await client.get("/__mere/ping", tenant="acme")
         assert response.status == 200
 
-    assert calls["seed_config"] is DEFAULT_QUICKSTART_AUTH
+    assert calls["seed_config"] is DEFAULT_BOOTSTRAP_AUTH
     assert sorted(calls["seed_tenants"]) == ["acme", "beta"]
     assert calls["repository_load"] is True
-    assert calls["reload_config"] is DEFAULT_QUICKSTART_AUTH
+    assert calls["reload_config"] is DEFAULT_BOOTSTRAP_AUTH
     assert [sorted(entry) for entry in calls.get("schemas", [])]
     assert [sorted(entry) for entry in calls.get("migrations", [])]
 
@@ -2411,14 +2413,14 @@ async def test_attach_quickstart_bootstraps_database(monkeypatch: pytest.MonkeyP
 @pytest.mark.asyncio
 async def test_ensure_tenant_schemas_handles_empty() -> None:
     pool = FakePool()
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     await ensure_tenant_schemas(database, [])
     assert all("CREATE SCHEMA" not in sql for _, sql, *_ in pool.connection.calls)
 
 
 @pytest.mark.asyncio
-async def test_quickstart_seeder_requires_context() -> None:
+async def test_bootstrap_seeder_requires_context() -> None:
     class AsyncNoop:
         async def delete(self, **_: object) -> int:
             return 0
@@ -2438,34 +2440,34 @@ async def test_quickstart_seeder_requires_context() -> None:
 
     orm_stub = types.SimpleNamespace(
         admin=types.SimpleNamespace(
-            quickstart_admin_users=AsyncNoop(),
-            quickstart_tenants=AsyncNoop(),
-            quickstart_seed_state=SeedState(),
+            bootstrap_admin_users=AsyncNoop(),
+            bootstrap_tenants=AsyncNoop(),
+            bootstrap_seed_state=SeedState(),
         ),
-        tenants=types.SimpleNamespace(quickstart_users=AsyncNoop()),
+        tenants=types.SimpleNamespace(bootstrap_users=AsyncNoop()),
     )
-    config = QuickstartAuthConfig(
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="acme",
                 name="Acme",
-                users=(QuickstartUser(id="usr", email="founder@acme.test"),),
+                users=(BootstrapUser(id="usr", email="founder@acme.test"),),
             ),
         ),
-        admin=QuickstartAdminRealm(users=()),
+        admin=BootstrapAdminRealm(users=()),
     )
-    seeder = QuickstartSeeder(cast(ORM, orm_stub))
+    seeder = BootstrapSeeder(cast(ORM, orm_stub))
     with pytest.raises(RuntimeError):
         await seeder.apply(config, tenants={})
 
 
 @pytest.mark.asyncio
-async def test_attach_quickstart_syncs_allowed_tenants_from_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_bootstrap_syncs_allowed_tenants_from_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     class StubSeeder:
         def __init__(self, orm: ORM) -> None:
             self.orm = orm
 
-        async def apply(self, config: QuickstartAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
+        async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
             return True
 
     class StubRepository:
@@ -2474,14 +2476,14 @@ async def test_attach_quickstart_syncs_allowed_tenants_from_registry(monkeypatch
             self.site = site
             self.domain = domain
 
-        async def load(self) -> QuickstartAuthConfig | None:
-            return QuickstartAuthConfig(
+        async def load(self) -> BootstrapAuthConfig | None:
+            return BootstrapAuthConfig(
                 tenants=(
-                    QuickstartTenant(
+                    BootstrapTenant(
                         slug="gamma",
                         name="Gamma Corp",
                         users=(
-                            QuickstartUser(
+                            BootstrapUser(
                                 id="usr_gamma_owner",
                                 email="owner@gamma.test",
                                 password="gamma-pass",
@@ -2489,7 +2491,7 @@ async def test_attach_quickstart_syncs_allowed_tenants_from_registry(monkeypatch
                         ),
                     ),
                 ),
-                admin=DEFAULT_QUICKSTART_AUTH.admin,
+                admin=DEFAULT_BOOTSTRAP_AUTH.admin,
             )
 
     async def fake_ensure(database: Database, tenants: Sequence[TenantContext]) -> None:
@@ -2504,20 +2506,20 @@ async def test_attach_quickstart_syncs_allowed_tenants_from_registry(monkeypatch
     ) -> list[str]:
         return []
 
-    monkeypatch.setattr(quickstart, "QuickstartSeeder", StubSeeder)
-    monkeypatch.setattr(quickstart, "QuickstartRepository", StubRepository)
-    monkeypatch.setattr(quickstart, "ensure_tenant_schemas", fake_ensure)
+    monkeypatch.setattr(bootstrap, "BootstrapSeeder", StubSeeder)
+    monkeypatch.setattr(bootstrap, "BootstrapRepository", StubRepository)
+    monkeypatch.setattr(bootstrap, "ensure_tenant_schemas", fake_ensure)
     monkeypatch.setattr(MigrationRunner, "run_all", fake_run_all)
 
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     app_config = AppConfig(site="demo", domain="local.test", allowed_tenants=(), database=db_config)
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = MereApp(app_config, database=database, orm=orm)
+    app = MereApp(app_config, database=database, orm=orm, bootstrap_enabled=False)
 
-    attach_quickstart(app)
+    attach_bootstrap(app)
 
     assert "gamma" not in app.tenant_resolver.allowed_tenants
 
@@ -2529,7 +2531,7 @@ async def test_attach_quickstart_syncs_allowed_tenants_from_registry(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_quickstart_repository_returns_none_when_empty() -> None:
+async def test_bootstrap_repository_returns_none_when_empty() -> None:
     class ListManager:
         def __init__(self) -> None:
             self._items: list[object] = []
@@ -2539,24 +2541,24 @@ async def test_quickstart_repository_returns_none_when_empty() -> None:
 
     orm_stub = types.SimpleNamespace(
         admin=types.SimpleNamespace(
-            quickstart_tenants=ListManager(),
-            quickstart_admin_users=ListManager(),
+            bootstrap_tenants=ListManager(),
+            bootstrap_admin_users=ListManager(),
         ),
-        tenants=types.SimpleNamespace(quickstart_users=types.SimpleNamespace(list=lambda **_: [])),
+        tenants=types.SimpleNamespace(bootstrap_users=types.SimpleNamespace(list=lambda **_: [])),
     )
-    repository = QuickstartRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
+    repository = BootstrapRepository(cast(ORM, orm_stub), site="demo", domain="local.test")
     assert await repository.load() is None
 
 
 @pytest.mark.asyncio
-async def test_attach_quickstart_with_custom_config(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_bootstrap_with_custom_config(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
     class StubSeeder:
         def __init__(self, orm: ORM) -> None:
             calls["init"] = orm
 
-        async def apply(self, config: QuickstartAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
+        async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
             calls["config"] = config
             calls["tenants"] = sorted(tenants)
             return True
@@ -2574,19 +2576,19 @@ async def test_attach_quickstart_with_custom_config(monkeypatch: pytest.MonkeyPa
         calls.setdefault("run_all", []).append([ctx.tenant for ctx in tenants or []])
         return []
 
-    async def recording_reload(self: QuickstartAuthEngine, config: QuickstartAuthConfig) -> None:
+    async def recording_reload(self: BootstrapAuthEngine, config: BootstrapAuthConfig) -> None:
         calls["reload"] = config
         await original_reload(self, config)
 
-    original_reload = quickstart.QuickstartAuthEngine.reload
-    monkeypatch.setattr(quickstart, "QuickstartSeeder", StubSeeder)
-    monkeypatch.setattr(quickstart, "ensure_tenant_schemas", fake_ensure)
+    original_reload = bootstrap.BootstrapAuthEngine.reload
+    monkeypatch.setattr(bootstrap, "BootstrapSeeder", StubSeeder)
+    monkeypatch.setattr(bootstrap, "ensure_tenant_schemas", fake_ensure)
     monkeypatch.setattr(MigrationRunner, "run_all", fake_run_all)
-    monkeypatch.setattr(quickstart.QuickstartAuthEngine, "reload", recording_reload)
+    monkeypatch.setattr(bootstrap.BootstrapAuthEngine, "reload", recording_reload)
 
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     config = AppConfig(
         site="demo",
         domain="local.test",
@@ -2595,18 +2597,18 @@ async def test_attach_quickstart_with_custom_config(monkeypatch: pytest.MonkeyPa
     )
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = MereApp(config, database=database, orm=orm)
-    custom = QuickstartAuthConfig(
+    app = MereApp(config, database=database, orm=orm, bootstrap_enabled=False)
+    custom = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="acme",
                 name="Acme",
-                users=(QuickstartUser(id="usr", email="owner@acme.test"),),
+                users=(BootstrapUser(id="usr", email="owner@acme.test"),),
             ),
         ),
-        admin=QuickstartAdminRealm(users=()),
+        admin=BootstrapAdminRealm(users=()),
     )
-    attach_quickstart(app, auth_config=custom)
+    attach_bootstrap(app, auth_config=custom)
 
     async with TestClient(app) as client:
         response = await client.get("/__mere/ping", tenant="acme")
@@ -2616,7 +2618,7 @@ async def test_attach_quickstart_with_custom_config(monkeypatch: pytest.MonkeyPa
     assert calls["reload"] is custom
 
 
-def test_load_quickstart_auth_from_env_json() -> None:
+def test_load_bootstrap_auth_from_env_json() -> None:
     payload = {
         "tenants": [
             {
@@ -2641,14 +2643,14 @@ def test_load_quickstart_auth_from_env_json() -> None:
             ]
         },
     }
-    env = {"MERE_QUICKSTART_AUTH": json.dumps(payload)}
-    loaded = load_quickstart_auth_from_env(env=env)
+    env = {"MERE_BOOTSTRAP_AUTH": json.dumps(payload)}
+    loaded = load_bootstrap_auth_from_env(env=env)
     assert loaded is not None
     assert loaded.tenants[0].slug == "env"
     assert loaded.admin.users[0].email == "admin@env.test"
 
 
-def test_load_quickstart_auth_from_env_file(tmp_path: Path) -> None:
+def test_load_bootstrap_auth_from_env_file(tmp_path: Path) -> None:
     payload = {
         "tenants": [
             {
@@ -2675,28 +2677,28 @@ def test_load_quickstart_auth_from_env_file(tmp_path: Path) -> None:
     }
     path = tmp_path / "config.json"
     path.write_text(json.dumps(payload))
-    env = {"MERE_QUICKSTART_AUTH_FILE": str(path)}
-    loaded = load_quickstart_auth_from_env(env=env)
+    env = {"MERE_BOOTSTRAP_AUTH_FILE": str(path)}
+    loaded = load_bootstrap_auth_from_env(env=env)
     assert loaded is not None
     assert loaded.tenants[0].slug == "file"
     assert loaded.admin.users[0].email == "admin@file.test"
 
 
-def test_load_quickstart_auth_from_env_invalid() -> None:
-    env = {"MERE_QUICKSTART_AUTH": "{not json}"}
+def test_load_bootstrap_auth_from_env_invalid() -> None:
+    env = {"MERE_BOOTSTRAP_AUTH": "{not json}"}
     with pytest.raises(RuntimeError):
-        load_quickstart_auth_from_env(env=env)
+        load_bootstrap_auth_from_env(env=env)
 
 
 @pytest.mark.asyncio
-async def test_attach_quickstart_uses_repository_config(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_attach_bootstrap_uses_repository_config(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: dict[str, object] = {}
 
     class StubSeeder:
         def __init__(self, orm: ORM) -> None:
             calls["seeder_init"] = orm
 
-        async def apply(self, config: QuickstartAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
+        async def apply(self, config: BootstrapAuthConfig, *, tenants: Mapping[str, TenantContext]) -> bool:
             calls.setdefault("seed", []).append(sorted(tenants))
             return True
 
@@ -2706,16 +2708,16 @@ async def test_attach_quickstart_uses_repository_config(monkeypatch: pytest.Monk
             self._site = site
             self._domain = domain
 
-        async def load(self) -> QuickstartAuthConfig | None:
-            return QuickstartAuthConfig(
+        async def load(self) -> BootstrapAuthConfig | None:
+            return BootstrapAuthConfig(
                 tenants=(
-                    QuickstartTenant(
+                    BootstrapTenant(
                         slug="gamma",
                         name="Gamma",
-                        users=(QuickstartUser(id="usr", email="owner@gamma.test"),),
+                        users=(BootstrapUser(id="usr", email="owner@gamma.test"),),
                     ),
                 ),
-                admin=QuickstartAdminRealm(users=()),
+                admin=BootstrapAdminRealm(users=()),
             )
 
     async def fake_ensure(database: Database, tenants: Sequence[TenantContext]) -> None:
@@ -2731,20 +2733,20 @@ async def test_attach_quickstart_uses_repository_config(monkeypatch: pytest.Monk
         calls.setdefault("runs", []).append([ctx.tenant for ctx in tenants or []])
         return []
 
-    async def recording_reload(self: QuickstartAuthEngine, config: QuickstartAuthConfig) -> None:
+    async def recording_reload(self: BootstrapAuthEngine, config: BootstrapAuthConfig) -> None:
         calls["reload"] = config
         await original_reload(self, config)
 
-    original_reload = quickstart.QuickstartAuthEngine.reload
-    monkeypatch.setattr(quickstart, "QuickstartSeeder", StubSeeder)
-    monkeypatch.setattr(quickstart, "QuickstartRepository", StubRepository)
-    monkeypatch.setattr(quickstart, "ensure_tenant_schemas", fake_ensure)
+    original_reload = bootstrap.BootstrapAuthEngine.reload
+    monkeypatch.setattr(bootstrap, "BootstrapSeeder", StubSeeder)
+    monkeypatch.setattr(bootstrap, "BootstrapRepository", StubRepository)
+    monkeypatch.setattr(bootstrap, "ensure_tenant_schemas", fake_ensure)
     monkeypatch.setattr(MigrationRunner, "run_all", fake_run_all)
-    monkeypatch.setattr(quickstart.QuickstartAuthEngine, "reload", recording_reload)
+    monkeypatch.setattr(bootstrap.BootstrapAuthEngine, "reload", recording_reload)
 
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     config = AppConfig(
         site="demo",
         domain="local.test",
@@ -2753,15 +2755,15 @@ async def test_attach_quickstart_uses_repository_config(monkeypatch: pytest.Monk
     )
     database = Database(db_config, pool=pool)
     orm = ORM(database)
-    app = MereApp(config, database=database, orm=orm)
-    attach_quickstart(app)
+    app = MereApp(config, database=database, orm=orm, bootstrap_enabled=False)
+    attach_bootstrap(app)
 
     async with TestClient(app) as client:
         response = await client.get("/__mere/ping", tenant="acme")
         assert response.status == 200
 
     reload_config = calls["reload"]
-    assert isinstance(reload_config, QuickstartAuthConfig)
+    assert isinstance(reload_config, BootstrapAuthConfig)
     assert reload_config.tenants[0].slug == "gamma"
     assert any("gamma" in entry for entry in calls.get("schemas", []))
 
@@ -2774,8 +2776,8 @@ def _tenant(site: str, domain: str, slug: str, scope: TenantScope) -> TenantCont
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_rejects_public_scope() -> None:
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+async def test_bootstrap_engine_rejects_public_scope() -> None:
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     tenant = _tenant("demo", "local.test", "public", TenantScope.PUBLIC)
     with pytest.raises(HTTPError) as exc:
         await engine.start(tenant, email="user@example.com")
@@ -2783,24 +2785,24 @@ async def test_quickstart_engine_rejects_public_scope() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_unknown_user_and_authenticators() -> None:
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+async def test_bootstrap_engine_unknown_user_and_authenticators() -> None:
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     tenant = _tenant("demo", "local.test", "acme", TenantScope.TENANT)
     with pytest.raises(HTTPError) as exc:
         await engine.start(tenant, email="missing@acme.test")
     _assert_error_detail(exc, "unknown_user")
 
-    config = QuickstartAuthConfig(
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="gamma",
                 name="Gamma",
-                users=(QuickstartUser(id="usr_gamma", email="ops@gamma.test"),),
+                users=(BootstrapUser(id="usr_gamma", email="ops@gamma.test"),),
             ),
         ),
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = QuickstartAuthEngine(config)
+    engine = BootstrapAuthEngine(config)
     tenant = _tenant("demo", "local.test", "gamma", TenantScope.TENANT)
     with pytest.raises(HTTPError) as exc:
         await engine.start(tenant, email="ops@gamma.test")
@@ -2808,8 +2810,8 @@ async def test_quickstart_engine_unknown_user_and_authenticators() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_passkey_error_paths() -> None:
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+async def test_bootstrap_engine_passkey_error_paths() -> None:
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     beta = _tenant("demo", "local.test", "beta", TenantScope.TENANT)
 
     start = await engine.start(beta, email="ops@beta.test")
@@ -2842,7 +2844,7 @@ async def test_quickstart_engine_passkey_error_paths() -> None:
         )
     _assert_error_detail(exc, "invalid_passkey")
 
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     admin = _tenant("demo", "local.test", "admin", TenantScope.ADMIN)
     start = await engine.start(admin, email="root@admin.test")
     with pytest.raises(HTTPError) as exc:
@@ -2852,17 +2854,17 @@ async def test_quickstart_engine_passkey_error_paths() -> None:
         )
     _assert_error_detail(exc, "passkey_not_expected")
 
-    config = QuickstartAuthConfig(
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="zeta",
                 name="Zeta",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_zeta",
                         email="ops@zeta.test",
                         password="zeta-password",
-                        sso=QuickstartSsoProvider(
+                        sso=BootstrapSsoProvider(
                             slug="okta",
                             kind="saml",
                             display_name="Okta",
@@ -2872,9 +2874,9 @@ async def test_quickstart_engine_passkey_error_paths() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = QuickstartAuthEngine(config)
+    engine = BootstrapAuthEngine(config)
     zeta = _tenant("demo", "local.test", "zeta", TenantScope.TENANT)
     start = await engine.start(zeta, email="ops@zeta.test")
     assert start.next is LoginStep.SSO
@@ -2888,8 +2890,8 @@ async def test_quickstart_engine_passkey_error_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_password_paths() -> None:
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+async def test_bootstrap_engine_password_paths() -> None:
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     beta = _tenant("demo", "local.test", "beta", TenantScope.TENANT)
 
     # Password fallback from passkey
@@ -2905,7 +2907,7 @@ async def test_quickstart_engine_password_paths() -> None:
 
     # Password not expected once MFA started
     start = await engine.start(beta, email="ops@beta.test")
-    user = DEFAULT_QUICKSTART_AUTH.tenants[1].users[0]
+    user = DEFAULT_BOOTSTRAP_AUTH.tenants[1].users[0]
     passkey_cfg = user.passkeys[0]
     manager = PasskeyManager()
     demo_passkey = manager.register(
@@ -2930,23 +2932,23 @@ async def test_quickstart_engine_password_paths() -> None:
     _assert_error_detail(exc, "password_not_expected")
 
     # Password not available when no fallback defined
-    config = QuickstartAuthConfig(
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="gamma",
                 name="Gamma",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_gamma",
                         email="ops@gamma.test",
-                        passkeys=(QuickstartPasskey(credential_id="gamma-passkey", secret="gamma-secret"),),
+                        passkeys=(BootstrapPasskey(credential_id="gamma-passkey", secret="gamma-secret"),),
                     ),
                 ),
             ),
         ),
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = QuickstartAuthEngine(config)
+    engine = BootstrapAuthEngine(config)
     gamma = _tenant("demo", "local.test", "gamma", TenantScope.TENANT)
     start = await engine.start(gamma, email="ops@gamma.test")
     with pytest.raises(HTTPError) as exc:
@@ -2955,8 +2957,8 @@ async def test_quickstart_engine_password_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_mfa_paths() -> None:
-    engine = QuickstartAuthEngine(DEFAULT_QUICKSTART_AUTH)
+async def test_bootstrap_engine_mfa_paths() -> None:
+    engine = BootstrapAuthEngine(DEFAULT_BOOTSTRAP_AUTH)
     admin_ctx = _tenant("demo", "local.test", "admin", TenantScope.ADMIN)
 
     start = await engine.start(admin_ctx, email="root@admin.test")
@@ -2982,34 +2984,34 @@ async def test_quickstart_engine_mfa_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_success_and_cleanup_paths() -> None:
-    config = QuickstartAuthConfig(
+async def test_bootstrap_engine_success_and_cleanup_paths() -> None:
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="delta",
                 name="Delta",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_delta",
                         email="ops@delta.test",
                         password="delta-pass",
-                        passkeys=(QuickstartPasskey(credential_id="delta-passkey", secret="delta-secret"),),
+                        passkeys=(BootstrapPasskey(credential_id="delta-passkey", secret="delta-secret"),),
                     ),
                 ),
             ),
         ),
-        admin=QuickstartAdminRealm(
+        admin=BootstrapAdminRealm(
             users=(
-                QuickstartUser(
+                BootstrapUser(
                     id="adm_demo",
                     email="admin@demo.test",
                     password="demo-admin",
-                    passkeys=(QuickstartPasskey(credential_id="adm-passkey", secret="adm-secret"),),
+                    passkeys=(BootstrapPasskey(credential_id="adm-passkey", secret="adm-secret"),),
                 ),
             ),
         ),
     )
-    engine = QuickstartAuthEngine(config)
+    engine = BootstrapAuthEngine(config)
     delta = _tenant("demo", "local.test", "delta", TenantScope.TENANT)
 
     start = await engine.start(delta, email="ops@delta.test")
@@ -3053,18 +3055,18 @@ async def test_quickstart_engine_success_and_cleanup_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_engine_sso_fallback_to_passkey() -> None:
-    config = QuickstartAuthConfig(
+async def test_bootstrap_engine_sso_fallback_to_passkey() -> None:
+    config = BootstrapAuthConfig(
         tenants=(
-            QuickstartTenant(
+            BootstrapTenant(
                 slug="epsilon",
                 name="Epsilon",
                 users=(
-                    QuickstartUser(
+                    BootstrapUser(
                         id="usr_epsilon",
                         email="ops@epsilon.test",
-                        passkeys=(QuickstartPasskey(credential_id="epsilon-passkey", secret="epsilon-secret"),),
-                        sso=QuickstartSsoProvider(
+                        passkeys=(BootstrapPasskey(credential_id="epsilon-passkey", secret="epsilon-secret"),),
+                        sso=BootstrapSsoProvider(
                             slug="okta",
                             kind="saml",
                             display_name="Okta",
@@ -3074,9 +3076,9 @@ async def test_quickstart_engine_sso_fallback_to_passkey() -> None:
                 ),
             ),
         ),
-        admin=DEFAULT_QUICKSTART_AUTH.admin,
+        admin=DEFAULT_BOOTSTRAP_AUTH.admin,
     )
-    engine = QuickstartAuthEngine(config)
+    engine = BootstrapAuthEngine(config)
     epsilon = _tenant("demo", "local.test", "epsilon", TenantScope.TENANT)
     start = await engine.start(epsilon, email="ops@epsilon.test")
     assert start.next is LoginStep.SSO
@@ -3139,10 +3141,10 @@ def test_chatops_command_registry_lookup_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_chatops_control_plane_validation_paths() -> None:
+async def test_bootstrap_chatops_control_plane_validation_paths() -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -3150,9 +3152,9 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
-    notifications = quickstart.QuickstartChatOpsNotificationChannels(
+    notifications = bootstrap.BootstrapChatOpsNotificationChannels(
         tenant_created="#tenants",
         billing_updated="#billing",
         subscription_past_due="#pastdue",
@@ -3161,19 +3163,19 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
         support_ticket_updated="#support",
     )
     commands = (
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="create-tenant",
             action="create_tenant",
             description="Provision tenants",
-            aliases=("QuickStart-Create-Tenant", "create-tenant"),
+            aliases=("Bootstrap-Create-Tenant", "create-tenant"),
         ),
-        QuickstartSlashCommand(
+        BootstrapSlashCommand(
             name="extend-trial",
             action="extend_trial",
             description="Extend tenant trial periods",
         ),
     )
-    settings = QuickstartChatOpsSettings(
+    settings = BootstrapChatOpsSettings(
         enabled=True,
         webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
         notifications=notifications,
@@ -3181,10 +3183,10 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
         bot_user_id="U999",
         admin_workspace="T123",
     )
-    control = QuickstartChatOpsControlPlane(
+    control = BootstrapChatOpsControlPlane(
         app,
         settings,
-        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+        command_pattern=bootstrap._TENANT_SLUG_PATTERN,
     )
 
     @app.chatops_command(
@@ -3193,22 +3195,22 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
             description="Create tenant via ChatOps",
             visibility="admin",
         ),
-        name="quickstart.chatops.create_tenant",
+        name="bootstrap.chatops.create_tenant",
     )
     async def _create_tenant_handler(context: ChatOpsCommandContext) -> dict[str, str]:
         return {"status": "ok", "slug": context.args.get("slug", "")}
 
-    control.register_action_binding("create_tenant", "quickstart.chatops.create_tenant")
+    control.register_action_binding("create_tenant", "bootstrap.chatops.create_tenant")
     control.register_action_binding("extend_trial", "missing.binding")
 
     control.configure(settings)
 
     assert control.settings.bot_user_id == "U999"
-    assert control.settings.slash_commands[0].aliases == ("quickstart-create-tenant",)
+    assert control.settings.slash_commands[0].aliases == ("bootstrap-create-tenant",)
 
     with pytest.raises(HTTPError) as invalid_name:
         control.normalize_command_definition(
-            QuickstartSlashCommand(
+            BootstrapSlashCommand(
                 name="Invalid Name",
                 action="create_tenant",
                 description="bad",
@@ -3218,7 +3220,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
 
     with pytest.raises(HTTPError) as invalid_alias:
         control.normalize_command_definition(
-            QuickstartSlashCommand(
+            BootstrapSlashCommand(
                 name="valid-alias",
                 action="create_tenant",
                 description="bad alias",
@@ -3230,13 +3232,13 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     with pytest.raises(HTTPError) as duplicate:
         control.normalize_commands(
             (
-                QuickstartSlashCommand(
+                BootstrapSlashCommand(
                     name="alpha",
                     action="create_tenant",
                     description="demo",
                     aliases=("dupe",),
                 ),
-                QuickstartSlashCommand(
+                BootstrapSlashCommand(
                     name="beta",
                     action="extend_trial",
                     description="demo",
@@ -3249,7 +3251,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     admin_context = app.tenant_resolver.context_for(app.config.admin_subdomain, TenantScope.ADMIN)
     request = Request(method="POST", path="/__mere/chatops/slash", tenant=admin_context)
 
-    payload_create = QuickstartSlashCommandInvocation(
+    payload_create = BootstrapSlashCommandInvocation(
         text="<@U999> create-tenant slug=nu name=Nu",
         user_id="U123",
         user_name=None,
@@ -3260,7 +3262,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     assert actor == "U123"
     assert control.action_for_binding(binding) == "create_tenant"
 
-    payload_missing_binding = QuickstartSlashCommandInvocation(
+    payload_missing_binding = BootstrapSlashCommandInvocation(
         text="<@U999> extend-trial days=3",
         user_id="U123",
         user_name="demo",
@@ -3272,13 +3274,13 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     assert missing_binding_exc.value.code == "unknown_command"
 
     control.configure(
-        QuickstartChatOpsSettings(
+        BootstrapChatOpsSettings(
             enabled=True,
             webhook=settings.webhook,
             notifications=settings.notifications,
             slash_commands=(
                 *control.settings.slash_commands,
-                QuickstartSlashCommand(
+                BootstrapSlashCommand(
                     name="tenant-metrics",
                     action="tenant_metrics",
                     description="Metrics overview",
@@ -3288,7 +3290,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
             admin_workspace="T123",
         )
     )
-    payload_repeat = QuickstartSlashCommandInvocation(
+    payload_repeat = BootstrapSlashCommandInvocation(
         text="<@U999> create-tenant slug=omicron name=Omicron",
         user_id="U456",
         user_name="demo",
@@ -3303,7 +3305,7 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
     assert any(cmd["visibility"] == "admin" for cmd in filtered["slash_commands"])
 
     control.configure(
-        QuickstartChatOpsSettings(
+        BootstrapChatOpsSettings(
             enabled=True,
             webhook=settings.webhook,
             notifications=settings.notifications,
@@ -3317,12 +3319,12 @@ async def test_quickstart_chatops_control_plane_validation_paths() -> None:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_admin_control_plane_support_and_metrics(
+async def test_bootstrap_admin_control_plane_support_and_metrics(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(
         site="demo",
@@ -3330,9 +3332,9 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         allowed_tenants=("acme", "beta"),
         database=db_config,
     )
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
-    notifications = quickstart.QuickstartChatOpsNotificationChannels(
+    notifications = bootstrap.BootstrapChatOpsNotificationChannels(
         tenant_created="#tenants",
         billing_updated="#billing",
         subscription_past_due="#pastdue",
@@ -3340,15 +3342,15 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         support_ticket_created="#support",
         support_ticket_updated="#support",
     )
-    settings = QuickstartChatOpsSettings(
+    settings = BootstrapChatOpsSettings(
         enabled=True,
         webhook=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/demo"),
         notifications=notifications,
     )
-    control = QuickstartChatOpsControlPlane(
+    control = BootstrapChatOpsControlPlane(
         app,
         settings,
-        command_pattern=quickstart._TENANT_SLUG_PATTERN,
+        command_pattern=bootstrap._TENANT_SLUG_PATTERN,
     )
 
     events: list[tuple[TenantContext, ChatMessage]] = []
@@ -3361,58 +3363,58 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
 
     class StubAuthEngine:
         def __init__(self) -> None:
-            self.config = QuickstartAuthConfig(
-                tenants=(QuickstartTenant(slug="acme", name="Acme", users=()),),
-                admin=DEFAULT_QUICKSTART_AUTH.admin,
+            self.config = BootstrapAuthConfig(
+                tenants=(BootstrapTenant(slug="acme", name="Acme", users=()),),
+                admin=DEFAULT_BOOTSTRAP_AUTH.admin,
             )
-            self.reloaded: list[QuickstartAuthConfig] = []
+            self.reloaded: list[BootstrapAuthConfig] = []
 
-        async def reload(self, config: QuickstartAuthConfig) -> None:
+        async def reload(self, config: BootstrapAuthConfig) -> None:
             self.config = config
             self.reloaded.append(config)
 
     class StubTenantsStore:
         def __init__(self) -> None:
-            self.records: dict[str, QuickstartTenantRecord] = {}
+            self.records: dict[str, BootstrapTenantRecord] = {}
 
-        async def get(self, *, filters: Mapping[str, object] | None = None) -> QuickstartTenantRecord | None:
+        async def get(self, *, filters: Mapping[str, object] | None = None) -> BootstrapTenantRecord | None:
             slug = cast(str | None, (filters or {}).get("slug"))
             return self.records.get(slug) if slug else None
 
         async def create(
             self,
-            data: Mapping[str, object] | QuickstartTenantRecord,
-        ) -> QuickstartTenantRecord:
+            data: Mapping[str, object] | BootstrapTenantRecord,
+        ) -> BootstrapTenantRecord:
             if isinstance(data, Mapping):
-                record = QuickstartTenantRecord(slug=cast(str, data["slug"]), name=cast(str, data["name"]))
+                record = BootstrapTenantRecord(slug=cast(str, data["slug"]), name=cast(str, data["name"]))
             else:
                 record = data
             self.records[record.slug] = record
             return record
 
-        async def list(self, *, order_by: Sequence[str] = ()) -> list[QuickstartTenantRecord]:
+        async def list(self, *, order_by: Sequence[str] = ()) -> list[BootstrapTenantRecord]:
             return [self.records[key] for key in sorted(self.records.keys())]
 
     class StubTrialExtensionsStore:
         def __init__(self) -> None:
-            self.records: list[QuickstartTrialExtensionRecord] = []
+            self.records: list[BootstrapTrialExtensionRecord] = []
 
-        async def create(self, record: QuickstartTrialExtensionRecord) -> QuickstartTrialExtensionRecord:
+        async def create(self, record: BootstrapTrialExtensionRecord) -> BootstrapTrialExtensionRecord:
             self.records.append(record)
             return record
 
-        async def list(self, *, order_by: Sequence[str] = ()) -> list[QuickstartTrialExtensionRecord]:
+        async def list(self, *, order_by: Sequence[str] = ()) -> list[BootstrapTrialExtensionRecord]:
             return list(self.records)
 
     class StubSupportTicketsStore:
         def __init__(self) -> None:
-            self.records: dict[str, QuickstartSupportTicketRecord] = {}
+            self.records: dict[str, BootstrapSupportTicketRecord] = {}
 
-        async def create(self, record: QuickstartSupportTicketRecord) -> QuickstartSupportTicketRecord:
+        async def create(self, record: BootstrapSupportTicketRecord) -> BootstrapSupportTicketRecord:
             self.records[record.id] = record
             return record
 
-        async def get(self, *, filters: Mapping[str, object] | None = None) -> QuickstartSupportTicketRecord | None:
+        async def get(self, *, filters: Mapping[str, object] | None = None) -> BootstrapSupportTicketRecord | None:
             if not filters:
                 return None
             ticket_id = cast(str | None, filters.get("id"))
@@ -3425,26 +3427,26 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
             *,
             filters: Mapping[str, object],
             values: Mapping[str, object],
-        ) -> QuickstartSupportTicketRecord:
+        ) -> BootstrapSupportTicketRecord:
             ticket_id = cast(str, filters["id"])
             record = self.records[ticket_id]
             updated = structs.replace(record, **values)
             self.records[ticket_id] = updated
             return updated
 
-        async def list(self, *, order_by: Sequence[str] = ()) -> list[QuickstartSupportTicketRecord]:
+        async def list(self, *, order_by: Sequence[str] = ()) -> list[BootstrapSupportTicketRecord]:
             return list(self.records.values())
 
     class StubTenantSupportTicketsStore:
         def __init__(self) -> None:
-            self.records: defaultdict[str, dict[str, QuickstartTenantSupportTicketRecord]] = defaultdict(dict)
+            self.records: defaultdict[str, dict[str, BootstrapTenantSupportTicketRecord]] = defaultdict(dict)
 
         async def create(
             self,
-            data: QuickstartTenantSupportTicketRecord,
+            data: BootstrapTenantSupportTicketRecord,
             *,
             tenant: TenantContext,
-        ) -> QuickstartTenantSupportTicketRecord:
+        ) -> BootstrapTenantSupportTicketRecord:
             self.records[tenant.tenant][data.admin_ticket_id] = data
             return data
 
@@ -3453,7 +3455,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
             *,
             tenant: TenantContext,
             filters: Mapping[str, object],
-        ) -> QuickstartTenantSupportTicketRecord | None:
+        ) -> BootstrapTenantSupportTicketRecord | None:
             ticket_id = cast(str, filters["admin_ticket_id"])
             return self.records[tenant.tenant].get(ticket_id)
 
@@ -3463,7 +3465,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
             tenant: TenantContext,
             filters: Mapping[str, object],
             values: Mapping[str, object],
-        ) -> QuickstartTenantSupportTicketRecord:
+        ) -> BootstrapTenantSupportTicketRecord:
             ticket_id = cast(str, filters["admin_ticket_id"])
             record = self.records[tenant.tenant][ticket_id]
             updated = structs.replace(record, **values)
@@ -3475,15 +3477,15 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
             *,
             tenant: TenantContext,
             order_by: Sequence[str] = (),
-        ) -> list[QuickstartTenantSupportTicketRecord]:
+        ) -> list[BootstrapTenantSupportTicketRecord]:
             return list(self.records[tenant.tenant].values())
 
     stub_orm: ORM = cast(
         ORM,
         SimpleNamespace(
             admin=SimpleNamespace(
-                quickstart_tenants=StubTenantsStore(),
-                quickstart_trial_extensions=StubTrialExtensionsStore(),
+                bootstrap_tenants=StubTenantsStore(),
+                bootstrap_trial_extensions=StubTrialExtensionsStore(),
                 support_tickets=StubSupportTicketsStore(),
             ),
             tenants=SimpleNamespace(
@@ -3493,9 +3495,9 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
     )
 
     raw_engine = StubAuthEngine()
-    engine = cast(QuickstartAuthEngine, raw_engine)
+    engine = cast(BootstrapAuthEngine, raw_engine)
 
-    trial_store = cast(StubTrialExtensionsStore, stub_orm.admin.quickstart_trial_extensions)
+    trial_store = cast(StubTrialExtensionsStore, stub_orm.admin.bootstrap_trial_extensions)
     admin_ticket_store = cast(StubSupportTicketsStore, stub_orm.admin.support_tickets)
     tenant_ticket_store = cast(StubTenantSupportTicketsStore, stub_orm.tenants.support_tickets)
     ensure_calls: list[str] = []
@@ -3503,18 +3505,18 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
     async def ensure_contexts(slugs: Iterable[str]) -> None:
         ensure_calls.extend(slugs)
 
-    synced_configs: list[QuickstartAuthConfig] = []
+    synced_configs: list[BootstrapAuthConfig] = []
 
-    def sync_allowed_tenants(config: QuickstartAuthConfig) -> None:
+    def sync_allowed_tenants(config: BootstrapAuthConfig) -> None:
         synced_configs.append(config)
         app.tenant_resolver.allowed_tenants.update(tenant.slug for tenant in config.tenants)
         app.tenant_resolver.allowed_tenants.discard(app.config.admin_subdomain)
         app.tenant_resolver.allowed_tenants.discard(app.config.marketing_tenant)
 
-    admin_control = QuickstartAdminControlPlane(
+    admin_control = BootstrapAdminControlPlane(
         app,
         slug_normalizer=lambda raw: raw.strip().lower(),
-        slug_pattern=quickstart._TENANT_SLUG_PATTERN,
+        slug_pattern=bootstrap._TENANT_SLUG_PATTERN,
         ensure_contexts=ensure_contexts,
         chatops=control,
         sync_allowed_tenants=sync_allowed_tenants,
@@ -3553,7 +3555,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         )
     _assert_error_detail(reserved_slug, "slug_reserved")
 
-    await stub_orm.admin.quickstart_tenants.create({"slug": "existing", "name": "Existing"})
+    await stub_orm.admin.bootstrap_tenants.create({"slug": "existing", "name": "Existing"})
     with pytest.raises(HTTPError) as tenant_exists:
         await admin_control.create_tenant_from_inputs(
             "existing",
@@ -3616,7 +3618,7 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
         actor="tester",
         orm=stub_orm,
     )
-    assert isinstance(extension, QuickstartTrialExtensionRecord)
+    assert isinstance(extension, BootstrapTrialExtensionRecord)
     assert extension.note == "extend"
     assert trial_store.records[-1] is extension
 
@@ -3630,13 +3632,13 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
     with pytest.raises(HTTPError) as invalid_ticket:
         await admin_control.create_support_ticket(
             tenant_context,
-            QuickstartSupportTicketRequest(subject=" ", message="Issue", kind="general"),
+            BootstrapSupportTicketRequest(subject=" ", message="Issue", kind="general"),
             orm=stub_orm,
             actor="delta-admin",
         )
     _assert_error_detail(invalid_ticket, "invalid_ticket")
 
-    ticket_request = QuickstartSupportTicketRequest(
+    ticket_request = BootstrapSupportTicketRequest(
         subject="Login issue",
         message="Cannot access dashboard",
         kind="issue",
@@ -3661,13 +3663,13 @@ async def test_quickstart_admin_control_plane_support_and_metrics(
     with pytest.raises(HTTPError) as missing_ticket:
         await admin_control.update_support_ticket(
             "missing",
-            QuickstartSupportTicketUpdateRequest(status="responded", note=None),
+            BootstrapSupportTicketUpdateRequest(status="responded", note=None),
             orm=stub_orm,
             actor="agent",
         )
     _assert_error_detail(missing_ticket, "ticket_missing")
 
-    update_payload = QuickstartSupportTicketUpdateRequest(status="responded", note=" Investigating ")
+    update_payload = BootstrapSupportTicketUpdateRequest(status="responded", note=" Investigating ")
     updated_ticket = await admin_control.update_support_ticket(
         ticket.id,
         update_payload,
@@ -4002,8 +4004,8 @@ class StubWorkspaceOrm:
         tenant_records: Mapping[str, Sequence[Any]],
     ) -> None:
         self.admin = SimpleNamespace(
-            quickstart_tenants=_StubManager(admin_records.get("quickstart_tenants", ())),
-            quickstart_trial_extensions=_StubManager(admin_records.get("quickstart_trial_extensions", ())),
+            bootstrap_tenants=_StubManager(admin_records.get("bootstrap_tenants", ())),
+            bootstrap_trial_extensions=_StubManager(admin_records.get("bootstrap_trial_extensions", ())),
             support_tickets=_StubManager(admin_records.get("support_tickets", ())),
             billing=_StubManager(admin_records.get("billing", ())),
         )
@@ -4012,28 +4014,28 @@ class StubWorkspaceOrm:
         )
 
 
-def _build_quickstart_app(
+def _build_bootstrap_app(
     monkeypatch: pytest.MonkeyPatch,
     *,
     allowed_tenants: tuple[str, ...] = ("acme",),
 ) -> MereApp:
     connection = FakeConnection()
     pool = FakePool(connection)
-    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://quickstart"))
+    db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     config = AppConfig(site="demo", domain="local.test", allowed_tenants=allowed_tenants, database=db_config)
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
     async def _noop_apply(
-        self: quickstart.QuickstartSeeder,
-        config: quickstart.QuickstartAuthConfig,
+        self: bootstrap.BootstrapSeeder,
+        config: bootstrap.BootstrapAuthConfig,
         *,
         tenants: Mapping[str, TenantContext],
     ) -> bool:
         return False
 
     async def _noop_run_all(
-        self: quickstart.MigrationRunner,
+        self: bootstrap.MigrationRunner,
         *,
         tenants: Sequence[TenantContext],
     ) -> None:
@@ -4045,19 +4047,19 @@ def _build_quickstart_app(
     ) -> None:
         return None
 
-    monkeypatch.setattr(quickstart.QuickstartSeeder, "apply", _noop_apply)
-    monkeypatch.setattr(quickstart.MigrationRunner, "run_all", _noop_run_all)
-    monkeypatch.setattr(quickstart, "ensure_tenant_schemas", _noop_ensure)
+    monkeypatch.setattr(bootstrap.BootstrapSeeder, "apply", _noop_apply)
+    monkeypatch.setattr(bootstrap.MigrationRunner, "run_all", _noop_run_all)
+    monkeypatch.setattr(bootstrap, "ensure_tenant_schemas", _noop_ensure)
     app.dependencies.provide(TileService, lambda: object())
-    attach_quickstart(app)
+    attach_bootstrap(app)
     return app
 
 
 @pytest.mark.asyncio
-async def test_quickstart_tile_routes_delegate_to_service(
+async def test_bootstrap_tile_routes_delegate_to_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     stub = StubTileService()
     app.dependencies.provide(TileService, lambda: stub)
     stub.list_tiles_result = (
@@ -4129,10 +4131,10 @@ async def test_quickstart_tile_routes_delegate_to_service(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_workspace_views_return_data(
+async def test_bootstrap_workspace_views_return_data(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     tile_service = StubTileService()
     tile_service.list_tiles_result = (
         TileRecord(
@@ -4148,8 +4150,8 @@ async def test_quickstart_workspace_views_return_data(
 
     base = dt.datetime(2024, 1, 1, tzinfo=dt.timezone.utc)
     admin_records = {
-        "quickstart_tenants": (
-            quickstart.QuickstartTenantRecord(
+        "bootstrap_tenants": (
+            bootstrap.BootstrapTenantRecord(
                 id="tenant-acme",
                 slug="acme",
                 name="Acme Rockets",
@@ -4157,8 +4159,8 @@ async def test_quickstart_workspace_views_return_data(
                 updated_at=base,
             ),
         ),
-        "quickstart_trial_extensions": (
-            quickstart.QuickstartTrialExtensionRecord(
+        "bootstrap_trial_extensions": (
+            bootstrap.BootstrapTrialExtensionRecord(
                 id="trial-acme",
                 tenant_slug="acme",
                 extended_days=14,
@@ -4252,7 +4254,7 @@ async def test_quickstart_workspace_views_return_data(
     }
     tenant_records = {
         "support_tickets": (
-            quickstart.QuickstartTenantSupportTicketRecord(
+            bootstrap.BootstrapTenantSupportTicketRecord(
                 id="tenant-ticket-1",
                 admin_ticket_id="ticket-1",
                 kind=SupportTicketKind.ISSUE,
@@ -4265,7 +4267,7 @@ async def test_quickstart_workspace_views_return_data(
                 created_by="ops",
                 updated_by="ops",
             ),
-            quickstart.QuickstartTenantSupportTicketRecord(
+            bootstrap.BootstrapTenantSupportTicketRecord(
                 id="tenant-ticket-2",
                 admin_ticket_id="ticket-3",
                 kind=SupportTicketKind.GENERAL,
@@ -4318,10 +4320,10 @@ async def test_quickstart_workspace_views_return_data(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_workspace_views_return_sample_when_empty(
+async def test_bootstrap_workspace_views_return_sample_when_empty(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
 
     class EmptyTileService(StubTileService):
         async def list_tiles(
@@ -4367,10 +4369,10 @@ async def test_quickstart_workspace_views_return_sample_when_empty(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_workspace_views_return_sample_without_orm(
+async def test_bootstrap_workspace_views_return_sample_without_orm(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     app.dependencies.provide(TileService, StubTileService)
     app.dependencies.provide(ORM, lambda: None)
 
@@ -4394,10 +4396,10 @@ async def test_quickstart_workspace_views_return_sample_without_orm(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_workspace_routes_reject_cross_tenant_access(
+async def test_bootstrap_workspace_routes_reject_cross_tenant_access(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch, allowed_tenants=("acme", "beta"))
+    app = _build_bootstrap_app(monkeypatch, allowed_tenants=("acme", "beta"))
     app.dependencies.provide(TileService, StubTileService)
     orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
     app.dependencies.provide(ORM, lambda: orm)
@@ -4411,10 +4413,10 @@ async def test_quickstart_workspace_routes_reject_cross_tenant_access(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_workspace_context_created_on_demand(
+async def test_bootstrap_workspace_context_created_on_demand(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
     app.dependencies.provide(ORM, lambda: orm)
 
@@ -4429,7 +4431,7 @@ async def test_quickstart_workspace_context_created_on_demand(
 
 
 class _TruthyEmptySequence:
-    def __iter__(self) -> Iterable[QuickstartKanbanCard]:
+    def __iter__(self) -> Iterable[BootstrapKanbanCard]:
         return iter(())
 
     def __bool__(self) -> bool:
@@ -4437,10 +4439,10 @@ class _TruthyEmptySequence:
 
 
 @pytest.mark.asyncio
-async def test_quickstart_workspace_kanban_returns_sample_for_empty_columns(
+async def test_bootstrap_workspace_kanban_returns_sample_for_empty_columns(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     orm = StubWorkspaceOrm(admin_records={}, tenant_records={})
 
     async def _truthy_empty(
@@ -4467,10 +4469,10 @@ async def test_quickstart_workspace_kanban_returns_sample_for_empty_columns(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_rbac_routes_require_admin(
+async def test_bootstrap_rbac_routes_require_admin(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     stub = StubRbacService()
     app.dependencies.provide(RbacService, lambda: stub)
 
@@ -4499,10 +4501,10 @@ async def test_quickstart_rbac_routes_require_admin(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_delegation_routes_delegate(
+async def test_bootstrap_delegation_routes_delegate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     stub = StubDelegationService()
     app.dependencies.provide(DelegationService, lambda: stub)
 
@@ -4554,16 +4556,16 @@ async def test_quickstart_delegation_routes_delegate(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_cedar_dependency_handles_missing_workspace(
+async def test_bootstrap_cedar_dependency_handles_missing_workspace(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    async def stub_build(orm: quickstart.ORM, *, tenant: TenantContext, at: dt.datetime | None = None) -> CedarEngine:
+    async def stub_build(orm: bootstrap.ORM, *, tenant: TenantContext, at: dt.datetime | None = None) -> CedarEngine:
         if tenant.scope is TenantScope.TENANT and tenant.tenant == "acme":
             return CedarEngine(())
         raise HTTPError(Status.NOT_FOUND, {"detail": "missing"})
 
-    monkeypatch.setattr(quickstart, "build_cedar_engine", stub_build)
-    app = _build_quickstart_app(monkeypatch)
+    monkeypatch.setattr(bootstrap, "build_cedar_engine", stub_build)
+    app = _build_bootstrap_app(monkeypatch)
 
     tenant_request = Request(
         method="GET",
@@ -4626,10 +4628,10 @@ async def test_quickstart_cedar_dependency_handles_missing_workspace(
 
 
 @pytest.mark.asyncio
-async def test_quickstart_audit_routes_delegate_to_service(
+async def test_bootstrap_audit_routes_delegate_to_service(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    app = _build_quickstart_app(monkeypatch)
+    app = _build_bootstrap_app(monkeypatch)
     stub = StubAuditService()
     app.dependencies.provide(AuditService, lambda: stub)
 

@@ -25,7 +25,7 @@ context propagation.
 - `mere.tenancy` contains the tenant resolution algorithms, including helpers for admin vs tenant scope.
 - `mere.database` and `mere.orm` manage tenant-aware database access with schema separation and
   typed models.
-- `mere.quickstart` bootstraps authentication, tenancy data, and sample routes so new deployments can be
+- `mere.bootstrap` bootstraps authentication, tenancy data, and sample routes so new deployments can be
   exercised immediately.
 
 Each module is designed to run in-thread, in a separate process, or on a remote worker by serializing
