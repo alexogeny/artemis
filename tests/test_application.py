@@ -1131,6 +1131,20 @@ async def test_dispatch_binds_audit_actor_from_principal(monkeypatch: pytest.Mon
 
 
 @pytest.mark.asyncio
+async def test_asgi_rejects_unknown_scope_type() -> None:
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    async def receive() -> Mapping[str, Any]:  # pragma: no cover - should not be awaited
+        raise AssertionError("receive should not be called")
+
+    async def send(message: Mapping[str, Any]) -> None:  # pragma: no cover - should not be called
+        raise AssertionError("send should not be called")
+
+    with pytest.raises(RuntimeError, match="only supports HTTP, WebSocket, and Lifespan"):
+        await app({"type": "custom"}, receive, send)
+
+
+@pytest.mark.asyncio
 async def test_mount_asgi_serves_root_and_named_route() -> None:
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
     app = MereApp(config=config)
@@ -1237,3 +1251,115 @@ async def test_mount_asgi_requires_response_start() -> None:
     with pytest.raises(RuntimeError):
         await app.dispatch("GET", "/broken", host="acme.demo.example.com")
     await app.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_lifespan_startup_and_shutdown_flow() -> None:
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    lifecycle_events: list[str] = []
+
+    @app.on_startup
+    async def handle_startup() -> None:
+        lifecycle_events.append("started")
+
+    @app.on_shutdown
+    async def handle_shutdown() -> None:
+        lifecycle_events.append("stopped")
+
+    lifecycle_messages: list[dict[str, Any]] = []
+    events = [
+        {"type": "lifespan.startup"},
+        {"type": "lifespan.shutdown"},
+    ]
+
+    async def receive() -> Mapping[str, Any]:
+        return events.pop(0)
+
+    async def send(message: Mapping[str, Any]) -> None:
+        lifecycle_messages.append(dict(message))
+
+    await app({"type": "lifespan"}, receive, send)
+
+    assert lifecycle_events == ["started", "stopped"]
+    assert lifecycle_messages == [
+        {"type": "lifespan.startup.complete"},
+        {"type": "lifespan.shutdown.complete"},
+    ]
+
+    repeat_messages: list[dict[str, Any]] = []
+    repeat_events = [
+        {"type": "lifespan.startup"},
+        {"type": "lifespan.shutdown"},
+    ]
+
+    async def repeat_receive() -> Mapping[str, Any]:
+        return repeat_events.pop(0)
+
+    async def repeat_send(message: Mapping[str, Any]) -> None:
+        repeat_messages.append(dict(message))
+
+    await app({"type": "lifespan"}, repeat_receive, repeat_send)
+
+    assert lifecycle_events == ["started", "stopped"]
+    assert repeat_messages == [
+        {"type": "lifespan.startup.complete"},
+        {"type": "lifespan.shutdown.complete"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_reports_startup_failure() -> None:
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+
+    @app.on_startup
+    async def fail_startup() -> None:
+        raise RuntimeError("boom")
+
+    events = [{"type": "lifespan.startup"}]
+    captured: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, Any]:
+        return events.pop(0)
+
+    async def send(message: Mapping[str, Any]) -> None:
+        captured.append(dict(message))
+
+    with pytest.raises(RuntimeError):
+        await app({"type": "lifespan"}, receive, send)
+
+    assert captured and captured[0]["type"] == "lifespan.startup.failed"
+    assert "boom" in captured[0]["message"]
+
+
+@pytest.mark.asyncio
+async def test_lifespan_reports_shutdown_failure() -> None:
+    app = MereApp(AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",)))
+    lifecycle_markers: list[str] = []
+
+    @app.on_startup
+    async def record_startup() -> None:
+        lifecycle_markers.append("started")
+
+    @app.on_shutdown
+    async def fail_shutdown() -> None:
+        raise RuntimeError("shutdown boom")
+
+    events = [
+        {"type": "lifespan.startup"},
+        {"type": "lifespan.shutdown"},
+    ]
+    captured: list[dict[str, Any]] = []
+
+    async def receive() -> Mapping[str, Any]:
+        return events.pop(0)
+
+    async def send(message: Mapping[str, Any]) -> None:
+        captured.append(dict(message))
+
+    with pytest.raises(RuntimeError):
+        await app({"type": "lifespan"}, receive, send)
+
+    assert lifecycle_markers == ["started"]
+    assert captured[0]["type"] == "lifespan.startup.complete"
+    assert captured[1]["type"] == "lifespan.shutdown.failed"
+    assert "shutdown boom" in captured[1]["message"]

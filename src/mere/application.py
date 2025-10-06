@@ -108,6 +108,8 @@ class MereApp:
         self._startup_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._shutdown_hooks: list[Callable[[], Awaitable[None] | None]] = []
         self._named_routes: dict[str, str] = {}
+        self._lifespan_started = False
+        self._lifespan_shutdown = False
 
         if self.database:
             self.dependencies.provide(Database, lambda: self.database)
@@ -563,7 +565,10 @@ class MereApp:
         if scope_type == "websocket":
             await self._handle_websocket(scope, receive, send)
             return
-        raise RuntimeError("MereApp only supports HTTP and WebSocket scopes")
+        if scope_type == "lifespan":
+            await self._handle_lifespan(receive, send)
+            return
+        raise RuntimeError("MereApp only supports HTTP, WebSocket, and Lifespan scopes")
 
     async def _handle_http(
         self,
@@ -751,6 +756,36 @@ class MereApp:
             await websocket.join_background()
             if not websocket.closed:
                 await websocket.close()
+
+    async def _handle_lifespan(
+        self,
+        receive: Callable[[], Awaitable[Mapping[str, Any]]],
+        send: Callable[[Mapping[str, Any]], Awaitable[None]],
+    ) -> None:
+        while True:
+            message = await receive()
+            message_type = message.get("type")
+            if message_type == "lifespan.startup":
+                if not self._lifespan_started:
+                    try:
+                        await self.startup()
+                    except Exception as exc:  # pragma: no cover - exercised in integration tests
+                        await send({"type": "lifespan.startup.failed", "message": str(exc)})
+                        raise
+                    self._lifespan_started = True
+                await send({"type": "lifespan.startup.complete"})
+            elif message_type == "lifespan.shutdown":
+                if self._lifespan_started and not self._lifespan_shutdown:
+                    try:
+                        await self.shutdown()
+                    except Exception as exc:  # pragma: no cover - exercised in integration tests
+                        await send({"type": "lifespan.shutdown.failed", "message": str(exc)})
+                        raise
+                    self._lifespan_shutdown = True
+                await send({"type": "lifespan.shutdown.complete"})
+                return
+            else:  # pragma: no cover - defensive programming
+                raise RuntimeError(f"Unsupported lifespan message: {message_type!r}")
 
     @staticmethod
     def _decode_scope_headers(raw_headers: Iterable[tuple[HeaderPart, HeaderPart]]) -> tuple[dict[str, str], bool]:
