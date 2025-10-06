@@ -124,7 +124,8 @@ def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
     )
     mfa_code = MfaCode(
         user_id="user",
-        code="123456",
+        code_hash="deadbeefcafebabe" * 2,
+        code_salt="feedfacecafebabe",
         purpose=MfaPurpose.SIGN_IN,
         expires_at=dt.datetime.now(dt.timezone.utc),
     )
@@ -150,6 +151,7 @@ def test_json_response_redacts_tenant_credentials_and_tokens() -> None:
     assert "secret" not in data["app_secret"]
     assert "salt" not in data["app_secret"]
     assert "client_secret" not in data["oidc"]
-    assert "code" not in data["mfa"]
+    assert "code_hash" not in data["mfa"]
+    assert "code_salt" not in data["mfa"]
     assert "token_hash" not in data["session"]
     assert "token_salt" not in data["session"]

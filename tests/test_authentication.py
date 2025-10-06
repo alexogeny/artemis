@@ -11,6 +11,7 @@ from cryptography import x509
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, ed448, ed25519, padding, rsa
 from cryptography.x509.oid import NameOID
+from msgspec import structs
 
 import lxml.etree as LET
 import mere.authentication as authentication_module
@@ -35,7 +36,6 @@ from mere.models import (
     AppSecret,
     Customer,
     FederatedProvider,
-    MfaCode,
     MfaPurpose,
     SessionLevel,
     TenantFederatedUser,
@@ -394,14 +394,14 @@ async def test_password_hashing_and_mfa_authentication() -> None:
         mfa_enforced=True,
     )
     manager = MfaManager()
-    code = manager.issue(user_id=user.id, purpose=MfaPurpose.SIGN_IN, now=now)
+    issued = manager.issue(user_id=user.id, purpose=MfaPurpose.SIGN_IN, now=now)
     session = await service.authenticate_tenant_password(
         user=user,
         app_secret=app_secret,
         tenant_secret=tenant_secret,
         password="correct horse battery",
-        mfa_codes=[code],
-        submitted_code=code.code,
+        mfa_codes=[issued.record],
+        submitted_code=issued.code,
         now=now,
     )
     assert session.level is SessionLevel.MFA
@@ -411,7 +411,7 @@ async def test_password_hashing_and_mfa_authentication() -> None:
             app_secret=app_secret,
             tenant_secret=tenant_secret,
             password="correct horse battery",
-            mfa_codes=[code],
+            mfa_codes=[issued.record],
             submitted_code="000000",
             now=now,
         )
@@ -836,28 +836,17 @@ async def test_authenticate_tenant_password_uses_matching_mfa_code() -> None:
         mfa_enforced=True,
     )
     manager = MfaManager()
-    valid = manager.issue(user_id=user.id, purpose=MfaPurpose.SIGN_IN, now=now)
-    mismatched_user = MfaCode(
-        user_id="other",
-        code="111111",
-        purpose=MfaPurpose.SIGN_IN,
-        expires_at=now + dt.timedelta(minutes=5),
-        created_at=now,
-    )
-    mismatched_purpose = MfaCode(
-        user_id=user.id,
-        code="222222",
-        purpose=MfaPurpose.RECOVERY,
-        expires_at=now + dt.timedelta(minutes=5),
-        created_at=now,
-    )
+    issued = manager.issue(user_id=user.id, purpose=MfaPurpose.SIGN_IN, now=now)
+    valid = issued.record
+    mismatched_user = structs.replace(valid, user_id="other")
+    mismatched_purpose = structs.replace(valid, purpose=MfaPurpose.RECOVERY)
     session = await service.authenticate_tenant_password(
         user=user,
         app_secret=app_secret,
         tenant_secret=tenant_secret,
         password="p@ss",
         mfa_codes=[mismatched_user, mismatched_purpose, valid],
-        submitted_code=valid.code,
+        submitted_code=issued.code,
         now=now,
     )
     assert session.level is SessionLevel.MFA
@@ -1111,36 +1100,101 @@ def test_passkey_authentication_success() -> None:
     assert session.level is SessionLevel.PASSKEY
 
 
+def test_mfa_manager_issue_hashes_codes() -> None:
+    manager = MfaManager()
+    now = dt.datetime.now(dt.timezone.utc)
+    issued = manager.issue(user_id="user", purpose=MfaPurpose.SIGN_IN, now=now)
+    record = issued.record
+    assert record.code_hash is not None
+    assert record.code_salt is not None
+    assert record.code_hash != issued.code
+    assert record.code_salt != issued.code
+    verified = manager.verify(
+        codes=[record],
+        user_id="user",
+        submitted=issued.code,
+        purpose=MfaPurpose.SIGN_IN,
+        now=now,
+    )
+    assert verified.consumed_at == now
+
+
 def test_mfa_manager_invalid_code_paths() -> None:
     manager = MfaManager()
     now = dt.datetime.now(dt.timezone.utc)
     issued = manager.issue(user_id="user", purpose=MfaPurpose.SIGN_IN, now=now)
+    wrong_code = "000000" if issued.code != "000000" else "111111"
     with pytest.raises(AuthenticationError):
-        manager.verify(codes=[issued], user_id="user", submitted="999999", purpose=MfaPurpose.SIGN_IN, now=now)
-    expired = MfaCode(
-        user_id="user",
-        code="111111",
-        purpose=MfaPurpose.SIGN_IN,
+        manager.verify(
+            codes=[issued.record],
+            user_id="user",
+            submitted=wrong_code,
+            purpose=MfaPurpose.SIGN_IN,
+            now=now,
+        )
+    expired = structs.replace(
+        issued.record,
         expires_at=now - dt.timedelta(seconds=1),
         created_at=now - dt.timedelta(minutes=1),
+        updated_at=now - dt.timedelta(minutes=1),
     )
     with pytest.raises(AuthenticationError):
-        manager.verify(codes=[expired], user_id="user", submitted="111111", purpose=MfaPurpose.SIGN_IN, now=now)
+        manager.verify(
+            codes=[expired],
+            user_id="user",
+            submitted=issued.code,
+            purpose=MfaPurpose.SIGN_IN,
+            now=now,
+        )
 
 
 def test_mfa_manager_rejects_consumed_codes() -> None:
     manager = MfaManager()
     now = dt.datetime.now(dt.timezone.utc)
-    consumed = MfaCode(
-        user_id="user",
-        code="123456",
-        purpose=MfaPurpose.SIGN_IN,
-        expires_at=now + dt.timedelta(minutes=5),
-        created_at=now - dt.timedelta(minutes=1),
+    issued = manager.issue(user_id="user", purpose=MfaPurpose.SIGN_IN, now=now)
+    consumed = structs.replace(
+        issued.record,
         consumed_at=now,
+        updated_at=now,
     )
     with pytest.raises(AuthenticationError):
-        manager.verify(codes=[consumed], user_id="user", submitted="123456", purpose=MfaPurpose.SIGN_IN, now=now)
+        manager.verify(
+            codes=[consumed],
+            user_id="user",
+            submitted=issued.code,
+            purpose=MfaPurpose.SIGN_IN,
+            now=now,
+        )
+
+
+def test_mfa_manager_ignores_legacy_codes_without_hash_material() -> None:
+    manager = MfaManager()
+    now = dt.datetime.now(dt.timezone.utc)
+    issued = manager.issue(user_id="user", purpose=MfaPurpose.SIGN_IN, now=now)
+    legacy = structs.replace(issued.record, code_hash=None, code_salt=None)
+    with pytest.raises(AuthenticationError):
+        manager.verify(
+            codes=[legacy],
+            user_id="user",
+            submitted=issued.code,
+            purpose=MfaPurpose.SIGN_IN,
+            now=now,
+        )
+
+
+def test_mfa_manager_ignores_codes_with_invalid_hash_material() -> None:
+    manager = MfaManager()
+    now = dt.datetime.now(dt.timezone.utc)
+    issued = manager.issue(user_id="user", purpose=MfaPurpose.SIGN_IN, now=now)
+    invalid = structs.replace(issued.record, code_hash="zz", code_salt="zz")
+    with pytest.raises(AuthenticationError):
+        manager.verify(
+            codes=[invalid],
+            user_id="user",
+            submitted=issued.code,
+            purpose=MfaPurpose.SIGN_IN,
+            now=now,
+        )
 
 
 def test_oidc_authenticator_error_paths() -> None:
