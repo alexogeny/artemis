@@ -70,7 +70,7 @@ async def test_database_schema_resolution_and_pool_factory() -> None:
     await database.startup()
     assert captured_options[0]["dsn"] == "postgres://demo"
     assert captured_options[0]["application_name"] == "mere"
-    assert captured_options[0]["sslmode"] == "verify-full"
+    assert captured_options[0]["ssl_mode"] == "verify-full"
     assert captured_options[0]["options"]["sslmode"] == "verify-full"
 
     admin_info = type("AdminInfo", (), {"scope": "admin", "schema": None, "table": "billing"})
@@ -203,15 +203,16 @@ def test_pool_kwargs_resolves_secrets_and_tls() -> None:
     options = database_module._pool_kwargs(pool_config, resolver=resolver)
     assert options["user"] == "appuser"
     assert options["password"] == "s3cr3t"
-    assert options["sslrootcert"] == "/etc/db-ca.pem"
-    assert options["sslcert"] == "/etc/db-cert.pem"
-    assert options["sslkey"] == "/etc/db-key.pem"
-    assert options["sslpassword"] == "passphrase"
-    assert options["ssl_server_name"] == "db.internal"
-    assert options["ssl_min_protocol_version"] == "TLS1.2"
-    assert options["ssl_max_protocol_version"] == "TLS1.3"
-    assert options["ssl_cert_pins"] == ("sha256:abcdef",)
-    assert options["sslmode"] == "verify-full"
+    assert options["ca_file"] == "/etc/db-ca.pem"
+    assert options["options"]["sslrootcert"] == "/etc/db-ca.pem"
+    assert options["options"]["sslcert"] == "/etc/db-cert.pem"
+    assert options["options"]["sslkey"] == "/etc/db-key.pem"
+    assert options["options"]["sslpassword"] == "passphrase"
+    assert options["options"]["ssl_server_name"] == "db.internal"
+    assert options["options"]["ssl_min_protocol_version"] == "TLS1.2"
+    assert options["options"]["ssl_max_protocol_version"] == "TLS1.3"
+    assert options["options"]["ssl_cert_pins"] == ("sha256:abcdef",)
+    assert options["ssl_mode"] == "verify-full"
     assert resolver.calls  # ensure secrets were fetched
 
 
@@ -288,7 +289,7 @@ def test_database_private_helpers() -> None:
     assert options["application_name"] == "demo"
     assert options["extra"] == "value"
     assert options["options"]["extra"] == "value"
-    assert options["sslmode"] == "verify-full"
+    assert options["ssl_mode"] == "verify-full"
     assert options["options"]["sslmode"] == "verify-full"
 
     assert _quote_identifier("tenant") == '"tenant"'
@@ -304,3 +305,10 @@ def test_database_private_helpers() -> None:
     assert database_module._coerce_rows(Nullish()) == []
     with pytest.raises(DatabaseError):
         database_module._coerce_rows(123)
+
+
+def test_preferred_pool_key_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When psqlpy does not expose a signature, stick to the preferred alias."""
+
+    monkeypatch.setattr(database_module, "_PSQLPY_POOL_PARAMETERS", set())
+    assert database_module._preferred_pool_key("sslmode") == "ssl_mode"

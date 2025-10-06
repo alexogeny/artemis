@@ -16,6 +16,18 @@ try:  # pragma: no cover - optional import exercised in runtime integration test
 except ModuleNotFoundError:  # pragma: no cover - fallback used in unit tests where a fake pool is injected
     _PsqlpyConnectionPool = None  # type: ignore[assignment]
 
+try:  # pragma: no cover - best-effort: native signatures may not expose inspectable metadata
+    _PSQLPY_POOL_PARAMETERS = (
+        set(inspect.signature(_PsqlpyConnectionPool).parameters) if _PsqlpyConnectionPool is not None else set()
+    )
+except (TypeError, ValueError):  # pragma: no cover - C extensions may reject introspection
+    _PSQLPY_POOL_PARAMETERS = set()
+
+_TLS_POOL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "sslmode": ("ssl_mode",),
+    "sslrootcert": ("ca_file",),
+}
+
 
 class DatabaseError(RuntimeError):
     """Raised when the database integration cannot satisfy an operation."""
@@ -351,9 +363,12 @@ def _pool_kwargs(config: PoolConfig, *, resolver: "SecretResolver | None" = None
     payload.update(credentials)
 
     tls_options = config.tls.resolve(resolver)
-    payload.update(tls_options)
+    nested_options.update(tls_options)
     for key, value in tls_options.items():
-        nested_options[key] = value
+        target_key = _preferred_pool_key(key)
+        if target_key is None:
+            continue
+        payload[target_key] = value
 
     payload["options"] = nested_options
     return {key: value for key, value in payload.items() if value is not None}
@@ -368,6 +383,19 @@ def _default_pool_factory(options: Mapping[str, Any]) -> Any:  # pragma: no cove
 def _quote_identifier(identifier: str) -> str:
     escaped = identifier.replace('"', '""')
     return f'"{escaped}"'
+
+
+def _preferred_pool_key(source: str) -> str | None:
+    """Return the best-known parameter name for ``source`` accepted by psqlpy."""
+
+    aliases = _TLS_POOL_KEY_ALIASES.get(source, ())
+    candidates = (*aliases, source)
+    if not _PSQLPY_POOL_PARAMETERS:
+        return candidates[0]
+    for candidate in candidates:
+        if candidate in _PSQLPY_POOL_PARAMETERS:
+            return candidate
+    return None
 
 
 __all__ = [
