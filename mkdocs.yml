@@ -10,7 +10,7 @@ nav:
   - Architecture:
       - Overview: architecture/overview.md
   - Guides:
-      - Quickstart helper: guides/quickstart.md
+      - Bootstrap helper: guides/bootstrap.md
       - Tenant routing: guides/tenancy.md
       - Observability: guides/observability.md
       - Database and ORM: guides/database.md

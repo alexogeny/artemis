@@ -1061,7 +1061,7 @@ def test_chatops_slash_command_resolution_rules() -> None:
             name="create-tenant",
             description="Create a tenant",
             visibility="admin",
-            aliases=("quickstart-create-tenant",),
+            aliases=("bootstrap-create-tenant",),
         ),
         ChatOpsSlashCommand(
             name="extend-trial",
@@ -1072,7 +1072,7 @@ def test_chatops_slash_command_resolution_rules() -> None:
 
     assert service.normalize_command_token(" /Create-Tenant ") == "create-tenant"
     resolved_admin = service.resolve_slash_command(
-        "/quickstart-create-tenant",
+        "/bootstrap-create-tenant",
         commands,
         tenant=admin,
         workspace_id="T123",

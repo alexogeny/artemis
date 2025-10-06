@@ -5,7 +5,7 @@ from __future__ import annotations
 import inspect
 import os
 from collections.abc import AsyncIterable, AsyncIterator
-from typing import Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Awaitable, Callable, Dict, Iterable, Mapping, Sequence
 from urllib.parse import urlsplit
 
 import msgspec
@@ -50,6 +50,10 @@ ASGIApp = Callable[
 _ALL_HTTP_METHODS: tuple[str, ...] = ("DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT", "TRACE")
 
 
+if TYPE_CHECKING:  # pragma: no cover - typing-only import to avoid circular reference
+    from .bootstrap import BootstrapAuthConfig
+
+
 class MereApp:
     """Central application object."""
 
@@ -64,6 +68,11 @@ class MereApp:
         orm: ORM | None = None,
         chatops: ChatOpsService | None = None,
         observability: Observability | None = None,
+        bootstrap_enabled: bool = False,
+        bootstrap_auth: "BootstrapAuthConfig | None" = None,
+        bootstrap_environment: str | None = None,
+        bootstrap_base_path: str = "/__mere",
+        bootstrap_allow_production: bool = False,
     ) -> None:
         self.config = config or AppConfig()
         self.router = Router()
@@ -110,6 +119,17 @@ class MereApp:
             self.dependencies.provide(AuditTrail, lambda: self.audit_trail)
         self.dependencies.provide(Observability, lambda: self.observability)
         self.dependencies.provide(ChatOpsService, lambda: self.chatops)
+
+        if bootstrap_enabled:
+            from . import bootstrap as _bootstrap
+
+            _bootstrap.attach_bootstrap(
+                self,
+                base_path=bootstrap_base_path,
+                environment=bootstrap_environment,
+                allow_production=bootstrap_allow_production,
+                auth_config=bootstrap_auth,
+            )
 
     # ------------------------------------------------------------------ routing
     def route(

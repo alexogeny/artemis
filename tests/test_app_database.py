@@ -15,7 +15,7 @@ async def test_application_wires_database_and_orm() -> None:
     db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://demo"), admin_schema="admin")
     database = Database(db_config, pool=pool)
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",), database=db_config)
-    app = MereApp(config=config, database=database)
+    app = MereApp(config=config, database=database, bootstrap_enabled=False)
 
     assert app.database is database
     assert app.orm is not None

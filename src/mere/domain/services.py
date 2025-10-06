@@ -1,4 +1,4 @@
-"""Domain service contracts used by the quickstart transport layer."""
+"""Domain service contracts used by the bootstrap transport layer."""
 
 from __future__ import annotations
 

@@ -44,7 +44,7 @@ def _make_app() -> MereApp:
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = MereApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability, bootstrap_enabled=False)
 
     guard = RouteGuard(action="read", resource_type="item", resource_id="42", principal_type="user")
 
@@ -115,7 +115,7 @@ def test_generate_openapi_handles_docstrings_and_skips_parameters() -> None:
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = MereApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability, bootstrap_enabled=False)
 
     @app.post("/doc/{item_id}")
     async def documented(item_id: int, note, count: int, result: Result, payload: DocPayload) -> Result:
@@ -145,7 +145,7 @@ def test_generate_openapi_without_components() -> None:
         ObservabilityConfig(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
     )
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
-    app = MereApp(config=config, observability=observability)
+    app = MereApp(config=config, observability=observability, bootstrap_enabled=False)
 
     @app.get("/ping")
     async def ping() -> str:

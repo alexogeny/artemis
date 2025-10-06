@@ -1,4 +1,4 @@
-"""Domain service interfaces for Mere quickstart integrations."""
+"""Domain service interfaces for Mere bootstrap integrations."""
 
 from .services import (
     AuditLogEntry,
