@@ -2654,12 +2654,13 @@ async def test_attach_bootstrap_bootstraps_database(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
-async def test_ensure_tenant_schemas_handles_empty() -> None:
+async def test_ensure_tenant_schemas_creates_admin_schema_when_no_tenants() -> None:
     pool = FakePool()
     db_config = DatabaseConfig(pool=PoolConfig(dsn="postgres://bootstrap"))
     database = Database(db_config, pool=pool)
     await ensure_tenant_schemas(database, [])
-    assert all("CREATE SCHEMA" not in sql for _, sql, *_ in pool.connection.calls)
+    statements = [sql for kind, sql, *_ in pool.connection.calls if kind == "execute"]
+    assert any("CREATE SCHEMA" in sql and '"admin"' in sql for sql in statements)
 
 
 @pytest.mark.asyncio
