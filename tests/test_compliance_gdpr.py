@@ -183,3 +183,30 @@ def test_gdpr_datadog_tags_can_be_hashed() -> None:
     tags = observability._sanitize_datadog_tags(("tenant:acme", "chatops.site:demo"))
     assert tags[0].startswith("tenant:[hash:")
     assert tags[1].startswith("chatops.site:[hash:")
+
+
+def test_gdpr_rejects_empty_host_headers() -> None:
+    """Article 32(1)(b) requires requests to present a valid host identifier."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve("")
+
+
+def test_gdpr_resolver_normalizes_uppercase_hosts() -> None:
+    """Article 5(1)(d) accuracy controls normalise tenant hostnames."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme", "beta"))
+    context = resolver.resolve("ACME.DEMO.EXAMPLE.COM")
+    assert context.tenant == "acme"
+    assert context.scope is TenantScope.TENANT
+
+
+def test_gdpr_rejects_hosts_exceeding_dns_length_limits() -> None:
+    """Article 32(1)(c) blocks overlong hostnames that risk ambiguity."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    label = "a" * 63
+    hostname = ".".join([label] * 4 + ["demo", "example", "com"])
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve(hostname)

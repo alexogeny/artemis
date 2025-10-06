@@ -8,7 +8,7 @@ import msgspec
 import pytest
 
 from mere.audit import UPDATE, AuditActor, AuditTrail, audit_context
-from mere.authentication import AuthenticationError, AuthenticationRateLimiter
+from mere.authentication import AuthenticationError, AuthenticationRateLimiter, PasswordHasher
 from mere.database import Database, DatabaseConfig, PoolConfig
 from mere.models import TenantAuditLogEntry, TenantUser
 from mere.orm import default_registry
@@ -275,3 +275,35 @@ async def test_hipaa_audit_entries_capture_actor_identity() -> None:
     assert inserted["actor_id"] == "auditor-7"
     assert inserted["actor_type"] == "ComplianceOfficer"
     assert inserted["metadata"]["tenant"] == "acme"
+
+
+@pytest.mark.asyncio
+async def test_hipaa_password_hasher_preserves_credential_integrity() -> None:
+    """164.312(c)(1) mandates mechanisms that authenticate stored credentials."""
+
+    hasher = PasswordHasher()
+    secret_key = "service-secret"
+    salt = "session-1"
+
+    digest = await hasher.hash("super-secret", secret_key=secret_key, salt=salt)
+    assert digest != "super-secret"
+    assert await hasher.verify("super-secret", secret_key=secret_key, salt=salt, expected=digest)
+
+
+@pytest.mark.asyncio
+async def test_hipaa_rate_limiter_terminates_overflow_identities() -> None:
+    """164.308(a)(3)(ii)(C) requires promptly revoking stale access identifiers."""
+
+    rate_limiter = AuthenticationRateLimiter(max_attempts=1, max_entries=2, lockout_period=dt.timedelta(minutes=5))
+    now = dt.datetime(2024, 5, 5, 12, tzinfo=dt.timezone.utc)
+
+    await rate_limiter.record_failure(["tenant:alpha:clinician"], now)
+    await rate_limiter.record_failure(["tenant:beta:clinician"], now + dt.timedelta(seconds=1))
+    await rate_limiter.record_failure(["tenant:gamma:clinician"], now + dt.timedelta(seconds=2))
+
+    # The oldest entry should have been purged to stay within capacity.
+    await rate_limiter.enforce(["tenant:alpha:clinician"], now + dt.timedelta(seconds=3))
+
+    with pytest.raises(AuthenticationError) as excinfo:
+        await rate_limiter.enforce(["tenant:gamma:clinician"], now + dt.timedelta(seconds=3))
+    assert str(excinfo.value) == "account_locked"

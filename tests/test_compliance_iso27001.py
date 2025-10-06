@@ -213,3 +213,23 @@ def test_iso27001_datadog_hashes_chatops_tags() -> None:
     tags = observability._sanitize_datadog_tags(("chatops.site:demo", "tenant:acme"))
     assert tags[0].startswith("chatops.site:[hash:")
     assert tags[1].startswith("tenant:[hash:")
+
+
+def test_iso27001_traceparent_rejects_overlong_headers() -> None:
+    """Annex A.8.16 rejects trace metadata beyond the defined bounds."""
+
+    header = "00-" + ("a" * 32) + "-" + ("b" * 16) + "-01" + ("-overflow" * 40)
+    assert Observability._parse_traceparent(header) is None
+
+
+def test_iso27001_http_target_hashing_protects_urls() -> None:
+    """Annex A.12.4.3 requires sensitive request targets be anonymised."""
+
+    config = ObservabilityConfig(
+        logging=LoggingRedactionConfig(request_path="hash", exception_message="raw", hash_salt="pepper"),
+    )
+    observability = Observability(config)
+    payload = {"http.target": "/admin/patients?mrn=42"}
+
+    observability._sanitize_log_payload(payload)
+    assert payload["http.target"].startswith("[hash:")

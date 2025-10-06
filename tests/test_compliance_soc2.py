@@ -13,7 +13,8 @@ from mere.audit import INSERT, AuditActor, AuditTrail, audit_context
 from mere.database import Database, DatabaseConfig, PoolConfig
 from mere.models import AdminAuditLogEntry, TenantAuditLogEntry, TenantUser
 from mere.orm import default_registry
-from mere.responses import Response, security_headers_middleware
+from mere.requests import Request
+from mere.responses import PlainTextResponse, Response, security_headers_middleware
 from mere.routing import RouteGuard, Router
 from mere.server import (
     ServerConfig,
@@ -316,3 +317,41 @@ def test_soc2_router_include_rejects_undecorated_handlers() -> None:
 
     with pytest.raises(ValueError):
         router.include([undecorated])
+
+
+def test_soc2_plaintext_responses_apply_security_headers() -> None:
+    """SOC 2 CC7.1 enforces hardened defaults on plaintext responses."""
+
+    response = PlainTextResponse("ok")
+    header_names = {name.lower() for name, _ in response.headers}
+    assert "strict-transport-security" in header_names
+    assert "content-security-policy" in header_names
+
+
+def test_soc2_tls_requirements_respect_profile_case() -> None:
+    """SOC 2 CC8.1 standardises environment gating for TLS assets."""
+
+    paths = {
+        "certificate_path": (Path("config/tls/server.crt"), False),
+        "private_key_path": (Path("config/tls/server.key"), False),
+    }
+
+    # Mixed case development profiles should still bypass strict enforcement.
+    _require_paths(paths, profile="DeVeLoPmEnT")
+
+
+def test_soc2_route_guards_evaluate_callable_context() -> None:
+    """SOC 2 CC6.2 requires runtime evaluation of guard context."""
+
+    guard = RouteGuard(
+        action="read",
+        resource_type="tenant",
+        resource_id=lambda request: f"tenant:{request.tenant.tenant}",
+        context_factory=lambda request: {"tenant": request.tenant.tenant},
+    )
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    tenant = resolver.context_for("acme")
+    request = Request(method="GET", path="/secure", tenant=tenant)
+
+    assert guard.resolve_resource(request) == "tenant:acme"
+    assert guard.context(request) == {"tenant": "acme"}
