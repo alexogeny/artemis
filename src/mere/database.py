@@ -6,16 +6,33 @@ import inspect
 import shlex
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from types import ModuleType
 from typing import Any, AsyncIterator, Callable, Mapping, Protocol, Sequence
 
 import msgspec
 
 from .tenancy import TenantContext
 
-try:  # pragma: no cover - optional import exercised in runtime integration tests
-    from psqlpy import ConnectionPool as _PsqlpyConnectionPool
-except ModuleNotFoundError:  # pragma: no cover - fallback used in unit tests where a fake pool is injected
-    _PsqlpyConnectionPool = None  # type: ignore[assignment]
+_PsqlpySslMode: type[Any] | None = None
+_psqlpy: ModuleType | None = None
+
+
+def _load_psqlpy() -> ModuleType | None:  # pragma: no cover - simple import wrapper
+    try:
+        import psqlpy as module  # type: ignore[import-not-found]
+    except ModuleNotFoundError:
+        return None
+    return module
+
+
+_psqlpy = _load_psqlpy()
+
+if _psqlpy is not None:  # pragma: no cover - exercised when psqlpy is installed
+    _PsqlpyConnectionPool = getattr(_psqlpy, "ConnectionPool", None)
+    _PsqlpySslMode = getattr(_psqlpy, "SslMode", None)
+else:
+    _PsqlpyConnectionPool = None  # type: ignore[assignment]  # pragma: no cover
+    _PsqlpySslMode = None  # pragma: no cover
 
 try:  # pragma: no cover - best-effort: native signatures may not expose inspectable metadata
     _PSQLPY_POOL_PARAMETERS = (
@@ -27,6 +44,19 @@ except (TypeError, ValueError):  # pragma: no cover - C extensions may reject in
 _TLS_POOL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "sslmode": ("ssl_mode",),
     "sslrootcert": ("ca_file",),
+}
+
+_SSL_MODE_ALIASES: dict[str, str] = {
+    "disable": "Disable",
+    "allow": "Allow",
+    "prefer": "Prefer",
+    "require": "Require",
+    "verifyca": "VerifyCa",
+    "verify_ca": "VerifyCa",
+    "verify-ca": "VerifyCa",
+    "verifyfull": "VerifyFull",
+    "verify_full": "VerifyFull",
+    "verify-full": "VerifyFull",
 }
 
 
@@ -382,7 +412,8 @@ def _default_pool_factory(options: Mapping[str, Any]) -> Any:  # pragma: no cove
     raw_options = payload.get("options")
     if isinstance(raw_options, Mapping):
         payload["options"] = _format_pool_options(raw_options)
-    return _PsqlpyConnectionPool(**payload)
+    coerced = {key: _coerce_pool_parameter(key, value) for key, value in payload.items()}
+    return _PsqlpyConnectionPool(**coerced)
 
 
 def _quote_identifier(identifier: str) -> str:
@@ -419,6 +450,33 @@ def _iter_option_values(value: Any) -> Sequence[Any]:
     if value is None:
         return ()
     return (value,)
+
+
+def _coerce_pool_parameter(key: str, value: Any) -> Any:
+    if key == "ssl_mode":
+        return _coerce_ssl_mode(value)
+    return value
+
+
+def _coerce_ssl_mode(value: Any) -> Any:
+    if _PsqlpySslMode is None or value is None:
+        return value
+    if isinstance(value, _PsqlpySslMode):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower().replace(" ", "_")
+        alias = _SSL_MODE_ALIASES.get(normalized)
+        if alias is None:
+            alias = _SSL_MODE_ALIASES.get(normalized.replace("_", ""))
+        if alias is None:
+            raise DatabaseError(f"Unsupported ssl mode value: {value!r}")
+        candidate = getattr(_PsqlpySslMode, alias, None)
+        if candidate is None:
+            raise DatabaseError(f"psqlpy does not expose ssl mode {alias!r}")
+        return candidate
+    if getattr(value.__class__, "__name__", "") == getattr(_PsqlpySslMode, "__name__", ""):
+        return value
+    raise DatabaseError(f"Unsupported ssl mode type: {type(value).__name__}")
 
 
 __all__ = [

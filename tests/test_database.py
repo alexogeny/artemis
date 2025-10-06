@@ -20,6 +20,26 @@ from mere.tenancy import TenantResolver
 from tests.support import FakeConnection, FakePool, StaticSecretResolver
 
 
+def _ssl_mode_label(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value.lower()
+    text = str(value)
+    if "." in text:
+        text = text.split(".", 1)[1]
+    return _camel_to_kebab(text)
+
+
+def _camel_to_kebab(text: str) -> str:
+    result: list[str] = []
+    for index, char in enumerate(text):
+        if char.isupper() and index and not text[index - 1].isupper():
+            result.append("-")
+        result.append(char.lower())
+    return "".join(result)
+
+
 @pytest.mark.asyncio
 async def test_database_sets_search_path_and_role() -> None:
     connection = FakeConnection()
@@ -70,7 +90,7 @@ async def test_database_schema_resolution_and_pool_factory() -> None:
     await database.startup()
     assert captured_options[0]["dsn"] == "postgres://demo"
     assert captured_options[0]["application_name"] == "mere"
-    assert captured_options[0]["ssl_mode"] == "verify-full"
+    assert _ssl_mode_label(captured_options[0]["ssl_mode"]) == "verify-full"
     assert captured_options[0]["options"]["sslmode"] == "verify-full"
 
     admin_info = type("AdminInfo", (), {"scope": "admin", "schema": None, "table": "billing"})
@@ -212,7 +232,7 @@ def test_pool_kwargs_resolves_secrets_and_tls() -> None:
     assert options["options"]["ssl_min_protocol_version"] == "TLS1.2"
     assert options["options"]["ssl_max_protocol_version"] == "TLS1.3"
     assert options["options"]["ssl_cert_pins"] == ("sha256:abcdef",)
-    assert options["ssl_mode"] == "verify-full"
+    assert _ssl_mode_label(options["ssl_mode"]) == "verify-full"
     assert resolver.calls  # ensure secrets were fetched
 
 
@@ -289,7 +309,7 @@ def test_database_private_helpers() -> None:
     assert options["application_name"] == "demo"
     assert options["extra"] == "value"
     assert options["options"]["extra"] == "value"
-    assert options["ssl_mode"] == "verify-full"
+    assert _ssl_mode_label(options["ssl_mode"]) == "verify-full"
     assert options["options"]["sslmode"] == "verify-full"
 
     assert _quote_identifier("tenant") == '"tenant"'
@@ -333,3 +353,78 @@ def test_default_pool_factory_serializes_options(monkeypatch: pytest.MonkeyPatch
     database_module._default_pool_factory(options)
     assert captured["dsn"] == "postgres://demo"
     assert captured["options"] == "search_path=public pin=a"
+
+
+def test_default_pool_factory_coerces_ssl_mode_enum(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeSslMode:
+        VerifyFull: "FakeSslMode"
+
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+        def __repr__(self) -> str:
+            return f"SslMode.{self.name}"
+
+    FakeSslMode.VerifyFull = FakeSslMode("VerifyFull")
+
+    class StubPool:
+        def __init__(self, **kwargs: Any) -> None:
+            captured.update(kwargs)
+
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", FakeSslMode)
+    monkeypatch.setattr(database_module, "_PsqlpyConnectionPool", StubPool)
+    database_module._default_pool_factory({"ssl_mode": "verify-full"})
+    assert isinstance(captured["ssl_mode"], FakeSslMode)
+    assert captured["ssl_mode"].name == "VerifyFull"
+
+
+def test_coerce_ssl_mode_rejects_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSslMode:
+        pass
+
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", FakeSslMode)
+    with pytest.raises(DatabaseError):
+        database_module._coerce_ssl_mode("broken")
+
+
+def test_coerce_ssl_mode_passthrough_without_enum(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", None)
+    assert database_module._coerce_ssl_mode("verify-full") == "verify-full"
+
+
+def test_coerce_ssl_mode_accepts_instance(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSslMode:
+        pass
+
+    instance = FakeSslMode()
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", FakeSslMode)
+    assert database_module._coerce_ssl_mode(instance) is instance
+
+
+def test_coerce_ssl_mode_missing_attribute(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSslMode:
+        pass
+
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", FakeSslMode)
+    monkeypatch.setitem(database_module._SSL_MODE_ALIASES, "custom", "MissingAttr")
+    with pytest.raises(DatabaseError):
+        database_module._coerce_ssl_mode("custom")
+
+
+def test_coerce_ssl_mode_accepts_same_named_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    base = type("SslMode", (), {})
+    mirror = type("SslMode", (), {})
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", base)
+    instance = mirror()
+    assert database_module._coerce_ssl_mode(instance) is instance
+
+
+def test_coerce_ssl_mode_rejects_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeSslMode:
+        pass
+
+    monkeypatch.setattr(database_module, "_PsqlpySslMode", FakeSslMode)
+    with pytest.raises(DatabaseError):
+        database_module._coerce_ssl_mode(123)
