@@ -44,6 +44,20 @@ from tests.observability_stubs import (
 )
 
 
+def enabled_config(**overrides: Any) -> ObservabilityConfig:
+    params: dict[str, Any] = {
+        "opentelemetry_enabled": True,
+        "datadog_enabled": True,
+        "sentry_enabled": True,
+    }
+    params.update(overrides)
+    return ObservabilityConfig(**params)
+
+
+def enabled_observability(**overrides: Any) -> Observability:
+    return Observability(enabled_config(**overrides))
+
+
 def test_chatops_parse_slash_command_args() -> None:
     args = parse_slash_command_args(
         'slug=alpha =ignored name="Alpha Beta" note=Trial flag extra="value" note2=" spaced "'
@@ -278,7 +292,7 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
             default_channel="#ops",
         ),
     )
-    observability = Observability(ObservabilityConfig(datadog_tags=(("env", "test"),), sentry_record_breadcrumbs=True))
+    observability = enabled_observability(datadog_tags=(("env", "test"),), sentry_record_breadcrumbs=True)
     service = ChatOpsService(config, transport=transport, observability=observability)
 
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
@@ -302,7 +316,7 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
     assert getattr(second_span.status, "status_code", None) == "ok"
     assert second_span.ended
 
-    assert [crumb["data"]["tenant"] for crumb in hub.breadcrumbs] == ["acme", "admin"]
+    assert [crumb["data"]["tenant"] for crumb in hub.breadcrumbs] == ["[redacted]", "[redacted]"]
     assert [crumb["message"] for crumb in hub.breadcrumbs] == [
         "ChatOps message (12 chars)",
         "ChatOps message (11 chars)",
@@ -316,7 +330,7 @@ async def test_chatops_instrumentation_success(monkeypatch: pytest.MonkeyPatch) 
         observability.config.chatops.datadog_metric_sent,
     ]
     first_tags = statsd.increments[0][2]
-    assert "tenant:acme" in first_tags
+    assert "tenant:[redacted]" in first_tags
     assert "channel:#alerts" in first_tags
     assert "env:test" in first_tags
     assert [metric for metric, _, _ in statsd.timings] == [
@@ -345,7 +359,7 @@ async def test_chatops_instrumentation_error(monkeypatch: pytest.MonkeyPatch) ->
             default_channel="#ops",
         ),
     )
-    observability = Observability()
+    observability = enabled_observability()
     service = ChatOpsService(config, transport=failing_transport, observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
@@ -361,7 +375,7 @@ async def test_chatops_instrumentation_error(monkeypatch: pytest.MonkeyPatch) ->
     assert statsd.timings == []
     assert statsd.increments[-1][0] == observability.config.chatops.datadog_metric_error
     error_tags = statsd.increments[-1][2]
-    assert "tenant:acme" in error_tags
+    assert "tenant:[redacted]" in error_tags
     assert "scope:tenant" in error_tags
 
 
@@ -380,12 +394,7 @@ async def test_chatops_instrumentation_disabled(monkeypatch: pytest.MonkeyPatch)
         raise ChatOpsError("disabled")
 
     observability = Observability(
-        ObservabilityConfig(
-            enabled=False,
-            opentelemetry_enabled=False,
-            sentry_enabled=False,
-            datadog_enabled=False,
-        )
+        enabled_config(enabled=False, opentelemetry_enabled=False, sentry_enabled=False, datadog_enabled=False)
     )
     service = ChatOpsService(config, transport=failing_transport, observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
@@ -407,11 +416,7 @@ async def test_chatops_instrumentation_datadog_only(monkeypatch: pytest.MonkeyPa
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
     observability = Observability(
-        ObservabilityConfig(
-            opentelemetry_enabled=False,
-            sentry_enabled=False,
-            datadog_enabled=True,
-        )
+        enabled_config(opentelemetry_enabled=False, sentry_enabled=False, datadog_enabled=True)
     )
     service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
@@ -421,7 +426,7 @@ async def test_chatops_instrumentation_datadog_only(monkeypatch: pytest.MonkeyPa
     assert service._observability.enabled
     assert [metric for metric, _, _ in statsd.increments] == [observability.config.chatops.datadog_metric_sent]
     tags = statsd.increments[0][2]
-    assert "tenant:acme" in tags
+    assert "tenant:[redacted]" in tags
     assert "channel" not in {tag.split(":", 1)[0] for tag in tags}
     assert "webhook_host:hooks.slack.com" in tags
     assert statsd.timings and statsd.timings[0][0] == observability.config.chatops.datadog_metric_timing
@@ -450,7 +455,7 @@ async def test_chatops_instrumentation_sentry_options(monkeypatch: pytest.Monkey
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
     observability = Observability(
-        ObservabilityConfig(
+        enabled_config(
             datadog_enabled=False,
             sentry_record_breadcrumbs=False,
             sentry_capture_exceptions=False,
@@ -489,7 +494,7 @@ async def test_chatops_instrumentation_sentry_breadcrumbs_without_channel(
         enabled=True,
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
-    observability = Observability(ObservabilityConfig(datadog_enabled=False, sentry_record_breadcrumbs=True))
+    observability = enabled_observability(datadog_enabled=False, sentry_record_breadcrumbs=True)
     service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
@@ -513,7 +518,7 @@ async def test_chatops_instrumentation_tracer_without_status(monkeypatch: pytest
         enabled=True,
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 
@@ -546,7 +551,7 @@ async def test_chatops_instrumentation_span_without_record_exception(
         enabled=True,
         default=SlackWebhookConfig(webhook_url="https://hooks.slack.com/services/token"),
     )
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     service = ChatOpsService(config, transport=RecordingTransport(), observability=observability)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
 

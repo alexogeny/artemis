@@ -21,7 +21,7 @@ from mere import (
     TenantScope,
     TestClient,
 )
-from mere.observability import _MAX_TRACESTATE_LENGTH, LoggingRedactionConfig
+from mere.observability import _MAX_TRACESTATE_LENGTH, LoggingRedactionConfig, TenantRedactionConfig
 from tests.observability_stubs import (
     setup_stub_datadog,
     setup_stub_opentelemetry,
@@ -31,15 +31,23 @@ from tests.observability_stubs import (
 )
 
 
+def enabled_config(**overrides: Any) -> ObservabilityConfig:
+    params: dict[str, Any] = {
+        "opentelemetry_enabled": True,
+        "datadog_enabled": True,
+        "sentry_enabled": True,
+    }
+    params.update(overrides)
+    return ObservabilityConfig(**params)
+
+
+def enabled_observability(**overrides: Any) -> Observability:
+    return Observability(enabled_config(**overrides))
+
+
 def test_observability_chatops_error_without_context(monkeypatch: pytest.MonkeyPatch) -> None:
     hub = setup_stub_sentry(monkeypatch)
-    observability = Observability(
-        ObservabilityConfig(
-            opentelemetry_enabled=False,
-            datadog_enabled=False,
-            sentry_enabled=True,
-        )
-    )
+    observability = Observability(enabled_config(opentelemetry_enabled=False, datadog_enabled=False))
 
     exc = RuntimeError("manual")
     observability.on_chatops_send_error(None, exc)
@@ -53,7 +61,7 @@ async def test_request_observability_success(monkeypatch: pytest.MonkeyPatch) ->
     hub = setup_stub_sentry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
 
-    observability = Observability(ObservabilityConfig(datadog_tags=(("env", "test"),)))
+    observability = enabled_observability(datadog_tags=(("env", "test"),))
     config = AppConfig(
         site="demo",
         domain="example.com",
@@ -80,7 +88,7 @@ async def test_request_observability_success(monkeypatch: pytest.MonkeyPatch) ->
     metric, _, tags = statsd.timings[-1]
     assert metric == observability.config.request.datadog_metric_timing
     assert "status:200" in tags
-    assert "tenant:acme" in tags
+    assert "tenant:[redacted]" in tags
     assert "env:test" in tags
 
 
@@ -90,7 +98,7 @@ async def test_request_observability_error(monkeypatch: pytest.MonkeyPatch) -> N
     hub = setup_stub_sentry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
 
-    observability = Observability()
+    observability = enabled_observability()
     config = AppConfig(
         site="demo",
         domain="example.com",
@@ -208,6 +216,41 @@ def test_request_logging_raw_mode(caplog: pytest.LogCaptureFixture) -> None:
     assert error_event["error_message"] == "raw message"
 
 
+def test_tenant_metadata_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = setup_stub_sentry(monkeypatch)
+    setup_stub_datadog(monkeypatch)
+    observability = enabled_observability(
+        opentelemetry_enabled=False,
+        sentry_record_breadcrumbs=True,
+    )
+    context = observability.on_request_start(_make_request())
+    assert context is not None
+    assert context.log_fields["tenant"] == "[redacted]"
+    assert context.log_fields["scope"] == "tenant"
+    assert "tenant:[redacted]" in context.datadog_tags
+    assert "site:[redacted]" in context.datadog_tags
+    scope = hub.scopes[-1]
+    assert scope.tags["http.tenant"] == "[redacted]"
+
+
+def test_tenant_metadata_hashed(monkeypatch: pytest.MonkeyPatch) -> None:
+    hub = setup_stub_sentry(monkeypatch)
+    setup_stub_datadog(monkeypatch)
+    observability = enabled_observability(
+        opentelemetry_enabled=False,
+        sentry_record_breadcrumbs=True,
+        tenant=TenantRedactionConfig(log_fields="hash", sentry_tags="hash", datadog_tags="hash"),
+    )
+    context = observability.on_request_start(_make_request())
+    assert context is not None
+    tenant_hash = context.log_fields["tenant"]
+    site_hash = next(tag.split(":", 1)[1] for tag in context.datadog_tags if tag.startswith("site:"))
+    assert tenant_hash.startswith("[hash:")
+    assert site_hash.startswith("[hash:")
+    scope = hub.scopes[-1]
+    assert scope.tags["http.tenant"].startswith("[hash:")
+
+
 def test_logging_config_rejects_invalid_strategy() -> None:
     with pytest.raises(ValueError):
         Observability(
@@ -219,6 +262,24 @@ def test_logging_config_rejects_invalid_strategy() -> None:
         Observability(
             ObservabilityConfig(
                 logging=LoggingRedactionConfig(exception_message="invalid"),
+            )
+        )
+    with pytest.raises(ValueError):
+        Observability(
+            ObservabilityConfig(
+                tenant=TenantRedactionConfig(log_fields="invalid"),
+            )
+        )
+    with pytest.raises(ValueError):
+        Observability(
+            ObservabilityConfig(
+                tenant=TenantRedactionConfig(sentry_tags="invalid"),
+            )
+        )
+    with pytest.raises(ValueError):
+        Observability(
+            ObservabilityConfig(
+                tenant=TenantRedactionConfig(datadog_tags="invalid"),
             )
         )
 
@@ -244,6 +305,29 @@ def test_log_payload_sanitizer_modes() -> None:
     assert observability._sanitize_exception_message_for_logs(None) is None
 
 
+def test_resolve_flag_prefers_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("MERE_OBSERVABILITY_OPENTELEMETRY_ENABLED", "yes")
+    assert Observability._resolve_flag("MERE_OBSERVABILITY_OPENTELEMETRY_ENABLED", False) is True
+    monkeypatch.setenv("MERE_OBSERVABILITY_OPENTELEMETRY_ENABLED", " ")
+    assert Observability._resolve_flag("MERE_OBSERVABILITY_OPENTELEMETRY_ENABLED", True) is True
+
+
+def test_sanitize_tenant_value_variants() -> None:
+    observability = enabled_observability(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
+    assert observability._sanitize_tenant_value("hash", category="tenant", value=123) == 123
+    assert observability._sanitize_tenant_value("hash", category="tenant", value="[redacted]") == "[redacted]"
+    assert observability._sanitize_tenant_value("raw", category="tenant", value="acme") == "acme"
+    assert Observability._is_sanitized("[hash:abcd]")
+    assert not Observability._is_sanitized(123)
+
+
+def test_sanitize_datadog_tags_without_separator() -> None:
+    observability = enabled_observability(opentelemetry_enabled=False, datadog_enabled=False, sentry_enabled=False)
+    tags = observability._sanitize_datadog_tags(["plain", "tenant:acme"])
+    assert tags[0] == "plain"
+    assert tags[1].startswith("tenant:")
+
+
 @pytest.mark.asyncio
 async def test_observability_chatops_success_without_metrics(
     monkeypatch: pytest.MonkeyPatch,
@@ -251,7 +335,7 @@ async def test_observability_chatops_success_without_metrics(
     setup_stub_opentelemetry(monkeypatch)
     setup_stub_sentry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
 
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     message = ChatMessage(text="noop")
@@ -268,7 +352,7 @@ async def test_observability_chatops_success_without_metrics(
 
 
 def test_observability_chatops_start_without_host() -> None:
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     message = ChatMessage(text="nohost")
     config = SlackWebhookConfig(webhook_url="https:///token")
@@ -282,7 +366,7 @@ def test_observability_chatops_error_with_span(monkeypatch: pytest.MonkeyPatch) 
     tracer = setup_stub_opentelemetry(monkeypatch)
     hub = setup_stub_sentry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
 
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     message = ChatMessage(text="boom")
@@ -303,7 +387,7 @@ def test_observability_chatops_error_with_span(monkeypatch: pytest.MonkeyPatch) 
 
 def test_observability_request_success_without_status(monkeypatch: pytest.MonkeyPatch) -> None:
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -324,7 +408,7 @@ def test_observability_request_success_without_status(monkeypatch: pytest.Monkey
 
 def test_observability_request_error_context_none(monkeypatch: pytest.MonkeyPatch) -> None:
     hub = setup_stub_sentry(monkeypatch)
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     error = RuntimeError("missing context")
 
     observability.on_request_error(None, error, status_code=400)
@@ -334,7 +418,7 @@ def test_observability_request_error_context_none(monkeypatch: pytest.MonkeyPatc
 
 def test_observability_request_error_without_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="POST",
@@ -357,7 +441,7 @@ def test_observability_request_error_without_metrics(monkeypatch: pytest.MonkeyP
 
 
 def test_observability_request_success_context_none() -> None:
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     observability.on_request_success(None, Response())
 
 
@@ -395,7 +479,7 @@ def test_observability_context_without_stack_when_inactive() -> None:
 
 def test_observability_request_success_without_timing(monkeypatch: pytest.MonkeyPatch) -> None:
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -419,7 +503,7 @@ def test_observability_request_success_without_timing(monkeypatch: pytest.Monkey
 def test_observability_request_error_without_status(monkeypatch: pytest.MonkeyPatch) -> None:
     statsd = setup_stub_datadog(monkeypatch)
     setup_stub_opentelemetry(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="POST",
@@ -442,7 +526,7 @@ def test_observability_request_error_without_status(monkeypatch: pytest.MonkeyPa
 
 def test_observability_request_error_status_without_span(monkeypatch: pytest.MonkeyPatch) -> None:
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability(ObservabilityConfig(opentelemetry_enabled=False))
+    observability = enabled_observability(opentelemetry_enabled=False)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -467,7 +551,7 @@ def test_observability_request_error_span_without_record_exception(
     setup_stub_opentelemetry_without_record(monkeypatch)
     hub = setup_stub_sentry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -492,7 +576,7 @@ def test_observability_request_success_without_status_with_span(
 ) -> None:
     setup_stub_opentelemetry(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -514,7 +598,7 @@ def test_observability_request_success_without_status_with_span(
 def test_observability_request_success_without_status_support(monkeypatch: pytest.MonkeyPatch) -> None:
     setup_stub_opentelemetry_without_status(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -537,7 +621,7 @@ def test_observability_request_success_without_status_attribute(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracer = setup_stub_opentelemetry(monkeypatch)
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -568,7 +652,7 @@ def test_observability_request_success_without_status_attribute(
 
 def test_observability_request_error_without_statsd(monkeypatch: pytest.MonkeyPatch) -> None:
     setup_stub_sentry(monkeypatch)
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -590,7 +674,7 @@ def test_observability_request_error_status_without_status_support(
 ) -> None:
     setup_stub_opentelemetry_without_status(monkeypatch)
     statsd = setup_stub_datadog(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -732,7 +816,7 @@ async def test_observability_records_middleware_spans(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracer = setup_stub_opentelemetry(monkeypatch)
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     config = AppConfig(site="demo", domain="example.com", allowed_tenants=("acme",))
     app = MereApp(config=config, observability=observability)
 
@@ -1011,7 +1095,7 @@ async def test_observability_middleware_error_logs_exception(
     monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     tracer = setup_stub_opentelemetry(monkeypatch)
-    observability = Observability()
+    observability = enabled_observability()
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",
@@ -1038,7 +1122,7 @@ def test_observability_middleware_error_without_status_support(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tracer = setup_stub_opentelemetry_without_status(monkeypatch)
-    observability = Observability(ObservabilityConfig(datadog_enabled=False))
+    observability = enabled_observability(datadog_enabled=False)
     tenant = TenantContext(tenant="acme", site="demo", domain="example.com", scope=TenantScope.TENANT)
     request = Request(
         method="GET",

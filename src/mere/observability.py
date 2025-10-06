@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 from contextlib import ExitStack
@@ -49,23 +50,36 @@ class LoggingRedactionConfig(msgspec.Struct, frozen=True):
 
 _LOGGING_STRATEGIES = frozenset({"redact", "hash", "raw"})
 
+_OPENTELEMETRY_ENV = "MERE_OBSERVABILITY_OPENTELEMETRY_ENABLED"
+_SENTRY_ENV = "MERE_OBSERVABILITY_SENTRY_ENABLED"
+_DATADOG_ENV = "MERE_OBSERVABILITY_DATADOG_ENABLED"
+
+
+class TenantRedactionConfig(msgspec.Struct, frozen=True):
+    """Configure how tenant metadata is exposed to observability sinks."""
+
+    log_fields: str = "redact"
+    sentry_tags: str = "redact"
+    datadog_tags: str = "redact"
+
 
 class ObservabilityConfig(msgspec.Struct, frozen=True):
     """Top-level observability configuration."""
 
     enabled: bool = True
-    opentelemetry_enabled: bool = True
+    opentelemetry_enabled: bool = False
     opentelemetry_tracer: str = "mere"
-    sentry_enabled: bool = True
+    sentry_enabled: bool = False
     sentry_record_breadcrumbs: bool = False
     sentry_capture_exceptions: bool = True
     sentry_breadcrumb_category: str = "mere"
     sentry_breadcrumb_level: str = "info"
-    datadog_enabled: bool = True
+    datadog_enabled: bool = False
     datadog_tags: tuple[tuple[str, str], ...] = ()
     chatops: ChatOpsObservabilityConfig = ChatOpsObservabilityConfig()
     request: RequestObservabilityConfig = RequestObservabilityConfig()
     logging: LoggingRedactionConfig = LoggingRedactionConfig()
+    tenant: TenantRedactionConfig = TenantRedactionConfig()
 
 
 class _ObservationContext:
@@ -176,6 +190,16 @@ def _default_id_generator() -> Callable[[int], str]:
 class Observability:
     """Coordinate tracing, error tracking, metrics, and logging providers."""
 
+    @staticmethod
+    def _resolve_flag(env_var: str, default: bool) -> bool:
+        value = os.getenv(env_var)
+        if value is None:
+            return default
+        normalized = value.strip().lower()
+        if not normalized:
+            return default
+        return normalized in {"1", "true", "yes", "on"}
+
     def __init__(
         self,
         config: ObservabilityConfig | None = None,
@@ -187,6 +211,12 @@ class Observability:
             raise ValueError("logging.request_path must be one of 'redact', 'hash', or 'raw'")
         if self.config.logging.exception_message not in _LOGGING_STRATEGIES:
             raise ValueError("logging.exception_message must be one of 'redact', 'hash', or 'raw'")
+        if self.config.tenant.log_fields not in _LOGGING_STRATEGIES:
+            raise ValueError("tenant.log_fields must be one of 'redact', 'hash', or 'raw'")
+        if self.config.tenant.sentry_tags not in _LOGGING_STRATEGIES:
+            raise ValueError("tenant.sentry_tags must be one of 'redact', 'hash', or 'raw'")
+        if self.config.tenant.datadog_tags not in _LOGGING_STRATEGIES:
+            raise ValueError("tenant.datadog_tags must be one of 'redact', 'hash', or 'raw'")
         self._tracer = None
         self._client_span_kind = None
         self._server_span_kind = None
@@ -200,10 +230,17 @@ class Observability:
         self._otel_extract: Callable[[Mapping[str, str]], Any] | None = None
         self._logger = logging.getLogger("mere.observability")
         self._id_generator = id_generator or _default_id_generator()
-        self._base_datadog_tags = tuple(f"{key}:{value}" for key, value in self.config.datadog_tags)
+        raw_base_tags = tuple(f"{key}:{value}" for key, value in self.config.datadog_tags)
+        self._tenant_log_strategy = self.config.tenant.log_fields
+        self._tenant_sentry_strategy = self.config.tenant.sentry_tags
+        self._tenant_datadog_strategy = self.config.tenant.datadog_tags
         self._request_path_strategy = self.config.logging.request_path
         self._exception_strategy = self.config.logging.exception_message
         self._hash_salt = (self.config.logging.hash_salt or "").encode()
+        self._base_datadog_tags = self._sanitize_datadog_tags(raw_base_tags)
+        self._opentelemetry_enabled = self._resolve_flag(_OPENTELEMETRY_ENV, self.config.opentelemetry_enabled)
+        self._sentry_enabled = self._resolve_flag(_SENTRY_ENV, self.config.sentry_enabled)
+        self._datadog_enabled = self._resolve_flag(_DATADOG_ENV, self.config.datadog_enabled)
         if self.config.enabled:
             self._prepare_opentelemetry()
             self._prepare_sentry()
@@ -215,7 +252,7 @@ class Observability:
         return self._enabled
 
     def _prepare_opentelemetry(self) -> None:
-        if not self.config.opentelemetry_enabled:
+        if not self._opentelemetry_enabled:
             return
         try:
             from opentelemetry import trace  # type: ignore[import-not-found]
@@ -250,7 +287,7 @@ class Observability:
             self._otel_extract = extract
 
     def _prepare_sentry(self) -> None:
-        if not self.config.sentry_enabled:
+        if not self._sentry_enabled:
             return
         try:
             import sentry_sdk  # type: ignore[import-not-found]
@@ -259,7 +296,7 @@ class Observability:
         self._sentry_hub = sentry_sdk.Hub.current
 
     def _prepare_datadog(self) -> None:
-        if not self.config.datadog_enabled:
+        if not self._datadog_enabled:
             return
         statsd = None
         try:
@@ -353,6 +390,65 @@ class Observability:
             digest.update(self._hash_salt)
         return f"[hash:{digest.hexdigest()[:16]}]"
 
+    @staticmethod
+    def _is_sanitized(value: Any) -> bool:
+        if not isinstance(value, str):
+            return False
+        return value == "[redacted]" or value.startswith("[hash:")
+
+    def _sanitize_tenant_value(self, strategy: str, *, category: str, value: Any) -> Any:
+        if not isinstance(value, str):
+            return value
+        if self._is_sanitized(value):
+            return value
+        if strategy == "raw":
+            return value
+        if strategy == "hash":
+            return self._hash_value(category=category, value=value)
+        return "[redacted]"
+
+    def _sanitize_log_fields(self, fields: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if not fields:
+            return None if fields is None else {}
+        sanitized: dict[str, Any] = dict(fields)
+        for key in ("tenant", "http.tenant", "site", "http.site"):
+            if key in sanitized:
+                sanitized[key] = self._sanitize_tenant_value(
+                    self._tenant_log_strategy,
+                    category=f"tenant-log:{key}",
+                    value=sanitized[key],
+                )
+        return sanitized
+
+    def _sanitize_sentry_tags(self, tags: Mapping[str, Any] | None) -> dict[str, Any] | None:
+        if not tags:
+            return None if tags is None else {}
+        sanitized: dict[str, Any] = dict(tags)
+        for key in ("tenant", "http.tenant", "chatops.tenant", "chatops.site", "http.site"):
+            if key in sanitized:
+                sanitized[key] = self._sanitize_tenant_value(
+                    self._tenant_sentry_strategy,
+                    category=f"tenant-sentry:{key}",
+                    value=sanitized[key],
+                )
+        return sanitized
+
+    def _sanitize_datadog_tags(self, tags: Iterable[str]) -> tuple[str, ...]:
+        sanitized: list[str] = []
+        for tag in tags:
+            if ":" not in tag:
+                sanitized.append(tag)
+                continue
+            key, value = tag.split(":", 1)
+            if key in {"tenant", "http.tenant", "site", "http.site", "chatops.tenant", "chatops.site"}:
+                value = self._sanitize_tenant_value(
+                    self._tenant_datadog_strategy,
+                    category=f"tenant-datadog:{key}",
+                    value=value,
+                )
+            sanitized.append(f"{key}:{value}")
+        return tuple(sanitized)
+
     def _sanitize_request_path_for_logs(self, path: str | None) -> str | None:
         if not path:
             return path
@@ -378,6 +474,13 @@ class Observability:
             payload["http.target"] = self._sanitize_request_path_for_logs(payload.get("http.target"))
         if "error_message" in payload:
             payload["error_message"] = self._sanitize_exception_message_for_logs(payload.get("error_message"))
+        for key in ("tenant", "http.tenant", "site", "http.site"):
+            if key in payload:
+                payload[key] = self._sanitize_tenant_value(
+                    self._tenant_log_strategy,
+                    category=f"tenant-log:{key}",
+                    value=payload[key],
+                )
 
     def _log(self, context: _ObservationContext | None, event: str, extra: Mapping[str, Any] | None = None) -> None:
         if not self.config.enabled:
@@ -481,25 +584,34 @@ class Observability:
         if request_id is None:
             request_id = self._id_generator(6)
         traceparent_value = f"00-{trace_id_value}-{span_id}-{trace_flags_value}"
+        sanitized_sentry_tags = self._sanitize_sentry_tags(sentry_tags)
+        sanitized_breadcrumb_data = dict(breadcrumb_data or {})
+        for key in ("tenant", "http.tenant", "chatops.tenant", "chatops.site", "site", "http.site"):
+            if key in sanitized_breadcrumb_data:
+                sanitized_breadcrumb_data[key] = self._sanitize_tenant_value(
+                    self._tenant_sentry_strategy,
+                    category=f"tenant-sentry:{key}",
+                    value=sanitized_breadcrumb_data[key],
+                )
         if self._sentry_hub is not None:
             if breadcrumb_message is not None and self.config.sentry_record_breadcrumbs:
                 self._sentry_hub.add_breadcrumb(
                     category=breadcrumb_category or self.config.sentry_breadcrumb_category,
                     level=breadcrumb_level or self.config.sentry_breadcrumb_level,
                     message=breadcrumb_message,
-                    data=dict(breadcrumb_data or {}),
+                    data=sanitized_breadcrumb_data,
                 )
             scope = ensure_stack().enter_context(self._sentry_hub.push_scope())
-            if sentry_tags and hasattr(scope, "set_tag"):
-                for key, value in sentry_tags.items():
+            if sanitized_sentry_tags and hasattr(scope, "set_tag"):
+                for key, value in sanitized_sentry_tags.items():
                     scope.set_tag(key, value)
             if sentry_extra and hasattr(scope, "set_extra"):
                 for key, value in sentry_extra.items():
                     scope.set_extra(key, value)
         tags = list(self._base_datadog_tags)
-        for tag in datadog_tags:
-            tags.append(tag)
+        tags.extend(self._sanitize_datadog_tags(datadog_tags))
         success_metric, error_metric, timing_metric = metrics
+        sanitized_log_fields = self._sanitize_log_fields(log_fields)
         context = _ObservationContext(
             start=time.perf_counter(),
             stack=stack,
@@ -517,7 +629,7 @@ class Observability:
             trace_flags=trace_flags_value,
             traceparent=traceparent_value,
             tracestate=tracestate,
-            log_fields=log_fields,
+            log_fields=sanitized_log_fields,
         )
         context.span_id = span_id
         return context

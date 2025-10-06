@@ -149,6 +149,7 @@ from .observability import (
     Observability,
     ObservabilityConfig,
     RequestObservabilityConfig,
+    TenantRedactionConfig,
 )
 from .orm import (
     ORM,
@@ -322,6 +323,7 @@ __all__ = [
     "TenantContext",
     "TenantFederatedUser",
     "TenantOidcProvider",
+    "TenantRedactionConfig",
     "TenantResolver",
     "TenantSamlProvider",
     "TenantScope",
