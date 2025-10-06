@@ -175,3 +175,45 @@ async def test_hipaa_audit_custom_events_include_tenant_context() -> None:
     assert row["entity_id"] == "record-123"
     assert row["metadata"]["tenant"] == "beta"
     assert row["changes"]["fields"] == ["dob", "lab_results"]
+
+
+@pytest.mark.asyncio
+async def test_hipaa_rate_limiter_isolates_user_identities() -> None:
+    """164.312(a)(2)(i) enforces unique user identification in throttle states."""
+
+    rate_limiter = AuthenticationRateLimiter(max_attempts=1, lockout_period=dt.timedelta(minutes=10))
+    now = dt.datetime(2024, 5, 4, 9, tzinfo=dt.timezone.utc)
+    acme_key = ["tenant:acme:oncologist"]
+    beta_key = ["tenant:beta:oncologist"]
+
+    await rate_limiter.record_failure(acme_key, now)
+
+    # The beta oncologist should remain unaffected by the acme lockout state.
+    await rate_limiter.enforce(beta_key, now + dt.timedelta(seconds=1))
+
+    with pytest.raises(AuthenticationError) as excinfo:
+        await rate_limiter.enforce(acme_key, now + dt.timedelta(seconds=1))
+    assert str(excinfo.value) == "account_locked"
+
+
+@pytest.mark.asyncio
+async def test_hipaa_rate_limiter_caps_cooldown_to_policy_maximum() -> None:
+    """164.308(a)(5)(ii)(D) requires defined maximum cooldown intervals for retries."""
+
+    rate_limiter = AuthenticationRateLimiter(
+        max_attempts=5,
+        base_cooldown=dt.timedelta(seconds=4),
+        max_cooldown=dt.timedelta(seconds=8),
+    )
+    now = dt.datetime(2024, 5, 4, 10, tzinfo=dt.timezone.utc)
+    key = ["tenant:acme:researcher"]
+
+    for offset in range(4):
+        await rate_limiter.record_failure(key, now + dt.timedelta(seconds=offset))
+
+    with pytest.raises(AuthenticationError) as excinfo:
+        await rate_limiter.enforce(key, now + dt.timedelta(seconds=6))
+    assert str(excinfo.value) == "rate_limited"
+
+    # Once the capped eight second cooldown has elapsed the retry is authorised.
+    await rate_limiter.enforce(key, now + dt.timedelta(seconds=12))

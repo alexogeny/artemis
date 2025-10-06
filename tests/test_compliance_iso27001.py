@@ -148,3 +148,32 @@ def test_iso27001_sentry_tags_follow_tenant_strategy() -> None:
     assert tags is not None
     assert tags["tenant"].startswith("[hash:")
     assert tags["release"] == "1.2.3"
+
+
+def test_iso27001_rejects_unknown_logging_strategy() -> None:
+    """Annex A.8.28 mandates rejecting unvetted logging redaction strategies."""
+
+    config = ObservabilityConfig(logging=LoggingRedactionConfig(request_path="unsafe"))
+    with pytest.raises(ValueError):
+        Observability(config)
+
+
+def test_iso27001_environment_flags_require_explicit_opt_in(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Annex A.5.32 requires observability tooling changes be explicitly authorised."""
+
+    monkeypatch.setenv("MERE_OBSERVABILITY_OPENTELEMETRY_ENABLED", "yes")
+    monkeypatch.setenv("MERE_OBSERVABILITY_SENTRY_ENABLED", "1")
+    monkeypatch.setenv("MERE_OBSERVABILITY_DATADOG_ENABLED", "on")
+
+    config = ObservabilityConfig(
+        opentelemetry_enabled=False,
+        sentry_enabled=False,
+        datadog_enabled=False,
+    )
+    observability = Observability(config)
+
+    assert observability._opentelemetry_enabled is True
+    assert observability._sentry_enabled is True
+    assert observability._datadog_enabled is True

@@ -21,6 +21,7 @@ from mere.server import (
     _granian_kwargs,
     _register_current_app,
     _require_paths,
+    create_server,
 )
 from mere.tenancy import TenantResolver, TenantScope
 from tests.support import FakeConnection, FakePool
@@ -253,3 +254,22 @@ def test_soc2_database_schema_overrides_preserve_isolation() -> None:
 
     assert config.schema_for_tenant(acme_context) == "tenant_acme"
     assert config.schema_for_tenant(beta_context) == "tenant_beta_custom"
+
+
+def test_soc2_failed_bootstrap_rolls_back_registration(tmp_path: Path) -> None:
+    """SOC 2 CC5.3 requires failed startups to roll back partially registered apps."""
+
+    app = MereApp()
+    config = ServerConfig(
+        certificate_path=tmp_path / "missing.crt",
+        private_key_path=tmp_path / "missing.key",
+        profile="production",
+    )
+
+    with pytest.raises(RuntimeError):
+        create_server(app, config)
+
+    with pytest.raises(RuntimeError):
+        _current_app_loader()
+
+    _clear_current_app()

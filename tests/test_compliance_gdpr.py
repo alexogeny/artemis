@@ -129,3 +129,30 @@ def test_gdpr_unknown_tenant_is_rejected() -> None:
     resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
     with pytest.raises(TenantResolutionError):
         resolver.context_for("beta")
+
+
+def test_gdpr_requires_configured_tenant_allowlist() -> None:
+    """Article 24(1) accountability demands controllers maintain tenant allowlists."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=())
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve("acme.demo.example.com")
+
+
+def test_gdpr_blocks_control_characters_in_hosts() -> None:
+    """Article 32(1)(a) defends against control character host header injection."""
+
+    resolver = TenantResolver(site="demo", domain="example.com", allowed_tenants=("acme",))
+    with pytest.raises(TenantResolutionError):
+        resolver.resolve("acme.demo.example.com\x00")
+
+
+def test_gdpr_sentry_tags_redacted_for_incident_reports() -> None:
+    """Article 33(1) requires breach reporting tools to omit tenant identifiers."""
+
+    config = ObservabilityConfig(tenant=TenantRedactionConfig(sentry_tags="redact"))
+    observability = Observability(config)
+    tags = observability._sanitize_sentry_tags({"tenant": "acme", "issue": "timeout"})
+    assert tags is not None
+    assert tags["tenant"] == "[redacted]"
+    assert tags["issue"] == "timeout"
