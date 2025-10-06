@@ -1953,12 +1953,19 @@ def test_oidc_authenticator_handles_naive_now() -> None:
 
 def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
     class DummyResponse:
-        def __init__(self, payload: bytes, status: int = 200) -> None:
+        def __init__(self, payload: bytes, status: int = 200, url: str = "https://example.com/jwks") -> None:
             self._payload = payload
             self.status = status
+            self._url = url
 
         def read(self) -> bytes:
             return self._payload
+
+        def getcode(self) -> int:
+            return self.status
+
+        def geturl(self) -> str:
+            return self._url
 
         def __enter__(self) -> "DummyResponse":
             return self
@@ -1968,14 +1975,47 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda uri, timeout=5: DummyResponse(json.dumps({"keys": []}).encode()),
+        lambda uri, timeout=5, context=None: DummyResponse(json.dumps({"keys": []}).encode()),
     )
     document = authentication_module._default_jwks_fetcher("https://example.com/jwks")
     assert document["keys"] == []
 
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("http://example.com/jwks")
+    assert str(exc.value) == "jwks_insecure_uri"
+
+    monkeypatch.setenv("MERE_OIDC_JWKS_ALLOWED_HOSTS", "example.com")
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://malicious.example.net/jwks")
+    assert str(exc.value) == "jwks_disallowed_host"
+
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda uri, timeout=5: DummyResponse(json.dumps({"keys": []}).encode(), status=500),
+        lambda uri, timeout=5, context=None: DummyResponse(
+            json.dumps({"keys": []}).encode(), url="https://malicious.example.net/jwks"
+        ),
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "jwks_disallowed_host"
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5, context=None: DummyResponse(
+            json.dumps({"keys": []}).encode(), url="http://example.com/jwks"
+        ),
+    )
+    with pytest.raises(AuthenticationError) as exc:
+        authentication_module._default_jwks_fetcher("https://example.com/jwks")
+    assert str(exc.value) == "jwks_insecure_redirect"
+
+    monkeypatch.delenv("MERE_OIDC_JWKS_ALLOWED_HOSTS")
+
+    monkeypatch.setattr(
+        "urllib.request.urlopen",
+        lambda uri, timeout=5, context=None: DummyResponse(
+            json.dumps({"keys": []}).encode(), status=500
+        ),
     )
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._default_jwks_fetcher("https://example.com/jwks")
@@ -1983,7 +2023,7 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda uri, timeout=5: DummyResponse(b"not json"),
+        lambda uri, timeout=5, context=None: DummyResponse(b"not json"),
     )
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._default_jwks_fetcher("https://example.com/jwks")
@@ -1991,13 +2031,13 @@ def test_default_jwks_fetcher(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(
         "urllib.request.urlopen",
-        lambda uri, timeout=5: DummyResponse(json.dumps([1, 2, 3]).encode()),
+        lambda uri, timeout=5, context=None: DummyResponse(json.dumps([1, 2, 3]).encode()),
     )
     with pytest.raises(AuthenticationError) as exc:
         authentication_module._default_jwks_fetcher("https://example.com/jwks")
     assert str(exc.value) == "invalid_jwks"
 
-    def raise_os_error(uri: str, timeout: int = 5) -> None:
+    def raise_os_error(uri: str, timeout: int = 5, context: object | None = None) -> None:
         raise OSError("boom")
 
     monkeypatch.setattr("urllib.request.urlopen", raise_os_error)
